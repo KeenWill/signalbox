@@ -2,11 +2,14 @@
 
 use signalbox_application::UsageTokenAxes;
 use signalbox_domain::{DurableCommandId, ModelCallId, SessionId, TurnId};
-use signalbox_model_provider_runtime::{ProviderTargetRelation, relate_provider_target};
+use signalbox_model_provider_runtime::{
+    InvocationProcessObserver, ProviderTargetRelation, relate_provider_target,
+};
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference,
-    DeliveryMode, ModelOperation, ModelRuntime, Observation, ObservationFact, PreparationOutcome,
-    ProviderCompactionMode, RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
+    DeliveryMode, ModelOperation, ModelRuntime, Observation, ObservationFact, ObservationSink,
+    PreparationOutcome, ProviderCompactionMode, RequestedTarget, ResolvedTarget, TerminalEvidence,
+    TokenUsage,
 };
 use signalbox_persistence::{
     session_metadata::SessionMetadataRepository,
@@ -20,11 +23,12 @@ const TITLE_PROMPT: &str = "Name this conversation in three to six words. Use pl
 /// The title request asks for at most six words.
 const TITLE_WORDS: usize = 6;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct SessionTitles {
     pool: sqlx::PgPool,
     models: Arc<HubModelConfiguration>,
     factory: ModelRuntimeFactory,
+    processes: crate::credential_invocations::CredentialInvocationProcesses,
 }
 
 #[derive(Debug)]
@@ -41,16 +45,24 @@ impl From<sqlx::Error> for TitleError {
     }
 }
 
+impl From<signalbox_persistence::model_execution::ModelCallRepositoryError> for TitleError {
+    fn from(_: signalbox_persistence::model_execution::ModelCallRepositoryError) -> Self {
+        Self::Database
+    }
+}
+
 impl SessionTitles {
     pub(crate) fn new(
         pool: sqlx::PgPool,
         models: Arc<HubModelConfiguration>,
         factory: ModelRuntimeFactory,
+        processes: crate::credential_invocations::CredentialInvocationProcesses,
     ) -> Self {
         Self {
             pool,
             models,
             factory,
+            processes,
         }
     }
 
@@ -96,7 +108,7 @@ impl SessionTitles {
         let credential = signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
             &self.pool, session, family, route.migration_credential_family(),
         ).await.map_err(|error| match error { sqlx::Error::RowNotFound => TitleError::Configuration, _ => TitleError::Database })?;
-        let call = SessionTitleCall {
+        let mut call = SessionTitleCall {
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             session,
             selection,
@@ -106,8 +118,15 @@ impl SessionTitles {
             initial_for_turn,
         };
         let repository = SessionTitleRepository::new(self.pool.clone());
-        if !repository.prepare(&call).await? {
-            return Ok(None);
+        if !repository
+            .prepare(&mut call, &self.models.credential_pool_runtime_catalog())
+            .await?
+        {
+            return if initial_for_turn.is_some() {
+                Ok(None)
+            } else {
+                Err(TitleError::Generation)
+            };
         }
         let resolved = ResolvedTarget::new(definition.provider_model().to_owned());
         let input_budget = definition
@@ -136,12 +155,7 @@ impl SessionTitles {
         operation.system = Some(TITLE_PROMPT.to_owned());
         operation.delivery = DeliveryMode::Buffered;
         operation.provider_compaction = ProviderCompactionMode::Suppressed;
-        if !fit_title_context(
-            &mut operation,
-            &conversation,
-            route.adapter(),
-            input_budget as usize,
-        ) {
+        if !fit_title_context(&mut operation, &conversation, input_budget as usize) {
             repository
                 .finish(call.call, None, usage_axes(TokenUsage::unreported()))
                 .await?;
@@ -162,18 +176,38 @@ impl SessionTitles {
             }
         };
         repository.authorize(call.call).await?;
-        let mut observations: Vec<Observation<ModelCallId>> = Vec::new();
+        let mut observations = TitleObservations {
+            call: call.call,
+            processes: self.processes.clone(),
+            group: None,
+            mismatch: false,
+            observations: Vec::new(),
+        };
         let report = runtime
             .execute(prepared, &mut observations, CancellationSignal::never())
             .await;
+        self.processes
+            .finished(
+                call.call,
+                observations.group,
+                report.correlation == call.call
+                    && matches!(report.evidence, TerminalEvidence::ProvenUnsent(_)),
+            )
+            .await;
+        if let Err(usage) = require_title_correlation(report.correlation, call.call) {
+            repository
+                .finish(call.call, None, usage_axes(usage))
+                .await?;
+            return Err(TitleError::Generation);
+        }
         let same_target = |reported| {
             !matches!(
                 relate_provider_target(&resolved, reported),
                 ProviderTargetRelation::DifferentLineage
             )
         };
-        let mut valid = report.correlation == call.call
-            && observations.iter().all(|observation| {
+        let mut valid = !observations.mismatch
+            && observations.observations.iter().all(|observation| {
                 observation.correlation == call.call
                     && match &observation.fact {
                         ObservationFact::ProviderModelReported(reported) => same_target(reported),
@@ -243,48 +277,54 @@ impl SessionTitles {
     }
 }
 
+struct TitleObservations {
+    call: ModelCallId,
+    processes: crate::credential_invocations::CredentialInvocationProcesses,
+    group: Option<u32>,
+    mismatch: bool,
+    observations: Vec<Observation<ModelCallId>>,
+}
+
+impl ObservationSink<ModelCallId> for TitleObservations {
+    fn register_process(
+        &mut self,
+        correlation: ModelCallId,
+        group: u32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        if correlation != self.call {
+            self.mismatch = true;
+            return Box::pin(async { false });
+        }
+        self.group = Some(group);
+        self.processes.register(self.call, group)
+    }
+
+    fn observe(&mut self, observation: Observation<ModelCallId>) {
+        self.observations.push(observation);
+    }
+}
+
 fn fit_title_context(
     operation: &mut ModelOperation<ModelCallId>,
     source: &str,
-    adapter: crate::configuration::ModelAdapter,
-    byte_budget: usize,
+    input_budget: usize,
 ) -> bool {
-    let measure = |operation: &ModelOperation<ModelCallId>| match adapter {
-        crate::configuration::ModelAdapter::Anthropic => {
-            signalbox_model_runtime_anthropic::serialized_request_bytes(operation)
-        }
-        crate::configuration::ModelAdapter::OpenAi => {
-            signalbox_model_runtime_openai::serialized_request_bytes(operation)
-        }
-        crate::configuration::ModelAdapter::CodexCli => {
-            signalbox_model_runtime_codex_cli::serialized_request_bytes(operation)
-        }
-        crate::configuration::ModelAdapter::ClaudeCli => {
-            signalbox_model_runtime_claude_cli::serialized_request_bytes(operation)
-        }
-    };
-    operation.messages = vec![ConversationMessage::user_text(source)];
-    if measure(operation).is_some_and(|bytes| bytes <= byte_budget) {
-        return !source.is_empty();
-    }
-    let mut lower = 0;
-    let mut upper = source.len();
-    let mut retained = 0;
-    while lower <= upper {
-        let candidate = lower + (upper - lower) / 2;
-        let end = source.floor_char_boundary(candidate);
-        operation.messages = vec![ConversationMessage::user_text(&source[..end])];
-        if measure(operation).is_some_and(|bytes| bytes <= byte_budget) {
-            retained = end;
-            lower = candidate + 1;
-        } else if candidate == 0 {
-            break;
-        } else {
-            upper = candidate - 1;
-        }
-    }
-    operation.messages = vec![ConversationMessage::user_text(&source[..retained])];
-    retained > 0
+    // One input byte per available token is conservative for conversation text.
+    // Reserve 1024 bytes for provider framing, in addition to the fixed prompt.
+    const REQUEST_MARGIN_BYTES: usize = 1024;
+    let available = input_budget.saturating_sub(TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES);
+    let end = source.floor_char_boundary(source.len().min(available));
+    operation.messages = vec![ConversationMessage::user_text(&source[..end])];
+    end > 0
+}
+
+fn require_title_correlation(
+    observed: ModelCallId,
+    expected: ModelCallId,
+) -> Result<(), TokenUsage> {
+    (observed == expected)
+        .then_some(())
+        .ok_or(TokenUsage::unreported())
 }
 
 fn usage_axes(usage: TokenUsage) -> UsageTokenAxes {
@@ -310,44 +350,41 @@ fn normalize_title(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    reason = "fixtures require valid Codex request encoding"
-)]
 mod tests {
     use super::*;
 
     #[test]
-    fn title_context_budget_includes_multibyte_text_escaping_and_request_framing() {
+    fn title_context_uses_bytes_and_leaves_room_for_prompt_and_framing() {
         let mut operation = ModelOperation::new(
             ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             CredentialReference::new("fixture"),
             RequestedTarget::new("fixture"),
             ResolvedTarget::new("gpt-example"),
-            vec![ConversationMessage::user_text("x")],
+            Vec::new(),
             signalbox_model_runtime::ModelSettings::new(256),
         );
-        operation.system = Some(TITLE_PROMPT.to_owned());
-        // One CJK scalar and three escaped characters occupy nine request bytes.
-        let budget = signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
-            .expect("fixture request")
-            + 8;
-        let source = "界\"\\\n".repeat(20);
-        assert!(fit_title_context(
-            &mut operation,
-            &source,
-            crate::configuration::ModelAdapter::CodexCli,
-            budget
-        ));
+        let budget = TITLE_PROMPT.len() + 1024 + 4;
+        assert!(fit_title_context(&mut operation, "界界", budget));
         assert_eq!(
             operation.messages,
-            vec![ConversationMessage::user_text("界\"\\\n")]
+            vec![ConversationMessage::user_text("界")]
         );
-        assert!(
-            signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
-                .expect("bounded request")
-                <= budget
+        assert!(!fit_title_context(
+            &mut operation,
+            "text",
+            TITLE_PROMPT.len()
+        ));
+    }
+
+    #[test]
+    fn another_calls_terminal_report_leaves_title_usage_unreported() {
+        let expected = ModelCallId::from_uuid(uuid::Uuid::from_u128(1));
+        let observed = ModelCallId::from_uuid(uuid::Uuid::from_u128(2));
+        assert_eq!(
+            require_title_correlation(observed, expected),
+            Err(TokenUsage::unreported())
         );
+        assert_eq!(require_title_correlation(expected, expected), Ok(()));
     }
 
     #[test]

@@ -498,7 +498,8 @@ preserving other metadata under the session lock.
 `{ "title": "..." }` without saving; accepting a suggestion uses the metadata
 PATCH route. Title calls record their target, credentials, send boundary,
 completion, and reported token axes as session-level `session_title` usage
-evidence.
+evidence. They use ordinary credential-pool admission and invocation capacity; a
+terminal report naming another call leaves usage unreported.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

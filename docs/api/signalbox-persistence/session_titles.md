@@ -26,8 +26,9 @@ impl session_titles::SessionTitleRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn prepare(
         &self,
-        call: &session_titles::SessionTitleCall,
-    ) -> result::Result<bool, error::Error>;
+        call: &mut session_titles::SessionTitleCall,
+        pools: &model_execution::CredentialPoolRuntimeCatalog,
+    ) -> result::Result<bool, model_execution::ModelCallRepositoryError>;
     pub async fn conversation(
         &self,
         session: signalbox_domain::SessionId,

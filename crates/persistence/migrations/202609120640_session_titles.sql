@@ -207,3 +207,47 @@ $$;
 CREATE TRIGGER session_title_projects_terminal_usage AFTER UPDATE ON session_title_model_call
     FOR EACH ROW WHEN (NEW.state_kind = 'terminal' AND OLD.state_kind <> 'terminal')
     EXECUTE FUNCTION project_terminal_session_title_usage();
+
+ALTER TABLE credential_invocation_reservation
+    DROP CONSTRAINT credential_invocation_reservation_model_call_id_fkey,
+    ADD CONSTRAINT credential_invocation_reservation_model_call_id_fkey
+        FOREIGN KEY (model_call_id) REFERENCES model_call_identity (model_call_id);
+
+CREATE OR REPLACE FUNCTION guard_credential_invocation_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        PERFORM 1 FROM credential_invocation_capacity WHERE profile = NEW.profile FOR UPDATE;
+        IF EXISTS (SELECT 1 FROM credential_invocation_capacity capacity WHERE capacity.profile = NEW.profile
+            AND capacity.max_concurrent_invocations <= (SELECT count(*) FROM credential_invocation_reservation
+                WHERE profile = NEW.profile AND released_at IS NULL)) THEN
+            RAISE EXCEPTION 'credential invocation bound is saturated' USING ERRCODE = '23514';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM model_call WHERE model_call_id = NEW.model_call_id
+            AND credential_reference = NEW.profile AND state_kind = 'prepared')
+           AND NOT EXISTS (SELECT 1 FROM session_title_model_call WHERE model_call_id = NEW.model_call_id
+            AND credential_reference = NEW.profile AND state_kind = 'prepared') THEN
+            RAISE EXCEPTION 'invocation reservation lacks selected prepared call' USING ERRCODE = '23514';
+        END IF;
+    ELSIF TG_OP = 'DELETE' OR OLD.released_at IS NOT NULL
+       OR (NEW.model_call_id, NEW.profile) IS DISTINCT FROM (OLD.model_call_id, OLD.profile)
+       OR (OLD.process_group_id IS NOT NULL AND (NEW.process_group_id, NEW.process_group_start_time)
+           IS DISTINCT FROM (OLD.process_group_id, OLD.process_group_start_time)) THEN
+        RAISE EXCEPTION 'invocation reservation identity is immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION release_terminal_title_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.state_kind = 'terminal' AND NOT EXISTS (
+        SELECT 1 FROM credential_invocation_reservation
+         WHERE model_call_id = NEW.model_call_id AND process_group_id IS NOT NULL
+    ) THEN
+        PERFORM release_credential_invocation(NEW.model_call_id);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER session_title_invocation_terminal AFTER UPDATE OF state_kind ON session_title_model_call
+    FOR EACH ROW EXECUTE FUNCTION release_terminal_title_reservation();

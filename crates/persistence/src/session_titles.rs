@@ -34,7 +34,11 @@ impl SessionTitleRepository {
 
     /// Claims an initial call once, only for the first completed turn and an unset title.
     /// On-demand calls require only an existing session.
-    pub async fn prepare(&self, call: &SessionTitleCall) -> Result<bool, sqlx::Error> {
+    pub async fn prepare(
+        &self,
+        call: &mut SessionTitleCall,
+        pools: &crate::model_execution::CredentialPoolRuntimeCatalog,
+    ) -> Result<bool, crate::model_execution::ModelCallRepositoryError> {
         let mut tx = self.pool.begin().await?;
         let exists =
             sqlx::query_scalar::<_, uuid::Uuid>(crate::lock_inventory::REPLACE_SESSION_METADATA)
@@ -57,6 +61,23 @@ impl SessionTitleRepository {
                 return Ok(false);
             }
         }
+        crate::model_execution::credential_pool::acquire_model_call_outbox_order_guard(&mut tx)
+            .await?;
+        let Some(credential) =
+            crate::model_execution::credential_pool::select_session_pool_credential(
+                &mut tx,
+                call.session,
+                call.target,
+                signalbox_application::ModelCallCredentialReference::new(
+                    &call.credential_reference,
+                ),
+                pools,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        call.credential_reference = credential.as_str().to_owned();
         sqlx::query("INSERT INTO session_title_model_call
             (model_call_id, session_id, direct_model_selection_id, resolved_provider_model_identity_id,
              credential_reference, usage_input_includes_cache_tokens, initial_for_turn, state_kind)
@@ -65,6 +86,8 @@ impl SessionTitleRepository {
             .bind(call.target.identity().into_uuid()).bind(&call.credential_reference)
             .bind(call.input_includes_cache_tokens).bind(call.initial_for_turn.map(TurnId::into_uuid))
             .execute(&mut *tx).await?;
+        crate::credential_invocations::reserve(&mut tx, call.call, &call.credential_reference)
+            .await?;
         tx.commit().await?;
         Ok(true)
     }

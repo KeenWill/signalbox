@@ -30,7 +30,7 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     let (fixture, mut model_repository, authorized) =
         authorize_checkpointed_model_call(&pool, seed).await?;
     let titles = SessionTitleRepository::new(pool.clone());
-    let call = SessionTitleCall {
+    let mut call = SessionTitleCall {
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         session: fixture.session,
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
@@ -42,7 +42,7 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         initial_for_turn: Some(fixture.turn),
     };
     assert!(
-        !titles.prepare(&call).await?,
+        !titles.prepare(&mut call, &Default::default()).await?,
         "an active turn must not trigger a title call"
     );
     let observation = authorized
@@ -67,13 +67,16 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             |_| TurnId::from_uuid(Uuid::now_v7()),
         )
         .await?;
-    assert!(titles.prepare(&call).await?);
+    assert!(titles.prepare(&mut call, &Default::default()).await?);
     assert!(
         !titles
-            .prepare(&SessionTitleCall {
-                call: ModelCallId::from_uuid(Uuid::now_v7()),
-                ..call.clone()
-            })
+            .prepare(
+                &mut SessionTitleCall {
+                    call: ModelCallId::from_uuid(Uuid::now_v7()),
+                    ..call.clone()
+                },
+                &Default::default()
+            )
             .await?,
         "duplicate completion delivery must not call the model again"
     );
@@ -161,12 +164,12 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             )
             .await?
     );
-    let suggestion = SessionTitleCall {
+    let mut suggestion = SessionTitleCall {
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         initial_for_turn: None,
         ..call
     };
-    assert!(titles.prepare(&suggestion).await?);
+    assert!(titles.prepare(&mut suggestion, &Default::default()).await?);
     titles.authorize(suggestion.call).await?;
     titles
         .finish(suggestion.call, Some("Suggested new name"), usage)
@@ -199,6 +202,107 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     assert_eq!(page.calls()[0].scope, UsageCallScope::SessionTitle);
     assert_eq!(page.calls()[0].tokens.input, Some(17));
     assert_eq!(page.calls()[0].tokens.output, Some(5));
+    // Title calls compete for the same registered profiles as ordinary calls.
+    use crate::model_call_execution_and_recovery::{
+        active_credential_pool_fixture, prepare_and_authorize_pool_call,
+    };
+    use signalbox_persistence::{
+        credential_invocations, model_execution::CredentialPoolRuntimeExhaustion,
+    };
+    use std::num::NonZeroU32;
+    credential_invocations::replace_registrations(
+        &pool,
+        &[("available-title-home".to_owned(), NonZeroU32::new(1))],
+    )
+    .await?;
+    sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin) VALUES ('profile_quarantine', 'quarantined-title-home', 'codex_home')").execute(&pool).await?;
+    let policy = CredentialPoolRuntimePolicy::new(
+        "title-pool",
+        [
+            "quarantined-title-home",
+            "displaced-title-home",
+            "available-title-home",
+        ]
+        .into_iter()
+        .map(|reference| {
+            CredentialPoolRuntimeMember::new(reference, NonZeroU32::new(1).expect("priority"))
+        })
+        .collect::<Vec<_>>(),
+        CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    );
+    let pool_seed = seed + 0x1000;
+    let (pool_session, pool_turn, pool_repository) = active_credential_pool_fixture(
+        &pool,
+        pool_seed,
+        "title-pool",
+        &[
+            "displaced-title-home",
+            "quarantined-title-home",
+            "available-title-home",
+        ],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let pool_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(pool_seed + 4),
+    ));
+    let pools = std::collections::HashMap::from([(pool_target, policy)]);
+    let pool_repository = pool_repository.with_credential_pools(pools.clone());
+    let (ordinary, _) =
+        prepare_and_authorize_pool_call(&pool_repository, pool_session, pool_seed + 100).await?;
+    sqlx::query("INSERT INTO credential_pool_member_action (pool_name, credential_reference, action_kind, observed_session_id, observed_turn_id, observation_model_call_id, cause_kind) VALUES ('title-pool','displaced-title-home','switch_next_turn',$1,$2,$3,'credential_rejected')")
+        .bind(pool_session.into_uuid()).bind(pool_turn.into_uuid()).bind(ordinary.call().id().into_uuid()).execute(&pool).await?;
+    suggestion.session = pool_session;
+    suggestion.target = pool_target;
+
+    let mut admitted = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        ..suggestion.clone()
+    };
+    assert!(titles.prepare(&mut admitted, &pools).await?);
+    assert_eq!(admitted.credential_reference, "available-title-home");
+    let mut contended = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        ..suggestion
+    };
+    assert!(
+        !titles.prepare(&mut contended, &pools).await?,
+        "a saturated pool cannot invoke a title model"
+    );
+    titles
+        .finish(
+            admitted.call,
+            None,
+            UsageTokenAxes {
+                input: None,
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+        )
+        .await?;
+    assert!(
+        titles.prepare(&mut contended, &pools).await?,
+        "an uninvoked terminal title releases its reservation"
+    );
+    titles.authorize(contended.call).await?;
+    credential_invocations::register_process(&pool, contended.call, 42, "title-process-fixture")
+        .await?;
+    titles.finish(contended.call, None, usage).await?;
+    assert_eq!(
+        credential_invocations::process_group(&pool, contended.call).await?,
+        Some((42, "title-process-fixture".to_owned()))
+    );
+    credential_invocations::release(&pool, contended.call).await?;
+    assert_eq!(
+        credential_invocations::process_group(&pool, contended.call).await?,
+        None
+    );
     pool.close().await;
     drop(container);
     Ok(())
