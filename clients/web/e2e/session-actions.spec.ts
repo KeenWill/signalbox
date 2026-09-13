@@ -131,10 +131,9 @@ test('two synchronous confirmations send one command', async ({ page }) => {
 for (const viewport of [
   { name: 'desktop', width: 1440, height: 1000 },
   { name: 'phone', width: 390, height: 844 },
+  { name: 'minimum phone', width: 320, height: 844 },
 ]) {
-  test(`all session actions fit the two-line ${viewport.name} header`, async ({
-    page,
-  }, testInfo) => {
+  test(`all session actions fit the ${viewport.name} header`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport)
     const api = await sessionApi(page, true)
     api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
@@ -142,7 +141,10 @@ for (const viewport of [
     const header = page.locator('.session-compact-header')
     await expect(header.locator('.session-header-line')).toHaveCount(2)
     const box = await header.boundingBox()
-    expect(box?.height).toBeLessThanOrEqual(70)
+    if (viewport.width >= 390) expect(box?.height).toBeLessThanOrEqual(70)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      viewport.width,
+    )
     for (const name of ['Approve', 'Deny', 'Cancel turn', 'Set goal', 'Clear goal']) {
       const control = header.getByRole('button', { name, exact: true })
       await expect(control).toBeVisible()
@@ -159,6 +161,6 @@ for (const viewport of [
     await header.getByRole('button', { name: 'Deny', exact: true }).click()
     await expect(page.getByRole('textbox', { name: 'Note (optional)' })).toBeVisible()
     await expect(header.getByRole('button', { name: 'Confirm', exact: true })).toHaveCount(0)
-    expect((await header.boundingBox())?.height).toBeLessThanOrEqual(70)
+    if (viewport.width >= 390) expect((await header.boundingBox())?.height).toBeLessThanOrEqual(70)
   })
 }
