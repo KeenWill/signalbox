@@ -8523,7 +8523,7 @@ function assertTimelineDetailPage(value) {
           }
           if (physical !== null) {
             if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {
-              assertMediaType(
+              assertCanonicalMediaType(
                 physical.result_media_reference.media_type,
                 `${path}.body.tools[0].evidence.result_media_reference.media_type`,
               );
@@ -9444,6 +9444,13 @@ function assertMediaType(value, path) {
     !isMimeValue(value)
   ) {
     fail(path, "a MIME value of at most 255 UTF-8 bytes");
+  }
+}
+
+function assertCanonicalMediaType(value, path) {
+  assertMediaType(value, path);
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(value)) {
+    fail(path, "a canonical lowercase MIME type without parameters");
   }
 }
 

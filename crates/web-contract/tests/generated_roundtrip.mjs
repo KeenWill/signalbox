@@ -3543,3 +3543,15 @@ test("completed tool media requires a MIME type within its UTF-8 byte bound", ()
   media.media_type = `application/${"x".repeat(243)}`;
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
 });
+
+test("completed tool media requires canonical MIME spelling", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["APPLICATION/PDF", "application/pdf; charset=utf-8"]) {
+    media.media_type = value;
+    assert.throws(
+      () => decodeWebSessionTimelineDetailPage(page),
+      /a canonical lowercase MIME type without parameters/,
+    );
+  }
+});
