@@ -4,9 +4,11 @@ use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
 use signalbox_application::UsageTokenAxes;
 use signalbox_domain::{
-    DirectModelSelection, ModelCallId, ResolvedProviderTarget, SessionId, TurnId,
+    DirectModelSelection, DurableCommandId, ModelCallId, ResolvedProviderTarget, SessionId, TurnId,
 };
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
+
+use crate::session_metadata::SessionMetadataRepositoryError;
 
 /// Facts frozen before a title model is invoked.
 #[derive(Clone, Debug)]
@@ -173,16 +175,70 @@ impl SessionTitleRepository {
         title: Option<&str>,
         usage: UsageTokenAxes,
     ) -> Result<(), sqlx::Error> {
-        let affected = sqlx::query("UPDATE session_title_model_call
+        finish_call(&mut *self.pool.acquire().await?, call, title, usage).await
+    }
+
+    /// Validates a generated title against preserved metadata before recording success.
+    /// Initial-title installation and terminal usage commit in the same transaction.
+    /// An invalid combined snapshot records failed generation and returns no title.
+    pub async fn finish_generated(
+        &self,
+        command_id: DurableCommandId,
+        call: ModelCallId,
+        mut title: Option<String>,
+        usage: UsageTokenAxes,
+    ) -> Result<Option<String>, SessionMetadataRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        if let Some(value) = title.as_ref() {
+            let row = sqlx::query(
+                "SELECT session_id, initial_for_turn IS NOT NULL AS initial
+                FROM session_title_model_call WHERE model_call_id = $1",
+            )
+            .bind(call.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let session = SessionId::from_uuid(row.try_get("session_id")?);
+            let initial: bool = row.try_get("initial")?;
+            match crate::session_metadata::accept_generated_title(
+                &mut transaction,
+                initial.then_some(command_id),
+                session,
+                value.clone(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(SessionMetadataRepositoryError::InvalidTitleMerge(_)) => title = None,
+                Err(error) => return Err(error),
+            }
+        }
+        finish_call(&mut transaction, call, title.as_deref(), usage).await?;
+        transaction.commit().await.map_err(|error| {
+            if crate::commit_failure_is_ambiguous(&error) {
+                SessionMetadataRepositoryError::CommitAmbiguous(error)
+            } else {
+                error.into()
+            }
+        })?;
+        Ok(title)
+    }
+}
+
+async fn finish_call(
+    connection: &mut PgConnection,
+    call: ModelCallId,
+    title: Option<&str>,
+    usage: UsageTokenAxes,
+) -> Result<(), sqlx::Error> {
+    let affected = sqlx::query("UPDATE session_title_model_call
             SET state_kind = 'terminal', terminal_at = statement_timestamp(), title = $2,
                 input_tokens = $3, output_tokens = $4, cache_creation_input_tokens = $5, cache_read_input_tokens = $6
             WHERE model_call_id = $1 AND state_kind IN ('prepared', 'in_flight')")
             .bind(call.into_uuid()).bind(title).bind(usage.input.map(Decimal::from))
             .bind(usage.output.map(Decimal::from)).bind(usage.cache_creation_input.map(Decimal::from))
-            .bind(usage.cache_read_input.map(Decimal::from)).execute(&self.pool).await?.rows_affected();
-        if affected != 1 {
-            return Err(sqlx::Error::RowNotFound);
-        }
-        Ok(())
+            .bind(usage.cache_read_input.map(Decimal::from)).execute(connection).await?.rows_affected();
+    if affected != 1 {
+        return Err(sqlx::Error::RowNotFound);
     }
+    Ok(())
 }

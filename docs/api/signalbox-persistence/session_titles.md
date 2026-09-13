@@ -45,5 +45,15 @@ impl session_titles::SessionTitleRepository {
         title: option::Option<&str>,
         usage: signalbox_application::UsageTokenAxes,
     ) -> result::Result<(), error::Error>;
+    pub async fn finish_generated(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        call: signalbox_domain::ModelCallId,
+        title: option::Option<string::String>,
+        usage: signalbox_application::UsageTokenAxes,
+    ) -> result::Result<
+        option::Option<string::String>,
+        session_metadata::SessionMetadataRepositoryError,
+    >;
 }
 ```

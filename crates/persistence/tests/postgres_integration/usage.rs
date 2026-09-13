@@ -182,18 +182,57 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         cache_creation_input: None,
         cache_read_input: None,
     };
-    titles
-        .finish(call.call, Some("Database indexing work"), usage)
-        .await?;
     let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    sqlx::query("ALTER TABLE session_title_model_call ADD CONSTRAINT fixture_reject_title CHECK (title IS NULL)")
+        .execute(&pool).await?;
+    assert!(
+        titles
+            .finish_generated(
+                command,
+                call.call,
+                Some("Database indexing work".to_owned()),
+                usage
+            )
+            .await
+            .is_err()
+    );
     assert!(
         metadata
-            .install_generated_title(
-                command,
-                fixture.session,
-                "Database indexing work".to_owned()
-            )
+            .load_session_metadata(fixture.session)
             .await?
+            .expect("session")
+            .content()
+            .title()
+            .is_none(),
+        "a failed terminal write must roll back the installed title"
+    );
+    assert!(
+        SessionMetadataRepository::for_title_update(pool.clone())
+            .load_command(command)
+            .await?
+            .is_none(),
+        "the metadata receipt rolls back with the title"
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT state_kind FROM session_title_model_call WHERE model_call_id = $1",
+    )
+    .bind(call.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, "in_flight");
+    sqlx::query("ALTER TABLE session_title_model_call DROP CONSTRAINT fixture_reject_title")
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        titles
+            .finish_generated(
+                command,
+                call.call,
+                Some("Database indexing work".to_owned()),
+                usage
+            )
+            .await?,
+        Some("Database indexing work".to_owned())
     );
     let snapshot = metadata
         .load_session_metadata(fixture.session)
@@ -229,15 +268,6 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             manual,
         ))
         .await?;
-    assert!(
-        !metadata
-            .install_generated_title(
-                DurableCommandId::from_uuid(Uuid::now_v7()),
-                fixture.session,
-                "Late generated name".to_owned()
-            )
-            .await?
-    );
     let mut suggestion = SessionTitleCall {
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         initial_for_turn: None,
@@ -246,7 +276,12 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     assert!(titles.prepare(&mut suggestion, &Default::default()).await?);
     titles.authorize(suggestion.call).await?;
     titles
-        .finish(suggestion.call, Some("Suggested new name"), usage)
+        .finish_generated(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            suggestion.call,
+            Some("Suggested new name".to_owned()),
+            usage,
+        )
         .await?;
     assert_eq!(
         metadata
@@ -432,6 +467,137 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         let retained: (String, bool) = sqlx::query_as("SELECT title.state_kind, reservation.released_at IS NOT NULL FROM session_title_model_call title JOIN credential_invocation_reservation reservation USING (model_call_id) WHERE model_call_id = $1")
             .bind(abandoned.call.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(retained, ("terminal".to_owned(), true));
+    }
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn generated_titles_validate_preserved_metadata_and_keep_concurrent_manual_names()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::UsageTokenAxes;
+    use signalbox_domain::{ReplaceSessionMetadata, SessionMetadataContent};
+    use signalbox_persistence::{
+        session_metadata::SessionMetadataRepository,
+        session_titles::{SessionTitleCall, SessionTitleRepository},
+    };
+    let (container, pool, _) = migrated_postgres().await?;
+    let titles = SessionTitleRepository::new(pool.clone());
+    let metadata = SessionMetadataRepository::new(pool.clone());
+    for (index, manual) in [false, true].into_iter().enumerate() {
+        let seed = 0x99_000 + index as u128 * 0x100;
+        let (fixture, mut model_repository, authorized) =
+            authorize_checkpointed_model_call(&pool, seed).await?;
+        model_repository
+            .commit_observation(
+                fixture.session,
+                authorized
+                    .observation_correlation()
+                    .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                        assistant_text: vec![
+                            AssistantText::try_new("Indexing complete".to_owned()).expect("text"),
+                        ],
+                    }),
+                signalbox_application::ModelCallTerminalIdentityCandidates::Exact(
+                    ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                        vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    )),
+                ),
+                |_| TurnId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let mut call = SessionTitleCall {
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            session: fixture.session,
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                Uuid::from_u128(seed + 6),
+            )),
+            credential_reference: "codex-title-fixture".to_owned(),
+            input_includes_cache_tokens: false,
+            initial_for_turn: Some(fixture.turn),
+        };
+        assert!(titles.prepare(&mut call, &Default::default()).await?);
+        // The metadata writer wins after the initial claim, before model completion.
+        let preserved = if manual {
+            SessionMetadataContent::try_new(
+                Some("My chosen name".to_owned()),
+                vec!["work".to_owned()],
+                vec![],
+                true,
+            )
+        } else {
+            SessionMetadataContent::try_new(
+                None,
+                vec!["work".to_owned()],
+                vec![(
+                    "source".to_owned(),
+                    "x".repeat(
+                        SessionMetadataContent::MAX_TOTAL_UTF8_BYTES
+                            - "work".len()
+                            - "source".len(),
+                    ),
+                )],
+                true,
+            )
+        }
+        .expect("preserved metadata fits exactly");
+        metadata
+            .handle(ReplaceSessionMetadata::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                fixture.session,
+                preserved.clone(),
+            ))
+            .await?;
+        // Both automatic completion and an on-demand suggestion validate the full snapshot.
+        for initial in [true, false] {
+            if !initial {
+                call.call = ModelCallId::from_uuid(Uuid::now_v7());
+                call.initial_for_turn = None;
+                assert!(titles.prepare(&mut call, &Default::default()).await?);
+            }
+            titles.authorize(call.call).await?;
+            let result = titles
+                .finish_generated(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    call.call,
+                    Some("Database indexing work".to_owned()),
+                    UsageTokenAxes {
+                        input: Some(17),
+                        output: Some(5),
+                        cache_creation_input: None,
+                        cache_read_input: None,
+                    },
+                )
+                .await?;
+            assert_eq!(
+                result.as_deref(),
+                manual.then_some("Database indexing work")
+            );
+            let recorded: (String, Option<String>, Option<rust_decimal::Decimal>) = sqlx::query_as(
+                "SELECT state_kind, title, output_tokens FROM session_title_model_call WHERE model_call_id = $1")
+                .bind(call.call.into_uuid()).fetch_one(&pool).await?;
+            assert_eq!(
+                recorded,
+                (
+                    "terminal".to_owned(),
+                    result,
+                    Some(rust_decimal::Decimal::from(5))
+                )
+            );
+            assert_eq!(
+                metadata
+                    .load_session_metadata(fixture.session)
+                    .await?
+                    .expect("session")
+                    .content(),
+                &preserved
+            );
+        }
     }
     pool.close().await;
     drop(container);

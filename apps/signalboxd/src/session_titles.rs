@@ -1,7 +1,7 @@
 //! Configured model execution for session titles.
 
 use signalbox_application::UsageTokenAxes;
-use signalbox_domain::{DurableCommandId, ModelCallId, SessionId, TurnId};
+use signalbox_domain::{DurableCommandId, ModelCallId, SessionId, SessionMetadataContent, TurnId};
 use signalbox_model_provider_runtime::{
     InvocationProcessObserver, ProviderTargetRelation, relate_provider_target,
 };
@@ -311,21 +311,24 @@ impl SessionTitles {
                 | AssistantPart::ProviderCompaction { .. } => valid = false,
             }
         }
-        let title = valid.then(|| normalize_title(&text)).flatten();
-        repository
-            .finish(call.call, title.as_deref(), usage_axes(usage))
-            .await?;
-        let title = title.ok_or(TitleError::Generation)?;
-        if call.initial_for_turn.is_some() {
-            SessionMetadataRepository::new(self.pool.clone())
-                .install_generated_title(
-                    DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
-                    call.session,
-                    title.clone(),
-                )
-                .await
-                .map_err(|_| TitleError::Database)?;
-        }
+        let metadata = SessionMetadataRepository::new(self.pool.clone())
+            .load_session_metadata(call.session)
+            .await
+            .map_err(|_| TitleError::Database)?
+            .ok_or(TitleError::NotFound)?;
+        let title = valid
+            .then(|| normalize_title(&text, metadata.content()))
+            .flatten();
+        let title = repository
+            .finish_generated(
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                call.call,
+                title,
+                usage_axes(usage),
+            )
+            .await
+            .map_err(|_| TitleError::Database)?
+            .ok_or(TitleError::Generation)?;
         Ok(title)
     }
 }
@@ -394,7 +397,7 @@ fn usage_axes(usage: TokenUsage) -> UsageTokenAxes {
     }
 }
 
-fn normalize_title(text: &str) -> Option<String> {
+fn normalize_title(text: &str, metadata: &SessionMetadataContent) -> Option<String> {
     if text.contains('\0') {
         return None;
     }
@@ -404,10 +407,20 @@ fn normalize_title(text: &str) -> Option<String> {
         .take(TITLE_WORDS)
         .collect::<Vec<_>>()
         .join(" ");
-    (!title.is_empty()
-        && title.len() <= TITLE_MAX_UTF8_BYTES
-        && title.len() <= signalbox_domain::SessionMetadataContent::MAX_TOTAL_UTF8_BYTES)
-        .then_some(title)
+    if title.is_empty() || title.len() > TITLE_MAX_UTF8_BYTES {
+        return None;
+    }
+    SessionMetadataContent::try_new(
+        Some(title.clone()),
+        metadata.tags().map(str::to_owned).collect(),
+        metadata
+            .attributes()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        metadata.archived(),
+    )
+    .ok()
+    .map(|_| title)
 }
 
 #[cfg(test)]
@@ -477,6 +490,7 @@ mod tests {
 
     #[test]
     fn suggested_titles_are_short_unquoted_and_nonempty() {
+        let metadata = SessionMetadataContent::empty();
         for (response, expected) in [
             (
                 "\"Database indexing work\"\n",
@@ -490,7 +504,7 @@ mod tests {
             ("Invalid\0name", None),
         ] {
             assert_eq!(
-                normalize_title(response).as_deref(),
+                normalize_title(response, &metadata).as_deref(),
                 expected,
                 "{response:?}"
             );
@@ -499,15 +513,33 @@ mod tests {
 
     #[test]
     fn a_single_word_title_cannot_exceed_the_metadata_byte_limit() {
-        let oversized =
-            "界".repeat(signalbox_domain::SessionMetadataContent::MAX_TOTAL_UTF8_BYTES / 3 + 1);
-        assert!(normalize_title(&oversized).is_none());
+        let oversized = "界".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES / 3 + 1);
+        assert!(normalize_title(&oversized, &SessionMetadataContent::empty()).is_none());
+    }
+
+    #[test]
+    fn title_must_fit_with_preserved_metadata() {
+        let key = String::from("context");
+        let metadata = SessionMetadataContent::try_new(
+            None,
+            Vec::new(),
+            vec![(
+                key.clone(),
+                "x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES - key.len()),
+            )],
+            true,
+        )
+        .expect("preserved metadata fills the aggregate byte allowance");
+
+        assert!(normalize_title("New title", &metadata).is_none());
     }
 
     #[test]
     fn generated_titles_fit_the_bounded_json_response() {
-        assert!(normalize_title(&"界".repeat(TITLE_MAX_UTF8_BYTES / 3 + 1)).is_none());
-        let title = normalize_title(&"\u{1}".repeat(TITLE_MAX_UTF8_BYTES)).expect("bounded title");
+        let metadata = SessionMetadataContent::empty();
+        assert!(normalize_title(&"界".repeat(TITLE_MAX_UTF8_BYTES / 3 + 1), &metadata,).is_none());
+        let title = normalize_title(&"\u{1}".repeat(TITLE_MAX_UTF8_BYTES), &metadata)
+            .expect("bounded title");
         let response =
             serde_json::to_vec(&signalbox_web_contract::WebSessionTitleSuggestion { title })
                 .expect("title response");
