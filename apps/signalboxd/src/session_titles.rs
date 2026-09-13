@@ -409,11 +409,8 @@ impl ObservationSink<ModelCallId> for TitleObservations {
 fn title_operation(
     call: &SessionTitleCall,
     serving: ResolvedTarget,
-    mut settings: ModelSettings,
+    settings: ModelSettings,
 ) -> ModelOperation<ModelCallId> {
-    // The serving target has already been selected from the configured fast-mode
-    // mapping. Dispatch it directly so adapter routing uses that target too.
-    settings.fast_mode = signalbox_model_runtime::FastMode::Disabled;
     ModelOperation::new(
         call.call,
         CredentialReference::new(call.credential_reference.clone()),
@@ -549,6 +546,65 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             );
             assert!(operation.retained_mapped_target.is_none());
         }
+    }
+
+    #[test]
+    fn request_controlled_title_fast_mode_remains_enabled() {
+        let source = crate::configuration::tests::CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n[model_settings]\nfast_mode = \"enabled\"",
+            )
+            .replacen(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"request_control\"",
+                1,
+            );
+        let models = HubModelConfiguration::parse(&format!(
+            r#"{source}
+[session_titles]
+selection_id = "10000000-0000-4000-8000-000000000001"
+"#
+        ))
+        .expect("supported request-controlled title settings");
+        let (selection, target, settings) =
+            models.session_title_settings().expect("title settings");
+        let catalog = models.runtime_model_catalog();
+        let serving = catalog.resolve(target).expect("serving definition");
+        let call = SessionTitleCall {
+            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            session: SessionId::from_uuid(uuid::Uuid::now_v7()),
+            selection,
+            target,
+            credential_reference: "synthetic-title-credential".to_owned(),
+            input_includes_cache_tokens: false,
+            initial_for_turn: None,
+        };
+        let operation = title_operation(
+            &call,
+            ResolvedTarget::new(serving.provider_model().to_owned()),
+            settings,
+        );
+        let capabilities = models.runtime_model_capability_catalog();
+        let capability = capabilities
+            .validate(&operation.resolved_target, &operation.settings)
+            .expect("runtime accepts request-controlled fast mode");
+        let (effective, request_fast_mode) = capability
+            .effective_target(
+                &operation.resolved_target,
+                operation.settings.fast_mode,
+                operation.retained_mapped_target.as_ref(),
+            )
+            .expect("runtime resolves the title target");
+        assert_eq!(effective, &operation.resolved_target);
+        assert_eq!(
+            request_fast_mode,
+            signalbox_model_runtime::FastMode::Enabled
+        );
+        assert_eq!(
+            operation.settings.fast_mode,
+            signalbox_model_runtime::FastMode::Enabled
+        );
     }
 
     #[cfg(feature = "test-support")]

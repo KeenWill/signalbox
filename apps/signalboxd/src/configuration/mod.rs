@@ -1418,8 +1418,10 @@ impl HubModelConfiguration {
         settings.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
         settings.service_tier = effective.service_tier().map(runtime_service_tier);
         settings.fast_mode = match effective.fast_mode() {
-            FastMode::Disabled => signalbox_model_runtime::FastMode::Disabled,
-            FastMode::Enabled => signalbox_model_runtime::FastMode::Enabled,
+            FastMode::Enabled if target == route.target() => {
+                signalbox_model_runtime::FastMode::Enabled
+            }
+            FastMode::Disabled | FastMode::Enabled => signalbox_model_runtime::FastMode::Disabled,
         };
         Some((selection, target, settings))
     }
