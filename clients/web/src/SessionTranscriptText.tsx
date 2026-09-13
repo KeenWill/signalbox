@@ -551,11 +551,16 @@ function TranscriptWindow({
     [turns, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
-  const renderContinuation = (page: WebSessionTimelineDetailPage, adoptPage?: AdoptToolPage) => {
+  const renderContinuation = (
+    page: WebSessionTimelineDetailPage,
+    adoptPage?: AdoptToolPage,
+    label?: string,
+  ) => {
     const key = JSON.stringify([continuationSequence(page), page.continuation])
     return (
       <ContinuedEvent
         adoptToolPage={adoptPage}
+        label={label}
         key={key}
         sessionId={sessionId}
         page={page}
@@ -698,7 +703,7 @@ function TranscriptWindow({
     if (
       boundary?.details.some(
         (page) =>
-          page.continuation ||
+          pending.includes(page) ||
           page.items.some((item) =>
             turns.some(
               (turn) =>
@@ -752,6 +757,7 @@ function TranscriptWindow({
     readPage(direction)
   }, [
     turns,
+    pending,
     detail,
     turnModes,
     eventSequence,
@@ -857,7 +863,7 @@ function TranscriptWindow({
               ?.at(-1)
               ?.details.some(
                 (page) =>
-                  page.continuation ||
+                  pending.includes(page) ||
                   page.items.some((item) =>
                     turns.some(
                       (turn) =>
@@ -987,7 +993,11 @@ function TurnContent({
   sessionId: string
   limits: SessionTranscriptLimits
   target?: string
-  renderContinuation: (page: WebSessionTimelineDetailPage, adoptPage?: AdoptToolPage) => ReactNode
+  renderContinuation: (
+    page: WebSessionTimelineDetailPage,
+    adoptPage?: AdoptToolPage,
+    label?: string,
+  ) => ReactNode
   eventContinuations: Readonly<Record<string, EventContinuationState>>
   onEventContinuation: (sequence: string, state: EventContinuationState) => void
   onExpand: (mode: DetailMode) => void
@@ -1026,7 +1036,7 @@ function TurnContent({
             ))
         )
       })
-      .map((page) => renderContinuation(page, adoptToolPage))
+      .map((page) => renderContinuation(page, adoptToolPage, toolContinuationLabel(page)))
   const events = turn.events.filter(
     (event, index) =>
       turn.events.findIndex(
@@ -1137,6 +1147,20 @@ function TurnContent({
       {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>
   )
+}
+
+function toolContinuationLabel(page: WebSessionTimelineDetailPage): string {
+  const cursor = page.continuation
+  const item = page.items.at(-1)
+  const tool = item?.body.type === 'tool_batch' ? item.body.tools[0] : undefined
+  const evidence = tool?.evidence.type === 'physical_attempt' ? tool.evidence : undefined
+  const field = cursor?.type === 'more_body' ? cursor.body.field : undefined
+  const fields = [
+    field === 'tool_arguments' && 'arguments',
+    (field === 'tool_result' || evidence?.result_present) && 'output',
+    (field === 'tool_failure' || evidence?.failure_present) && 'failure details',
+  ].filter(Boolean)
+  return `Read more ${fields.join(' and ')}`
 }
 
 function ToolSummary({
@@ -1455,6 +1479,7 @@ function MoreTools({
 }
 
 function ContinuedEvent({
+  label = 'Read more',
   adoptToolPage,
   sessionId,
   page,
@@ -1463,6 +1488,7 @@ function ContinuedEvent({
   state,
   onChange,
 }: {
+  label?: string
   adoptToolPage?: AdoptToolPage
   sessionId: string
   page: WebSessionTimelineDetailPage
@@ -1490,7 +1516,7 @@ function ContinuedEvent({
           })
         }
       >
-        Read more
+        {label}
       </button>
     )
   return (
