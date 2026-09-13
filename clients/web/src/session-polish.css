@@ -24,6 +24,10 @@
   min-height: 0;
   overflow: auto;
 }
+.session-conversation .session-transcript-text {
+  padding: var(--product-space);
+  border: 0;
+}
 .session-conversation:has(.session-transcript-scroll) {
   display: flex;
   overflow: hidden;
@@ -84,4 +88,12 @@
 .session-composer-actions > [role="status"]:not(.sr-only) {
   grid-column: 1 / -1;
   overflow-wrap: anywhere;
+}
+
+.session-conversation .session-message-entry {
+  padding-block: calc(var(--product-space) / 2);
+}
+.session-conversation .session-message-text {
+  margin-block: calc(var(--product-space) / 2);
+  line-height: 1.5;
 }
