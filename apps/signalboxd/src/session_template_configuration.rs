@@ -279,6 +279,12 @@ impl SessionTemplateConfiguration {
         self.templates.get(name)
     }
 
+    pub(crate) fn review_judgment_template_name(&self) -> Option<&SessionTemplateName> {
+        self.review_library
+            .as_ref()
+            .map(|library| &library.selection.stages.judgment)
+    }
+
     /// Iterates immutable summaries in strict name order.
     pub fn summaries(
         &self,
@@ -383,6 +389,7 @@ fn parse_review_library(
             "shared_header",
             "import_body",
             "judgment_body",
+            "judgment_template",
             "repair_body",
             "publication_body",
             "concerns",
@@ -433,7 +440,7 @@ fn parse_review_library(
         &source,
         templates,
     )?;
-    let judgment = insert_review_template(
+    let default_judgment = insert_review_template(
         "judgment",
         REVIEW_JUDGMENT_TEMPLATE_NAME,
         required_nonempty_string(table, "judgment_body")?,
@@ -472,11 +479,33 @@ fn parse_review_library(
         })
         .collect::<Result<Vec<_>, SessionTemplateConfigurationError>>()?;
 
+    let judgment_name = review_template_name(
+        optional_string(table, "judgment_template")?.unwrap_or(REVIEW_JUDGMENT_TEMPLATE_NAME),
+    )?;
+    let judgment = if judgment_name.as_str() == REVIEW_JUDGMENT_TEMPLATE_NAME {
+        default_judgment
+    } else {
+        let template = templates
+            .get(&judgment_name)
+            .ok_or(SessionTemplateConfigurationError::UnknownJudgmentTemplate)?;
+        let mut digest = Sha256::new();
+        update_digest_frame(
+            &mut digest,
+            b"signalbox/review-template/selected-judgment/v1",
+        );
+        update_digest_frame(&mut digest, judgment_name.as_str().as_bytes());
+        update_digest_frame(
+            &mut digest,
+            template.provenance().content_digest().as_bytes(),
+        );
+        ReviewTemplateDigest::new(digest.finalize().into())
+    };
+
     let selection = ReviewLibrarySelection {
         concern_set_version: concern_set_version.clone(),
         stages: ReviewStageTemplateSelection {
             import: review_template_name(REVIEW_IMPORT_TEMPLATE_NAME)?,
-            judgment: review_template_name(REVIEW_JUDGMENT_TEMPLATE_NAME)?,
+            judgment: judgment_name,
             repair: review_template_name(REVIEW_REPAIR_TEMPLATE_NAME)?,
             publication: review_template_name(REVIEW_PUBLICATION_TEMPLATE_NAME)?,
         },
@@ -938,6 +967,7 @@ pub enum SessionTemplateConfigurationError {
     UnsupportedVersion,
     InvalidTemplates,
     InvalidReviewLibrary,
+    UnknownJudgmentTemplate,
     UnknownField,
     InvalidField,
     InvalidName,
@@ -969,6 +999,7 @@ impl fmt::Display for SessionTemplateConfigurationError {
             Self::UnsupportedVersion => "session-template configuration version is unsupported",
             Self::InvalidTemplates => "session templates are not an array of tables",
             Self::InvalidReviewLibrary => "review library is not a table",
+            Self::UnknownJudgmentTemplate => "review library names an unknown judgment template",
             Self::UnknownField => "session-template configuration contains an unknown field",
             Self::InvalidField => "session-template configuration has a missing or mistyped field",
             Self::InvalidName => "session-template configuration contains an invalid name",
@@ -1774,6 +1805,78 @@ dangerous_tool_auto_approval = false
         assert_eq!(
             template.defaults().dangerous_tool_auto_approval(),
             DangerousToolAutoApproval::Disabled
+        );
+    }
+
+    #[test]
+    fn omitted_judgment_selection_preserves_the_default_attempt_digest() {
+        let models = models();
+        let implicit = SessionTemplateConfiguration::parse_snapshot(&review_catalog(""), &models)
+            .expect("implicit default library");
+        let explicit = SessionTemplateConfiguration::parse_snapshot(
+            &review_catalog("judgment_template = \"review-judgment\""),
+            &models,
+        )
+        .expect("explicit default library");
+
+        assert_eq!(
+            implicit.review_library.as_ref().unwrap().stage_templates,
+            explicit.review_library.as_ref().unwrap().stage_templates,
+        );
+        assert_eq!(
+            implicit.review_judgment_template_name().unwrap().as_str(),
+            "review-judgment",
+        );
+    }
+
+    #[test]
+    fn review_library_rejects_an_unknown_judgment_template() {
+        let error = SessionTemplateConfiguration::parse_snapshot(
+            &review_catalog("judgment_template = \"missing-judge\""),
+            &models(),
+        )
+        .expect_err("an unresolved judgment selection must reject the catalog");
+
+        assert_eq!(
+            error,
+            SessionTemplateConfigurationError::UnknownJudgmentTemplate
+        );
+    }
+
+    #[test]
+    fn selected_judgment_digest_binds_the_template_name_and_content() {
+        let source = review_catalog(&format!("judgment_template = \"{TEMPLATE_NAME}\""))
+            + &inline_catalog("").replacen("version = 1", "", 1);
+        let models = models();
+        let selected = SessionTemplateConfiguration::parse_snapshot(&source, &models)
+            .expect("selected ordinary judgment template");
+        let renamed = SessionTemplateConfiguration::parse_snapshot(
+            &source.replace(TEMPLATE_NAME, "another-judge"),
+            &models,
+        )
+        .expect("same prompt under another name");
+        let edited = SessionTemplateConfiguration::parse_snapshot(
+            &source.replace(INLINE_PROMPT, "Changed judgment instructions."),
+            &models,
+        )
+        .expect("edited judgment template");
+        let selection = selected.configured_review_selection().unwrap();
+        let attempt = selected
+            .resolve_review_attempt(
+                ReviewOrchestrationAttemptId::from_uuid(uuid::Uuid::now_v7()),
+                ReviewTargetId::from_uuid(uuid::Uuid::now_v7()),
+                selection,
+            )
+            .expect("the selected template constructs an attempt");
+
+        assert_eq!(selection.stages.judgment.as_str(), TEMPLATE_NAME);
+        assert_ne!(
+            attempt.stage_templates().judgment(),
+            renamed.review_library.unwrap().stage_templates.judgment(),
+        );
+        assert_ne!(
+            attempt.stage_templates().judgment(),
+            edited.review_library.unwrap().stage_templates.judgment(),
         );
     }
 

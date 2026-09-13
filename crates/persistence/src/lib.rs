@@ -62,6 +62,7 @@ pub mod session_live;
 pub mod session_metadata;
 pub mod session_placement;
 pub mod session_timeline;
+pub mod session_titles;
 pub mod session_workspace;
 pub mod start_eligible_turn;
 pub mod startup;

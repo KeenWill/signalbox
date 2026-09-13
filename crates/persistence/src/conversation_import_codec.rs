@@ -118,6 +118,43 @@ pub(crate) fn encode_content(
     Ok(bytes)
 }
 
+// Version, payload kind, content kind, attestation, and the eight-byte text length.
+pub(crate) const TEXT_CONTENT_HEADER_BYTES: i32 = 2 + 1 + 1 + 8;
+
+/// Reads a database-bounded prefix of an imported text value without allocating its full body.
+pub(crate) fn decode_text_prefix(
+    bytes: &[u8],
+) -> Result<Option<&str>, ImportedConversationEncodingFailure> {
+    let mut decoder = Decoder::new(bytes, CONTENT_PAYLOAD, ENCODING_VERSION_TWO)?;
+    let kind = decoder.byte()?;
+    if kind != 1 {
+        return Err(ImportedConversationEncodingFailure::UnsupportedTag {
+            kind: "imported text",
+            value: kind,
+        });
+    }
+    let text = decoder.attestation(|decoder| {
+        let declared = decoder.length()?;
+        let retained = declared.min(decoder.bytes.len().saturating_sub(decoder.index));
+        let bytes = decoder.take(retained)?;
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Ok(text),
+            Err(error) if error.error_len().is_none() && retained < declared => {
+                std::str::from_utf8(&bytes[..error.valid_up_to()])
+                    .map_err(|_| ImportedConversationEncodingFailure::InvalidUtf8("imported text"))
+            }
+            Err(_) => Err(ImportedConversationEncodingFailure::InvalidUtf8(
+                "imported text",
+            )),
+        }
+    })?;
+    decoder.finish()?;
+    Ok(match text {
+        ImportedSourceAttestation::Attested(text) => Some(text),
+        _ => None,
+    })
+}
+
 pub(crate) fn decode_content(
     bytes: &[u8],
 ) -> Result<ImportedTranscriptContent, ImportedConversationEncodingFailure> {
@@ -810,6 +847,22 @@ mod tests {
         decode_structured, encode_content, encode_source_metadata, encode_structured,
         validate_content_structure,
     };
+
+    #[test]
+    fn text_prefix_decoding_bounds_large_imports_at_a_utf8_boundary() {
+        let content = ImportedTranscriptContent::Text(attested_text(&"界".repeat(100_000)));
+        let encoded = encode_content(&content).expect("encoded text");
+        let limit = super::TEXT_CONTENT_HEADER_BYTES as usize + 4;
+        assert_eq!(super::decode_text_prefix(&encoded[..limit]), Ok(Some("界")));
+        let absent = encode_content(&ImportedTranscriptContent::Text(
+            ImportedSourceAttestation::NotAttested,
+        ))
+        .expect("absent text");
+        assert_eq!(super::decode_text_prefix(&absent), Ok(None));
+        let mut invalid = encoded[..limit].to_vec();
+        invalid[super::TEXT_CONTENT_HEADER_BYTES as usize] = 0xff;
+        assert!(super::decode_text_prefix(&invalid).is_err());
+    }
 
     fn text(value: &str) -> ImportedText {
         ImportedText::new(String::from(value))

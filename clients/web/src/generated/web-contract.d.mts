@@ -99,6 +99,7 @@ export type WebContractCapabilities = {
   readonly imported_continuations: boolean;
   readonly ndjson_streaming: boolean;
   readonly same_origin_json_mutations: boolean;
+  readonly session_title_generation: boolean;
 };
 
 export type WebContractIdentity = {
@@ -962,7 +963,7 @@ export type WebUsageCall = {
 
 export type WebUsageCallCount = string;
 
-export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
+export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction" | "session_title";
 
 export type WebUsageCost = {
   readonly amount_usd: WebDollarAmount;
@@ -1045,6 +1046,10 @@ export type WebCreateSessionRequest = {
 export type WebCreateSessionResponse = {
   readonly session_id: WebSessionId;
   readonly summary: WebSessionCatalogSummary;
+};
+
+export type WebSessionTitleSuggestion = {
+  readonly title: string;
 };
 
 export type WebSessionTitleRequest = {
@@ -1313,6 +1318,7 @@ export function decodeWebGoalRequest(value: unknown): WebGoalRequest;
 export function decodeWebSessionActionRequest(value: unknown): WebSessionActionRequest;
 export function decodeWebCreateSessionRequest(value: unknown): WebCreateSessionRequest;
 export function decodeWebCreateSessionResponse(value: unknown): WebCreateSessionResponse;
+export function decodeWebSessionTitleSuggestion(value: unknown): WebSessionTitleSuggestion;
 export function decodeWebSessionTitleRequest(value: unknown): WebSessionTitleRequest;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;

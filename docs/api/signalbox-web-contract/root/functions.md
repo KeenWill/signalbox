@@ -32,6 +32,12 @@ pub const MAX_NDJSON_ITEM_BYTES: usize;
 pub const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize;
 ```
 
+## MAX_WEB_SESSION_TITLE_UTF8_BYTES
+
+```rust
+pub const MAX_WEB_SESSION_TITLE_UTF8_BYTES: usize;
+```
+
 ## MAX_IMPORT_LIST_ITEMS
 
 ```rust

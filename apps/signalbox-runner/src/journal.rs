@@ -1,15 +1,18 @@
 //! Atomically published private journal and its reconnect projection.
 
 use crate::state::{
-    DocumentKind, MAX_STATE_BYTES, PERMISSION_MASK, RunnerStateError, STATE_MODE, StateOperation,
-    StateResource, write_document,
+    DocumentKind, PERMISSION_MASK, RunnerStateError, STATE_MODE, StateOperation, StateResource,
+    write_document,
 };
 use rustix::{
     fs::{Mode, OFlags, openat},
     process::geteuid,
 };
 use serde::{Deserialize, Serialize};
-use signalbox_runner_wire::ReconnectInventory;
+use signalbox_runner_wire::{
+    LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, ReconnectInventory,
+    RetainedResult,
+};
 use std::{
     fs::File,
     io::{self, Read as _},
@@ -17,16 +20,24 @@ use std::{
 };
 
 const JOURNAL_VERSION: u64 = 1;
+// One bounded wire inventory fits the frame ceiling, including JSON escaping of
+// the fixed 1 MiB terminal text. Enrollment retains its separate 16 KiB bound.
+const MAX_JOURNAL_BYTES: u64 = MAX_FRAME_BYTES as u64;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Journal {
     entries: Vec<JournalEntry>,
 }
 
-// No operation entry is admitted by the registration-only runner.
-#[derive(Debug, Serialize, Deserialize)]
-enum JournalEntry {}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum JournalEntry {
+    Lease {
+        phase: LeasePhase,
+        result: Option<RetainedResult>,
+    },
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,7 +47,31 @@ struct JournalDocument {
 }
 
 impl Journal {
+    pub(crate) fn validate_owner(
+        &self,
+        state: &crate::RunnerState,
+    ) -> Result<(), RunnerStateError> {
+        if let Some(JournalEntry::Lease { phase, .. }) = self.entries.first() {
+            match state {
+                crate::RunnerState::Enrolled { receipt }
+                    if receipt.runner_id() == phase.correlation.runner_id
+                        && receipt.registration_revision()
+                            >= phase.correlation.registration_revision
+                        && receipt.authority() == crate::EnrollmentAuthority::Active => {}
+                _ => return Err(RunnerStateError::CorruptState),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn initialize(directory: &File) -> Result<Self, RunnerStateError> {
+        match Self::open(directory) {
+            Ok(journal) if journal.entries.is_empty() => return Ok(journal),
+            Ok(_) => return Err(RunnerStateError::CorruptState),
+            Err(RunnerStateError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         let document = JournalDocument {
             version: JOURNAL_VERSION,
             journal: Self::default(),
@@ -64,15 +99,15 @@ impl Journal {
         {
             return Err(RunnerStateError::InvalidStateIdentity);
         }
-        if metadata.len() > MAX_STATE_BYTES {
+        if metadata.len() > MAX_JOURNAL_BYTES {
             return Err(RunnerStateError::StateTooLarge);
         }
         let mut encoded = Vec::new();
         file.by_ref()
-            .take(MAX_STATE_BYTES + 1)
+            .take(MAX_JOURNAL_BYTES + 1)
             .read_to_end(&mut encoded)
             .map_err(|error| journal_io(StateOperation::Read, error))?;
-        if encoded.len() as u64 > MAX_STATE_BYTES {
+        if encoded.len() as u64 > MAX_JOURNAL_BYTES {
             return Err(RunnerStateError::StateTooLarge);
         }
         let document: JournalDocument =
@@ -80,13 +115,152 @@ impl Journal {
         if document.version != JOURNAL_VERSION {
             return Err(RunnerStateError::CorruptState);
         }
+        document.journal.validate()?;
         Ok(document.journal)
     }
 
     pub(crate) fn reconnect_inventory(&self) -> ReconnectInventory {
         match self.entries.first() {
             None => ReconnectInventory::default(),
-            Some(entry) => match *entry {},
+            Some(JournalEntry::Lease { phase, result }) => ReconnectInventory {
+                lease: Some(phase.clone()),
+                result: result.clone(),
+                ..ReconnectInventory::default()
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), RunnerStateError> {
+        if self.entries.len() > 1 {
+            return Err(RunnerStateError::CorruptState);
+        }
+        if let Some(JournalEntry::Lease {
+            phase,
+            result: Some(result),
+        }) = self.entries.first()
+            && (phase.phase != LeasePhaseKind::ExecutionMayHaveStarted
+                || phase.correlation != result.correlation
+                || result.result.validate().is_err())
+        {
+            return Err(RunnerStateError::CorruptState);
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, directory: &File, next: Self) -> Result<(), RunnerStateError> {
+        next.validate()?;
+        let document = JournalDocument {
+            version: JOURNAL_VERSION,
+            journal: next,
+        };
+        let encoded = serde_json::to_vec(&document).map_err(|_| RunnerStateError::CorruptState)?;
+        if encoded.len() as u64 > MAX_JOURNAL_BYTES {
+            return Err(RunnerStateError::StateTooLarge);
+        }
+        write_document(directory, DocumentKind::Journal, &encoded)?;
+        *self = document.journal;
+        Ok(())
+    }
+
+    pub(crate) fn record_phase(
+        &mut self,
+        directory: &File,
+        phase: LeasePhase,
+    ) -> Result<(), RunnerStateError> {
+        match self.entries.first() {
+            None if phase.phase == LeasePhaseKind::WaitingDispatch => {}
+            Some(JournalEntry::Lease {
+                phase: prior,
+                result: None,
+            }) if prior.correlation == phase.correlation => {
+                if prior.phase == phase.phase {
+                    return Ok(());
+                }
+                if !matches!(
+                    (prior.phase, phase.phase),
+                    (
+                        LeasePhaseKind::WaitingDispatch,
+                        LeasePhaseKind::DispatchReceived
+                    ) | (
+                        LeasePhaseKind::DispatchReceived,
+                        LeasePhaseKind::ExecutionMayHaveStarted
+                    )
+                ) {
+                    return Err(RunnerStateError::InvalidTransition);
+                }
+            }
+            _ => return Err(RunnerStateError::InvalidTransition),
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Lease {
+                    phase,
+                    result: None,
+                }],
+            },
+        )
+    }
+
+    pub(crate) fn record_result(
+        &mut self,
+        directory: &File,
+        result: RetainedResult,
+    ) -> Result<(), RunnerStateError> {
+        let Some(JournalEntry::Lease {
+            phase,
+            result: prior,
+        }) = self.entries.first()
+        else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        if phase.phase != LeasePhaseKind::ExecutionMayHaveStarted
+            || phase.correlation != result.correlation
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        if let Some(prior) = prior {
+            return if prior == &result {
+                Ok(())
+            } else {
+                Err(RunnerStateError::InvalidTransition)
+            };
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Lease {
+                    phase: phase.clone(),
+                    result: Some(result),
+                }],
+            },
+        )
+    }
+
+    pub(crate) fn acknowledge_result(
+        &mut self,
+        directory: &File,
+        correlation: &LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.entries.first() {
+            Some(JournalEntry::Lease {
+                result: Some(result),
+                ..
+            }) if &result.correlation == correlation => self.publish(directory, Self::default()),
+            _ => Err(RunnerStateError::InvalidTransition),
+        }
+    }
+
+    pub(crate) fn discard_lease(
+        &mut self,
+        directory: &File,
+        correlation: &LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.entries.first() {
+            Some(JournalEntry::Lease { phase, .. }) if &phase.correlation == correlation => {
+                self.publish(directory, Self::default())
+            }
+            _ => Err(RunnerStateError::InvalidTransition),
         }
     }
 }
@@ -108,6 +282,285 @@ mod tests {
         os::unix::fs::{PermissionsExt as _, symlink},
     };
     use tempfile::TempDir;
+
+    fn correlation() -> LeaseCorrelation {
+        use signalbox_runner_wire::{
+            CanonicalUuid, PositiveU64, SandboxProfile, WireToolName, WorkingDirectory,
+        };
+        let identity = |value| CanonicalUuid::from_uuid(uuid::Uuid::from_u128(value));
+        let first = PositiveU64::try_new(1).expect("first revision");
+        LeaseCorrelation {
+            registration_revision: first,
+            placement_revision: first,
+            lease_id: identity(1),
+            lease_generation: first,
+            runner_id: identity(2),
+            working_directory: WorkingDirectory::try_new("/tmp/runner-work".to_owned())
+                .expect("fixture directory"),
+            sandbox_profile: SandboxProfile::Ambient,
+            tool_name: WireToolName::try_new("echo".to_owned()).expect("compiled tool"),
+            session_id: identity(3),
+            turn_id: identity(4),
+            tool_request_id: identity(5),
+            tool_attempt_id: identity(6),
+            issuing_turn_attempt_id: identity(7),
+            tool_dispatch_generation: first,
+        }
+    }
+
+    fn phase(kind: LeasePhaseKind) -> LeasePhase {
+        LeasePhase {
+            correlation: correlation(),
+            phase: kind,
+        }
+    }
+
+    fn started_journal(directory: &File) -> Journal {
+        let mut journal = Journal::initialize(directory).expect("empty journal");
+        journal
+            .record_phase(directory, phase(LeasePhaseKind::WaitingDispatch))
+            .expect("claim persisted");
+        journal
+            .record_phase(directory, phase(LeasePhaseKind::DispatchReceived))
+            .expect("dispatch persisted");
+        journal
+            .record_phase(directory, phase(LeasePhaseKind::ExecutionMayHaveStarted))
+            .expect("executor gate persisted");
+        journal
+    }
+
+    #[test]
+    fn initialization_cannot_erase_retained_execution_without_enrollment() {
+        let parent = TempDir::new().expect("temporary journal root");
+        let directory = File::open(parent.path()).expect("directory descriptor");
+        let journal = started_journal(&directory);
+        let before = journal.reconnect_inventory();
+        assert!(matches!(
+            Journal::initialize(&directory),
+            Err(RunnerStateError::CorruptState)
+        ));
+        assert_eq!(
+            Journal::open(&directory)
+                .expect("retained execution survives")
+                .reconnect_inventory(),
+            before
+        );
+    }
+
+    #[test]
+    fn phases_advance_durably_and_cannot_skip_the_claim() {
+        let parent = TempDir::new().expect("temporary journal root");
+        let directory = File::open(parent.path()).expect("directory descriptor");
+        let mut journal = Journal::initialize(&directory).expect("empty journal");
+        assert!(
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::DispatchReceived))
+                .is_err()
+        );
+        assert!(
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::ExecutionMayHaveStarted))
+                .is_err()
+        );
+        journal
+            .record_phase(&directory, phase(LeasePhaseKind::WaitingDispatch))
+            .expect("claim persisted");
+        assert!(
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::ExecutionMayHaveStarted))
+                .is_err()
+        );
+        assert_eq!(
+            Journal::open(&directory)
+                .expect("replay")
+                .reconnect_inventory()
+                .lease,
+            Some(phase(LeasePhaseKind::WaitingDispatch))
+        );
+        journal
+            .record_phase(&directory, phase(LeasePhaseKind::DispatchReceived))
+            .expect("dispatch persisted");
+        assert_eq!(
+            Journal::open(&directory)
+                .expect("replay")
+                .reconnect_inventory()
+                .lease,
+            Some(phase(LeasePhaseKind::DispatchReceived))
+        );
+        journal
+            .record_phase(&directory, phase(LeasePhaseKind::ExecutionMayHaveStarted))
+            .expect("executor gate persisted");
+        assert_eq!(
+            Journal::open(&directory)
+                .expect("replay")
+                .reconnect_inventory()
+                .lease,
+            Some(phase(LeasePhaseKind::ExecutionMayHaveStarted))
+        );
+        assert!(
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::WaitingDispatch))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn every_correlation_member_fences_phases_results_and_acknowledgements() {
+        let original = serde_json::to_value(correlation()).expect("wire correlation");
+        for (member, value) in original.as_object().expect("object").iter() {
+            let mut changed = original.clone();
+            changed[member] = match value {
+                serde_json::Value::Number(_) => serde_json::json!(2),
+                serde_json::Value::String(_) if member == "sandbox_profile" => {
+                    serde_json::json!("workspace_restricted")
+                }
+                serde_json::Value::String(_) if member == "working_directory" => {
+                    serde_json::json!("/tmp/other-runner-work")
+                }
+                serde_json::Value::String(_) if member == "tool_name" => {
+                    serde_json::json!("other_tool")
+                }
+                serde_json::Value::String(_) => {
+                    serde_json::json!("00000000-0000-0000-0000-000000000099")
+                }
+                _ => panic!("lease correlation members are scalars"),
+            };
+            let changed: LeaseCorrelation =
+                serde_json::from_value(changed).expect("individually valid changed member");
+            let parent = TempDir::new().expect("temporary journal root");
+            let directory = File::open(parent.path()).expect("directory descriptor");
+            let mut journal = Journal::initialize(&directory).expect("empty journal");
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::WaitingDispatch))
+                .expect("claim persisted");
+            assert!(
+                journal
+                    .record_phase(
+                        &directory,
+                        LeasePhase {
+                            correlation: changed.clone(),
+                            phase: LeasePhaseKind::DispatchReceived
+                        }
+                    )
+                    .is_err(),
+                "{member}"
+            );
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::DispatchReceived))
+                .expect("dispatch persisted");
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::ExecutionMayHaveStarted))
+                .expect("executor gate persisted");
+            let terminal = signalbox_runner_wire::TerminalResult::Success {
+                text: "echo".to_owned(),
+            };
+            assert!(
+                journal
+                    .record_result(
+                        &directory,
+                        RetainedResult {
+                            correlation: changed.clone(),
+                            result: terminal.clone()
+                        }
+                    )
+                    .is_err(),
+                "{member}"
+            );
+            journal
+                .record_result(
+                    &directory,
+                    RetainedResult {
+                        correlation: correlation(),
+                        result: terminal,
+                    },
+                )
+                .expect("matching result");
+            assert!(
+                journal.acknowledge_result(&directory, &changed).is_err(),
+                "{member}"
+            );
+            assert!(
+                Journal::open(&directory)
+                    .expect("replay")
+                    .reconnect_inventory()
+                    .result
+                    .is_some(),
+                "{member}"
+            );
+        }
+    }
+
+    #[test]
+    fn maximal_escaped_result_is_retained_until_exact_acknowledgement() {
+        let parent = TempDir::new().expect("temporary journal root");
+        let directory = File::open(parent.path()).expect("directory descriptor");
+        let mut journal = started_journal(&directory);
+        let result = RetainedResult {
+            correlation: correlation(),
+            result: signalbox_runner_wire::TerminalResult::Success {
+                text: "\u{1}".repeat(signalbox_runner_wire::SUCCESS_TEXT_BYTES as usize),
+            },
+        };
+        journal
+            .record_result(&directory, result.clone())
+            .expect("the wire text ceiling fits its journal including JSON escaping");
+        journal
+            .record_result(&directory, result.clone())
+            .expect("exact duplicate is unchanged");
+        let reopened = Journal::open(&directory).expect("replay maximal result");
+        assert_eq!(
+            reopened.reconnect_inventory().result.as_ref(),
+            Some(&result)
+        );
+        assert!(
+            journal
+                .record_result(
+                    &directory,
+                    RetainedResult {
+                        correlation: correlation(),
+                        result: signalbox_runner_wire::TerminalResult::Ambiguous
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            journal
+                .record_phase(&directory, phase(LeasePhaseKind::WaitingDispatch))
+                .is_err()
+        );
+        journal
+            .acknowledge_result(&directory, &correlation())
+            .expect("exact acknowledgement clears the slot");
+        assert_eq!(
+            Journal::open(&directory)
+                .expect("replay acknowledged journal")
+                .reconnect_inventory(),
+            ReconnectInventory::default()
+        );
+        journal
+            .record_phase(&directory, phase(LeasePhaseKind::WaitingDispatch))
+            .expect("next lease can acquire the slot");
+    }
+
+    #[test]
+    fn terminal_evidence_requires_the_executor_gate() {
+        let parent = TempDir::new().expect("temporary journal root");
+        let directory = File::open(parent.path()).expect("directory descriptor");
+        let mut journal = Journal::initialize(&directory).expect("empty journal");
+        let result = RetainedResult {
+            correlation: correlation(),
+            result: signalbox_runner_wire::TerminalResult::Ambiguous,
+        };
+        assert!(journal.record_result(&directory, result.clone()).is_err());
+        journal
+            .record_phase(&directory, phase(LeasePhaseKind::WaitingDispatch))
+            .expect("claim persisted");
+        assert!(journal.record_result(&directory, result.clone()).is_err());
+        journal
+            .record_phase(&directory, phase(LeasePhaseKind::DispatchReceived))
+            .expect("dispatch persisted");
+        assert!(journal.record_result(&directory, result).is_err());
+    }
 
     #[test]
     fn private_journal_replays_after_root_reopen() {

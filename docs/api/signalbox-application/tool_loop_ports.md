@@ -256,6 +256,13 @@ pub trait ToolExecutionTransaction {
         wait: CorrelatedDurableChildWait,
     ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
            + marker::Send;
+    fn reread_durable_runner_wait(
+        &mut self,
+        _correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
+    ) -> impl future::Future<Output = result::Result<bool, <Self as ToolExecutionTransaction>::Error>>
+           + marker::Send {
+        /* provided */
+    }
     fn classify_crash_loss<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,

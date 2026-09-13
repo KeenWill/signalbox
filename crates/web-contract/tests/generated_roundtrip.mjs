@@ -211,6 +211,7 @@ test("generated bootstrap decoder rejects the previous contract version", () => 
           imported_continuations: true,
           bounded_session_timeline: true,
           bounded_session_live: true,
+          session_title_generation: true,
         },
         limits: {
           max_json_body_bytes: 65536,
@@ -243,6 +244,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           bounded_session_timeline: true,
           bounded_session_timeline_detail: true,
           bounded_session_live: true,
+          session_title_generation: true,
           bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
@@ -1286,6 +1288,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           bounded_session_timeline: true,
           bounded_session_timeline_detail: true,
           bounded_session_live: true,
+          session_title_generation: true,
         },
         limits: {
           max_json_body_bytes: 1,
@@ -2864,11 +2867,11 @@ test("generated usage decoder correlates call kind with turn presence", () => {
 
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [compaction], continuation: null }, "newest"),
-    /null exactly for context compaction calls/,
+    /null exactly for session-level calls/,
   );
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
-    /null exactly for context compaction calls/,
+    /null exactly for session-level calls/,
   );
 });
 
@@ -2881,13 +2884,25 @@ test("generated usage decoder accepts a compaction call with a null turn", () =>
   assert.equal(decodeWebUsageCallPage(page, "newest"), page);
 });
 
+test("generated usage decoder keeps title calls at session scope", () => {
+  const title = usageCall();
+  title.call_kind = "session_title";
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [title], continuation: null }, "newest"),
+    /null exactly for session-level calls/,
+  );
+  title.turn_id = null;
+  const page = { calls: [title], continuation: null };
+  assert.equal(decodeWebUsageCallPage(page, "newest"), page);
+});
+
 test("generated usage decoder rejects omitted turns for turn-scoped calls", () => {
   const ordinary = usageCall();
   delete ordinary.turn_id;
 
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
-    /turn_id.*present|null exactly for context compaction calls/,
+    /turn_id.*present|null exactly for session-level calls/,
   );
 });
 

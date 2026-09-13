@@ -20,6 +20,22 @@ pub(super) struct ThreadTextArguments {
     thread_id: String,
 }
 
+#[derive(Deserialize, ToolSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ThreadListArguments {
+    #[tool_schema(
+        description = "Exact sha256 digest of the attached review context for this PR and head."
+    )]
+    context_digest: String,
+}
+
+pub(super) struct ThreadListContract;
+impl ToolContract for ThreadListContract {
+    type Arguments = ThreadListArguments;
+    const NAME: &'static str = REVIEW_THREAD_LIST_NAME;
+    const DESCRIPTION: &'static str = "Lists the retained review threads for the attached PR/head snapshot, with qualified IDs and locations. Resolution state is a current observation, not a historical ruling.";
+}
+
 pub(super) struct FindingTextContract;
 impl ToolContract for FindingTextContract {
     type Arguments = FindingTextArguments;
@@ -44,6 +60,18 @@ pub(super) fn decode(
     arguments: &NormalizedToolArguments,
     mode: BlobToolMode,
 ) -> Result<ReviewTextReference, BlobToolExecutorError> {
+    if mode == BlobToolMode::ThreadList {
+        let arguments = serde_json::from_str::<ThreadListArguments>(arguments.as_str())
+            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
+        return Ok(ReviewTextReference {
+            digest: arguments
+                .context_digest
+                .parse()
+                .map_err(|_| BlobToolExecutorError::Infrastructure)?,
+            entry_id: String::new(),
+            mode,
+        });
+    }
     let qualified = match mode {
         BlobToolMode::FindingText => {
             serde_json::from_str::<FindingTextArguments>(arguments.as_str())
@@ -106,6 +134,22 @@ impl BlobToolExecutor {
 fn select_text(bytes: &[u8], reference: &ReviewTextReference) -> Result<String, BlobReadError> {
     let context: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| BlobReadError::Corrupt)?;
+    if reference.mode == BlobToolMode::ThreadList {
+        let threads = context["threads"]
+            .as_array()
+            .ok_or(BlobReadError::Corrupt)?
+            .iter()
+            .map(|entry| {
+                let id = entry["thread_id"].as_str().ok_or(BlobReadError::Corrupt)?;
+                Ok(
+                    serde_json::json!({"thread_id": format!("{}#{id}", reference.digest),
+                    "author": entry["author"], "resolved": entry["resolved"],
+                    "path": entry["path"], "line": entry["line"]}),
+                )
+            })
+            .collect::<Result<Vec<_>, BlobReadError>>()?;
+        return Ok(serde_json::json!({"pr": context["pr"], "head_sha": context["head_sha"], "threads": threads}).to_string());
+    }
     let (collection, identity) = match reference.mode {
         BlobToolMode::FindingText => ("findings", "finding_id"),
         BlobToolMode::ThreadText => ("threads", "thread_id"),
@@ -129,6 +173,23 @@ fn select_text(bytes: &[u8], reference: &ReviewTextReference) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_list_preserves_snapshot_identity_without_exporting_rulings_or_bodies() {
+        let bytes = br#"{"pr":42,"head_sha":"reviewed","threads":[{"thread_id":"thread","author":"reviewer","resolved":true,"path":"a.rs","line":7,"text":"Later ruling","ruling":"ACCEPT"}]}"#;
+        let reference = ReviewTextReference {
+            digest: BlobDigest::digest(bytes),
+            entry_id: String::new(),
+            mode: BlobToolMode::ThreadList,
+        };
+        let result: serde_json::Value =
+            serde_json::from_str(&select_text(bytes, &reference).unwrap()).unwrap();
+        assert_eq!(result["pr"], 42);
+        assert_eq!(result["head_sha"], "reviewed");
+        assert_eq!(result["threads"][0]["path"], "a.rs");
+        assert!(result["threads"][0].get("text").is_none());
+        assert!(result["threads"][0].get("ruling").is_none());
+    }
 
     #[test]
     fn selecting_a_finding_returns_its_full_text_without_label_fields() {

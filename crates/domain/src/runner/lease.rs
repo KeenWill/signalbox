@@ -5,9 +5,9 @@ use super::credential_grant::CredentialDispatchAuthorization;
 use super::enrollment::ValidatedRunnerRegistration;
 use super::names::{RunnerDomainError, RunnerGeneration};
 use crate::{
-    ApprovedToolRequest, AuthorizedToolAttempt, EndedToolAttempt, RunnerId, RunnerLeaseId,
-    SessionId, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch, ToolBatchExecutionFailure,
-    ToolName,
+    ApprovedToolRequest, AuthorizedToolAttempt, EndedToolAttempt, NormalizedToolArguments,
+    RunnerId, RunnerLeaseId, RunnerSandboxProfile, RunnerWorkingDirectory, SessionId,
+    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolBatch, ToolBatchExecutionFailure, ToolName,
 };
 use std::{sync::atomic::AtomicBool, sync::atomic::Ordering};
 
@@ -18,6 +18,14 @@ pub struct RunnerLeaseCorrelation {
     pub lease: RunnerLeaseId,
     /// The runner assigned this lease.
     pub runner: RunnerId,
+    /// Registration revision authorizing this offer.
+    pub registration_revision: RunnerGeneration,
+    /// Pinned placement revision executed by this lease.
+    pub placement_revision: RunnerGeneration,
+    /// Concrete runner-interpreted execution directory.
+    pub working_directory: RunnerWorkingDirectory,
+    /// Exact pinned execution sandbox.
+    pub sandbox: RunnerSandboxProfile,
     /// The exact tool name.
     pub tool: ToolName,
     /// The exact tool-attempt dispatch correlation.
@@ -152,7 +160,12 @@ pub struct RunnerLease {
     pub(super) lease: RunnerLeaseId,
     pub(super) dispatch: ToolAttemptDispatchCorrelation,
     pub(super) runner: RunnerId,
+    pub(super) registration_revision: RunnerGeneration,
+    pub(super) placement_revision: RunnerGeneration,
+    pub(super) working_directory: RunnerWorkingDirectory,
+    pub(super) sandbox: RunnerSandboxProfile,
     pub(super) tool: ToolName,
+    pub(super) arguments: NormalizedToolArguments,
     pub(super) effect: RunnerToolEffectClass,
     pub(super) credential_authorization: Option<CredentialDispatchAuthorization>,
     pub(super) generation: RunnerGeneration,
@@ -165,6 +178,11 @@ impl RunnerLease {
             lease: input.lease,
             dispatch: input.dispatch,
             runner: input.runner,
+            registration_revision: input.registration_revision,
+            placement_revision: input.placement_revision,
+            working_directory: input.working_directory,
+            sandbox: input.sandbox,
+            arguments: input.arguments,
             tool: input.tool,
             effect: input.effect,
             credential_authorization: input.credential_authorization,
@@ -178,6 +196,10 @@ impl RunnerLease {
         RunnerLeaseCorrelation {
             lease: self.lease,
             runner: self.runner,
+            registration_revision: self.registration_revision,
+            placement_revision: self.placement_revision,
+            working_directory: self.working_directory.clone(),
+            sandbox: self.sandbox,
             tool: self.tool.clone(),
             dispatch: self.dispatch,
             generation: self.generation,
@@ -202,6 +224,11 @@ impl RunnerLease {
     /// Returns the tool leased for runner execution.
     pub const fn tool(&self) -> &ToolName {
         &self.tool
+    }
+
+    /// Borrows the immutable normalized dispatch payload paired by the tool batch.
+    pub const fn arguments(&self) -> &NormalizedToolArguments {
+        &self.arguments
     }
 
     /// Returns the runner-bound credential authorization when required.
@@ -314,7 +341,7 @@ impl RunnerLease {
                     claimed_attempt,
                     preparation: RunnerRetryPreparationGuard::new(retry_preparation),
                 }),
-                no_execution,
+                no_execution: no_execution.map(Box::new),
             },
         })
     }
@@ -328,6 +355,11 @@ impl RunnerLease {
             lease: input.lease,
             dispatch: input.dispatch,
             runner: input.runner,
+            registration_revision: input.registration_revision,
+            placement_revision: input.placement_revision,
+            working_directory: input.working_directory,
+            sandbox: input.sandbox,
+            arguments: input.arguments,
             tool: input.tool,
             effect: input.effect,
             credential_authorization: input.credential_authorization,
@@ -344,12 +376,14 @@ impl RunnerLease {
                         && authorization.tool == lease.tool
                 });
         let declaration_matches = registration.runner == lease.runner
+            && registration.revision() == lease.registration_revision
             && registration
                 .tool(&lease.tool)
                 .is_some_and(|declaration| declaration.effect == lease.effect);
         if lease.correlation() != input.recorded_correlation
             || lease.dispatch.session() != input.recorded_session
             || lease.effect != input.recorded_effect
+            || lease.arguments != input.recorded_arguments
             || lease.credential_authorization != input.recorded_credential_authorization
             || !credential_matches
             || !declaration_matches
@@ -399,7 +433,12 @@ pub(super) struct ValidatedRunnerLeaseOffer {
     pub(super) lease: RunnerLeaseId,
     pub(super) dispatch: ToolAttemptDispatchCorrelation,
     pub(super) runner: RunnerId,
+    pub(super) registration_revision: RunnerGeneration,
+    pub(super) placement_revision: RunnerGeneration,
+    pub(super) working_directory: RunnerWorkingDirectory,
+    pub(super) sandbox: RunnerSandboxProfile,
     pub(super) tool: ToolName,
+    pub(super) arguments: NormalizedToolArguments,
     pub(super) effect: RunnerToolEffectClass,
     pub(super) credential_authorization: Option<CredentialDispatchAuthorization>,
     pub(super) generation: RunnerGeneration,
@@ -414,8 +453,18 @@ pub struct RunnerLeaseReconstitutionInput {
     pub dispatch: ToolAttemptDispatchCorrelation,
     /// The runner recorded as the lease owner.
     pub runner: RunnerId,
+    /// Registration revision authorizing this offer.
+    pub registration_revision: RunnerGeneration,
+    /// Pinned placement revision executed by this lease.
+    pub placement_revision: RunnerGeneration,
+    /// Concrete runner-interpreted execution directory.
+    pub working_directory: RunnerWorkingDirectory,
+    /// Exact pinned execution sandbox.
+    pub sandbox: RunnerSandboxProfile,
     /// The exact tool name.
     pub tool: ToolName,
+    /// Immutable canonical request arguments.
+    pub arguments: NormalizedToolArguments,
     /// The runner tool effect class checked against the registration.
     pub effect: RunnerToolEffectClass,
     /// The runner-bound credential authorization, when required.
@@ -430,6 +479,8 @@ pub struct RunnerLeaseReconstitutionInput {
     pub recorded_session: SessionId,
     /// The independently recorded effect used to cross-check the projection.
     pub recorded_effect: RunnerToolEffectClass,
+    /// Canonical request payload cross-checking the lease projection.
+    pub recorded_arguments: NormalizedToolArguments,
     /// The independently recorded credential authorization used to cross-check the projection.
     pub recorded_credential_authorization: Option<CredentialDispatchAuthorization>,
     /// The independently recorded state used to cross-check the projection.
@@ -466,7 +517,7 @@ enum RunnerLeaseLossKind {
     RetryPermitted {
         lost: RunnerLease,
         retry: Box<RunnerLeaseRetryAuthority>,
-        no_execution: Option<RunnerLeaseNoExecutionProof>,
+        no_execution: Option<Box<RunnerLeaseNoExecutionProof>>,
     },
     CrashClassificationRequired {
         lost: RunnerLease,
@@ -503,7 +554,10 @@ impl RunnerLeaseLoss {
     /// Returns proof that the unclaimed lease never issued execution authority.
     pub const fn no_execution_proof(&self) -> Option<&RunnerLeaseNoExecutionProof> {
         match &self.kind {
-            RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => no_execution.as_ref(),
+            RunnerLeaseLossKind::RetryPermitted { no_execution, .. } => match no_execution {
+                Some(proof) => Some(&**proof),
+                None => None,
+            },
             RunnerLeaseLossKind::CrashClassificationRequired { .. } => None,
         }
     }

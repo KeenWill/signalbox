@@ -375,12 +375,14 @@ rust_integration_test(
         ":signalbox-debug",
         ":signalboxd",
         "//crates/convergence:fixtures",
+        "//apps/signalbox-runner:signalbox-runner",
     ],
     env = {
         "TMPDIR": "/tmp",
         "NEXTEST_BIN_EXE_approval_judge_eval": "$(rootpath :approval-judge-eval)",
         "NEXTEST_BIN_EXE_signalbox_debug": "$(rootpath :signalbox-debug)",
         "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+        "NEXTEST_BIN_EXE_signalbox_runner": "$(rootpath //apps/signalbox-runner:signalbox-runner)",
     },
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     rustc_env = {
@@ -393,7 +395,10 @@ rust_integration_test(
         "external",
         "no-sandbox",
     ],
-    deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
+    deps = CRATE_DEPS + [
+        "//apps/signalbox-runner:signalbox_runner",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
 )
 
 rust_integration_test(

@@ -94,3 +94,165 @@ export const toolExamples = [
   ),
   toolExample('custom_tool', { greeting: 'Hello' }, { answer: 'World' }),
 ]
+
+const jsonCase = (
+  name: string,
+  args: unknown,
+  result: unknown,
+  label: 'Arguments' | 'Output' = 'Output',
+) => {
+  const [request, output] = toolExample(name, args, result)
+  return {
+    name,
+    tool: { ...output, arguments: request.arguments },
+    label,
+    raw: JSON.stringify(label === 'Arguments' ? args : result),
+  }
+}
+export const jsonExamples = [
+  ...['1.0', '1e3', '-0', '9007199254740993'].map((raw, index) => {
+    const entry = jsonCase(`json_scalar_${index}`, {}, {})
+    entry.raw = raw
+    if (entry.tool.evidence.type === 'physical_attempt')
+      entry.tool = {
+        ...entry.tool,
+        evidence: { ...entry.tool.evidence, result: toolExcerpt(raw) },
+      }
+    return entry
+  }),
+  jsonCase('json_array_integer', {}, []),
+  jsonCase('json_array_overflow', {}, []),
+  jsonCase('json_array_multiline', {}, ['a\n'.repeat(40)]),
+  jsonCase('json_array_long', {}, ['a'.repeat(4100)]),
+  jsonCase(
+    'json_multiline_fields',
+    {},
+    Object.fromEntries(
+      Array.from({ length: 32 }, (_, index) => [`field_${index}`, 'a\nb\rc\r\nd']),
+    ),
+  ),
+  jsonCase(
+    'json_oversized',
+    { description: 'detail '.repeat(1000), last_field: 'end' },
+    {},
+    'Arguments',
+  ),
+  jsonCase(
+    'json_many_fields',
+    {},
+    Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`field_${index}`, index])),
+  ),
+  jsonCase('json_nested', {}, { nested: { subject: 'nested evidence' }, rows: [{ value: 1 }] }),
+  jsonCase('json_fallback', {}, ['first', { second: true }]),
+  jsonCase('json_empty', {}, {}),
+  jsonCase('json_number', {}, { nonce: 9007199254740991 }),
+  jsonCase('json_failure', {}, {}),
+  jsonCase('json_partial_arguments', {}, {}, 'Arguments'),
+  jsonCase('file_read', { view: 'text' }, {}),
+]
+const failureCase = jsonExamples.find((entry) => entry.name === 'json_failure')
+if (failureCase?.tool.evidence.type === 'physical_attempt') {
+  const failure = JSON.stringify({
+    message: 'Cannot read attachment',
+    detail: { reason: 'missing' },
+  })
+  failureCase.tool = {
+    ...failureCase.tool,
+    evidence: {
+      ...failureCase.tool.evidence,
+      state: 'known_failed',
+      failure_present: true,
+      failure: toolExcerpt(failure),
+    },
+  }
+  failureCase.raw = failure
+}
+for (const entry of jsonExamples) {
+  if (
+    ['json_number', 'json_array_integer', 'json_array_overflow'].includes(entry.name) &&
+    entry.tool.evidence.type === 'physical_attempt'
+  ) {
+    entry.raw =
+      entry.name === 'json_array_integer'
+        ? '[9007199254740993]'
+        : entry.name === 'json_array_overflow'
+          ? '[1e400]'
+          : '{"nonce":9007199254740993}'
+    entry.tool = {
+      ...entry.tool,
+      evidence: { ...entry.tool.evidence, result: toolExcerpt(entry.raw) },
+    }
+  }
+  if (entry.name === 'json_partial_arguments') {
+    entry.raw = '{"query":"partial'
+    entry.tool = {
+      ...entry.tool,
+      arguments: {
+        ...toolExcerpt(entry.raw),
+        offset_bytes: '10',
+        total_bytes: String(entry.raw.length + 10),
+      },
+    }
+  }
+  if (entry.name === 'file_read' && entry.tool.evidence.type === 'physical_attempt') {
+    entry.raw = 'remaining body","truncated":true}'
+    entry.tool = {
+      ...entry.tool,
+      evidence: {
+        ...entry.tool.evidence,
+        result: {
+          ...toolExcerpt(entry.raw),
+          offset_bytes: '128',
+          total_bytes: String(entry.raw.length + 128),
+        },
+      },
+    }
+  }
+}
+
+export const argumentExamples = [
+  { name: 'absent_arguments', arguments: null, empty: false },
+  {
+    name: 'partial_arguments',
+    arguments: { ...toolExcerpt('{"path":'), offset_bytes: '10', total_bytes: '18' },
+    empty: false,
+  },
+  { name: 'array_arguments', arguments: toolExcerpt('[]'), empty: false },
+  { name: 'empty_arguments', arguments: toolExcerpt('{}'), empty: true },
+].map((example) => ({
+  ...example,
+  tool: { ...toolExample(example.name, {}, {})[0], arguments: example.arguments },
+}))
+
+export const partialApproval = {
+  type: 'tool_approval_decision' as const,
+  tool_name: 'unsandboxed_exec',
+  decision: 'deny' as const,
+  actor: { type: 'policy' as const },
+  rationale: {
+    ...toolExcerpt('Command is outside the workspace'),
+    offset_bytes: '512',
+    total_bytes: '544',
+  },
+  request_id: '00000000-0000-7000-8000-000000000001',
+  turn_id: '00000000-0000-7000-8000-000000000002',
+  approval_judge_escalated: false,
+}
+
+export const emptyStructuredRead = toolExample(
+  'file_read',
+  {},
+  { status: 'structured', body: {}, truncated: false, cursor: null },
+)[1]
+
+export const scalarStructuredRead = toolExample(
+  'file_read',
+  {},
+  { status: 'structured', body: 'x'.repeat(4001), truncated: false, cursor: null },
+)[1]
+
+export const emptyTextStructuredRead = toolExample(
+  'file_read',
+  {},
+  { status: 'structured', body: '', truncated: false, cursor: null },
+)[1]

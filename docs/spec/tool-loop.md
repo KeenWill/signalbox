@@ -189,7 +189,14 @@ The seven local Git tools perform no remote operation. `git_log` limits its
 returned page to `max_entries`; merge ancestry traversal is independent of
 worktree inspection limits.
 
-The daemon-local registry supplies no runner execution path.
+The daemon executor routes the mirrored `echo` tool through the attached
+runner's serial lease service when admitted. The service returns durable
+completion only after the runner result and completed lease commit together; the
+tool loop reloads that ended physical attempt before continuing. Connection loss
+releases runner dispatch into the existing recovery wait only after the tool
+loop verifies the lost lease and its issuing turn attempt's durable yield. An
+unavailable reread retains that verification without invoking the executor
+again.
 
 Because the attempt schema requires a closed effect class, preparation records
 `EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight
@@ -374,6 +381,10 @@ only when the model-facing definition and permission are equal and the local
 effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
 `SideEffecting`. Effect class controls crash classification, not permission
 identity.
+
+Daemon-local `echo` admission does not consume an unpinned session's runner
+permission override or credential-profile selection and does not pin the
+placement.
 
 Workspace mutation tools advertise their UTF-8 byte limits. Oversized content,
 edit strings, and patches are rejected with the argument name, actual byte

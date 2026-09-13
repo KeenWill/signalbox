@@ -159,6 +159,98 @@ fn imported_command(
     )
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn title_context_reads_a_bounded_prefix_from_an_imported_seed() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let mut entries = vec![
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": "Older topic"}}).to_string();
+        512
+    ];
+    entries.push(serde_json::json!({"type": "user", "message": {"role": "user", "content": "界".repeat(100_000)}}).to_string());
+    let source = entries.join("\n");
+    let conversation = imported(0x180, 0x280, &source);
+    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+        ImportedConversationDropFacts::none(),
+    )
+    .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x480));
+    let mut semantic = 0x680;
+    ImportedSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(
+            imported_command(0x380, &conversation, ImportedSessionRelationship::Resume),
+            session,
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x780)),
+            || {
+                semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(semantic))
+            },
+        )
+        .await?;
+    assert_eq!(
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool.clone())
+            .conversation(session, 4)
+            .await?,
+        "界"
+    );
+    assert_eq!(
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+            .conversation(session, 400_000)
+            .await?
+            .lines()
+            .count(),
+        64,
+        "large input budgets retain only the recent row window"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn title_context_skips_empty_imported_entries() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut entries = vec![
+        serde_json::json!({"type":"user","message":{"role":"user","content":"Database indexing"}})
+            .to_string(),
+    ];
+    entries.extend(std::iter::repeat_n(
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":""}})
+            .to_string(),
+        512,
+    ));
+    let source = entries.join("\n");
+    let conversation = imported(0x180, 0x280, &source);
+    ImportedConversationStore::resolve_or_insert_with_drop_facts(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+        ImportedConversationDropFacts::none(),
+    )
+    .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x480));
+    let mut semantic = 0x680;
+    ImportedSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(
+            imported_command(0x380, &conversation, ImportedSessionRelationship::Resume),
+            session,
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x780)),
+            || {
+                semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(semantic))
+            },
+        )
+        .await?;
+    assert_eq!(
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+            .conversation(session, 64)
+            .await?,
+        "Database indexing"
+    );
+    Ok(())
+}
+
 /// first handling commits the exact imported prefix, seed, command result, session, and outbox
 /// event atomically.
 #[tokio::test(flavor = "multi_thread")]
