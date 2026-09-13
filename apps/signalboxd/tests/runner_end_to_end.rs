@@ -1,6 +1,6 @@
 //! The packaged daemon and runner preserve enrollment across a graceful restart.
 
-use signalbox_domain::{RunnerCatalog, RunnerEnrollmentId};
+use signalbox_domain::RunnerEnrollmentId;
 use signalbox_persistence::runner_protocol::{
     NonterminalRunnerConnection, RunnerConnectionCause, RunnerConnectionSnapshot,
     RunnerConnectionState, RunnerProtocolStore,
@@ -21,9 +21,11 @@ const HEARTBEAT_OBSERVATION: Duration = Duration::from_secs(21);
 #[ignore = "requires ephemeral PostgreSQL, OpenSSL, and both packaged binaries"]
 async fn real_runner_resumes_enrollment_after_graceful_shutdown() -> Result<(), Box<dyn Error>> {
     let processes = RunnerProcesses::start().await?;
-    let empty_catalog = RunnerCatalog::try_new([], [], [], [], [])
-        .map_err(|error| format!("empty fixture catalog is invalid: {error:?}"))?;
-    let store = RunnerProtocolStore::new(processes.pool.clone(), empty_catalog);
+    let store = signalboxd::runner_protocol_runtime::PostgresRunnerRegistrationService::local(
+        processes.pool.clone(),
+    )
+    .map_err(|error| format!("local runner catalog is invalid: {error:?}"))?
+    .recovery_store();
     let mut runner = processes.spawn_runner()?;
     processes
         .wait_for_runner(&mut runner, "runner enrolled")
@@ -38,6 +40,14 @@ async fn real_runner_resumes_enrollment_after_graceful_shutdown() -> Result<(), 
         .await?
         .ok_or("advertisement was not retained")?;
     assert_eq!(first.epoch().get(), 1);
+    assert_eq!(
+        registration
+            .registration()
+            .tools()
+            .map(|tool| tool.name().as_str())
+            .collect::<Vec<_>>(),
+        ["echo"]
+    );
     sleep(HEARTBEAT_OBSERVATION).await;
     let live = store
         .load_connection(first.enrollment())
