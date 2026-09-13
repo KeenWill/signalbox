@@ -204,3 +204,40 @@ test('requires reconciling a refreshed definition before saving an edited draft'
   await expect(page.getByRole('status')).toHaveText('Template saved.')
   expect(saves).toEqual([current.definition_toml])
 })
+
+test('follows refreshes after another browser saves the local draft', async ({ page }) => {
+  let current = detailFixture
+  await page.route('**/api/templates/code-review', (route) => route.fulfill({ json: current }))
+  await page.goto(scenario)
+  await page.getByRole('button', { name: /code-review/ }).click()
+  await page.getByText('Edit template', { exact: true }).click()
+  await page.getByText('System instructions', { exact: true }).click()
+  const editor = page.getByRole('textbox', { name: 'Template definition (TOML)' })
+  const matchingPrompt = 'Instructions also saved by another browser.'
+  const matchingSource = detailFixture.definition_toml.replace(
+    detailFixture.system_prompt,
+    matchingPrompt,
+  )
+  await editor.fill(matchingSource)
+  current = {
+    ...detailFixture,
+    summary: { ...detailFixture.summary, digest: '2'.repeat(64) },
+    system_prompt: matchingPrompt,
+    definition_toml: matchingSource,
+  }
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await expect(page.getByText(matchingPrompt, { exact: true })).toBeVisible()
+  await expect(editor).toHaveValue(matchingSource)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Save template', exact: true })).toBeEnabled()
+  const laterPrompt = 'A later change after the matching save.'
+  current = {
+    ...current,
+    summary: { ...current.summary, digest: '3'.repeat(64) },
+    system_prompt: laterPrompt,
+    definition_toml: matchingSource.replace(matchingPrompt, laterPrompt),
+  }
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await expect(editor).toHaveValue(current.definition_toml)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})

@@ -7,6 +7,7 @@ export function TemplateEditor({ api, detail }: { api: TemplateApi; detail: WebT
   const id = useId()
   const editor = useRef<HTMLTextAreaElement>(null)
   const [draft, setDraft] = useState<{ source: string; original: string } | null>(null)
+  if (draft?.source === detail.definition_toml) setDraft(null)
   const source = draft?.source ?? detail.definition_toml
   const conflict = draft !== null && draft.original !== detail.definition_toml
   const queries = useQueryClient()
