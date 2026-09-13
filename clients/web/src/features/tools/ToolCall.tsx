@@ -277,6 +277,7 @@ function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
 }
 
 function MediaRead({ arguments: args, result, resultExcerpt }: RendererProps) {
+  const bodyPreview = previewText(valueSummary(result.body))
   return (
     <>
       <strong>Read attachment</strong>
@@ -302,7 +303,10 @@ function MediaRead({ arguments: args, result, resultExcerpt }: RendererProps) {
               <FieldList value={fields(result.body)} />
             )
           ) : (
-            <p>{previewText(valueSummary(result.body)).content}</p>
+            <>
+              <p>{bodyPreview.content}</p>
+              {bodyPreview.omittedCharacters > 0 && <small>Showing part of the text</small>}
+            </>
           )}
         </section>
       ) : typeof result.status === 'string' ? (

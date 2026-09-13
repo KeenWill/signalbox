@@ -65,7 +65,9 @@ test('raw excerpts expose the complete fetched text on demand', async ({ page })
 for (const example of jsonExamples) {
   test(`keeps ${example.name} structured evidence behind Raw`, async ({ page }, testInfo) => {
     await page.goto('/src/features/tools/scenario.html')
-    const tool = page.getByRole('article', { name: `Tool ${example.name}`, exact: true })
+    const tool = page
+      .getByRole('region', { name: `Tool scenario ${example.name}`, exact: true })
+      .getByRole('article', { name: `Tool ${example.name}`, exact: true })
     await expect(tool.locator('pre')).toHaveCount(0)
     expect((await tool.textContent())?.length).toBeLessThan(6000)
     expect(await tool.locator('dt').count()).toBeLessThanOrEqual(32)
@@ -116,18 +118,28 @@ test('keeps a fetched approval rationale visible without a Raw toggle', async ({
 test('labels a completely parsed empty structured file body', async ({ page }) => {
   await page.goto('/src/features/tools/scenario.html?empty-read')
   const tool = page
-    .getByRole('article', { name: 'Tool file_read', exact: true })
-    .filter({ has: page.getByRole('region', { name: 'File contents', exact: true }) })
+    .getByRole('region', { name: 'Empty file read scenario', exact: true })
+    .getByRole('article')
   await expect(tool.getByRole('region', { name: 'File contents', exact: true })).toHaveText(
     'No fields',
   )
   await expect(tool.locator('pre')).toHaveCount(0)
   await tool.getByRole('button', { name: 'Raw', exact: true }).click()
   await expect(
-    page
-      .getByRole('article', { name: 'Tool file_read', exact: true })
-      .first()
-      .getByRole('region', { name: 'Output', exact: true })
-      .locator('code'),
+    tool.getByRole('region', { name: 'Output', exact: true }).locator('code'),
   ).toHaveText('{"status":"structured","body":{},"truncated":false,"cursor":null}')
+})
+
+test('labels omitted scalar file contents and preserves them in Raw', async ({ page }) => {
+  await page.goto('/src/features/tools/scenario.html')
+  const tool = page
+    .getByRole('region', { name: 'Scalar file read scenario', exact: true })
+    .getByRole('article')
+  const content = tool.getByRole('region', { name: 'File contents', exact: true })
+  await expect(content).toContainText('Showing part of the text')
+  expect((await content.locator('p').textContent())?.length).toBe(4000)
+  await tool.getByRole('button', { name: 'Raw', exact: true }).click()
+  const output = tool.getByRole('region', { name: 'Output', exact: true })
+  await output.getByRole('button', { name: 'Show all fetched text' }).click()
+  await expect(output.locator('code')).toContainText('x'.repeat(4001))
 })

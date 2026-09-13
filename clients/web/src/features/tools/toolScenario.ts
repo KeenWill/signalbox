@@ -215,3 +215,9 @@ export const emptyStructuredRead = toolExample(
   {},
   { status: 'structured', body: {}, truncated: false, cursor: null },
 )[1]
+
+export const scalarStructuredRead = toolExample(
+  'file_read',
+  {},
+  { status: 'structured', body: 'x'.repeat(4001), truncated: false, cursor: null },
+)[1]

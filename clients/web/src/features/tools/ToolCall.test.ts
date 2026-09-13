@@ -11,6 +11,17 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([4000, 4001])('labels scalar structured body omissions at %s characters', (length) => {
+    const markup = render(
+      toolExample(
+        'file_read',
+        {},
+        { status: 'structured', body: 'x'.repeat(length), truncated: false, cursor: null },
+      ),
+    )
+    expect(markup.includes('Showing part of the text')).toBe(length > 4000)
+  })
+
   it.each([0, 10])(
     'labels a structured empty file body only with a complete excerpt at offset %s',
     (offset) => {
