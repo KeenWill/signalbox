@@ -470,6 +470,33 @@ async fn session_title_rejects_cross_origin_before_command_handling() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+#[tokio::test]
+async fn session_title_suggestions_require_same_origin_json_and_configuration() {
+    let route = format!("/api/sessions/{}/title/suggest", Uuid::now_v7());
+    for (body, origin, expected) in [
+        ("{}", "http://other.example", StatusCode::FORBIDDEN),
+        (
+            "{\"title\":\"unadmitted\"}",
+            "http://localhost",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("{}", "http://localhost", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let response = production_router(None, None, None, None, None)
+            .oneshot(
+                Request::post(&route)
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, origin)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected, "body {body}, origin {origin}");
+    }
+}
+
 fn rated_example_target() -> ResolvedProviderTarget {
     ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid::uuid!(
         "20000000-0000-4000-8000-000000000001"
@@ -2496,4 +2523,99 @@ async fn api_admits_absent_fetch_metadata() {
         .await
         .expect("router responds");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn session_title_bootstrap_reports_configured_runtime_availability() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@localhost/unused")
+        .expect("lazy fixture pool");
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let source = crate::configuration::tests::configuration_with_codex_paths(
+        &std::env::current_exe().expect("fixture executable"),
+        directory.path(),
+    );
+    let source = format!(
+        r#"{source}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+    );
+    for (configured, codex, disabled, small_window) in [
+        (false, false, false, false),
+        (true, false, false, false),
+        (true, false, true, false),
+        (true, true, false, false),
+        (true, true, true, false),
+        (true, false, false, true),
+        (true, true, false, true),
+    ] {
+        let selection = if codex {
+            "10000000-0000-4000-8000-000000000002"
+        } else {
+            "10000000-0000-4000-8000-000000000001"
+        };
+        let source = if configured {
+            format!("{source}\n[session_titles]\nselection_id = {selection:?}\n")
+        } else {
+            source.clone()
+        };
+        let source = if small_window {
+            source
+                .replace("max_output_tokens = 4096", "max_output_tokens = 128")
+                .replace("max_output_tokens = 256", "max_output_tokens = 128")
+                .replace(
+                    "context_window_tokens = 200000",
+                    "context_window_tokens = 1024",
+                )
+        } else {
+            source
+        };
+        let factory = crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None);
+        let factory = if disabled {
+            factory.with_codex_cli_unavailable("codex_cli_pin_mismatch")
+        } else {
+            factory
+        };
+        let models = crate::HubModelConfiguration::parse(&source).expect("fixture models");
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let reload = crate::configuration_reload::ConfigurationReload::new(
+            pool.clone(),
+            models.clone(),
+            crate::SessionTemplateConfiguration::default(),
+            PathBuf::from("unused-models.toml"),
+            PathBuf::from("unused-templates.toml"),
+            None,
+        )
+        .expect("reload fixture")
+        .with_runtime_factory(factory)
+        .with_title_invocation_processes(
+            crate::credential_invocations::CredentialInvocationProcesses::new(pool.clone(), nudge),
+        );
+        let response = production_router(None, Some(pool.clone()), None, Some(models), None)
+            .layer(axum::Extension(reload))
+            .oneshot(
+                Request::get("/api/bootstrap")
+                    .header(header::HOST, "localhost")
+                    .body(Body::empty())
+                    .expect("bootstrap request"),
+            )
+            .await
+            .expect("bootstrap response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bootstrap: WebContractBootstrap =
+            serde_json::from_slice(&response_body(response).await).expect("bootstrap DTO");
+        assert_eq!(
+            bootstrap.capabilities.session_title_generation,
+            configured && !(codex && disabled) && !small_window
+        );
+    }
+    pool.close().await;
 }

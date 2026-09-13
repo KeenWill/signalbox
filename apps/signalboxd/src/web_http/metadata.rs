@@ -22,6 +22,71 @@ use super::{
     web_input_conflict,
 };
 
+pub(super) async fn suggest_title(
+    State(state): State<WebApiState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
+    tasks: Option<axum::Extension<tokio::sync::mpsc::Sender<super::SessionTitleTask>>>,
+    Path(session_id): Path<String>,
+    request: Request,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SuggestRequest {}
+    if let Err(response) = decode_bounded_json::<SuggestRequest>(request).await {
+        return response;
+    }
+    let Ok(session) = parse_canonical_session_id(&session_id) else {
+        return invalid_title();
+    };
+    let service = state
+        .pool
+        .and_then(|pool| reload.and_then(|reload| reload.0.session_titles(pool)));
+    let (Some(service), Some(axum::Extension(tasks))) = (service, tasks) else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_titles_unavailable",
+            "Session name suggestions are not configured.",
+        );
+    };
+    match await_title_generation(tasks, async move { service.generate(session, None).await }).await
+    {
+        Ok(Some(title)) => {
+            axum::Json(signalbox_web_contract::WebSessionTitleSuggestion { title }).into_response()
+        }
+        Ok(None) | Err(crate::session_titles::TitleError::NotFound) => application_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "The session does not exist.",
+        ),
+        Err(error) => {
+            tracing::warn!(session_id = %session.into_uuid(), ?error, "session title suggestion failed");
+            application_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_title_generation_failed",
+                "A name could not be suggested. Try again.",
+            )
+        }
+    }
+}
+
+async fn await_title_generation(
+    tasks: tokio::sync::mpsc::Sender<super::SessionTitleTask>,
+    generation: impl std::future::Future<
+        Output = Result<Option<String>, crate::session_titles::TitleError>,
+    > + Send
+    + 'static,
+) -> Result<Option<String>, crate::session_titles::TitleError> {
+    let (completed, result) = tokio::sync::oneshot::channel();
+    tasks
+        .try_send(Box::pin(async move {
+            let _ = completed.send(generation.await);
+        }))
+        .map_err(|_| crate::session_titles::TitleError::Generation)?;
+    result
+        .await
+        .unwrap_or(Err(crate::session_titles::TitleError::Generation))
+}
+
 pub(super) async fn replace_title(
     State(state): State<WebApiState>,
     Path(session_id): Path<String>,
@@ -133,6 +198,190 @@ mod tests {
                     .to_string(),
             ))
             .expect("title request")
+    }
+
+    #[tokio::test]
+    async fn saturated_suggestion_handoff_is_rejected_without_a_detached_waiter() {
+        let (tasks, mut pending) = tokio::sync::mpsc::channel::<super::super::SessionTitleTask>(1);
+        tasks.try_send(Box::pin(async {})).expect("full handoff");
+        let (settled, settlement) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            await_title_generation(tasks, async move {
+                settled.send(()).expect("fixture observes settlement");
+                Ok(None)
+            })
+            .await,
+            Err(crate::session_titles::TitleError::Generation)
+        ));
+        assert!(
+            settlement.await.is_err(),
+            "rejected generation is dropped before it starts"
+        );
+        pending.recv().await.expect("buffered task").await;
+        assert!(
+            pending.recv().await.is_none(),
+            "saturation leaves no detached handoff waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_abort_drains_a_suggestion_after_its_request_is_cancelled() {
+        let (tasks, mut pending) = tokio::sync::mpsc::channel(1);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (held, mut ended) = tokio::sync::oneshot::channel::<()>();
+        let request = tokio::spawn(await_title_generation(tasks, async move {
+            started.send(()).expect("fixture observes execution");
+            std::future::pending::<()>().await;
+            drop(held);
+            Ok(None)
+        }));
+        let mut runtime_tasks = tokio::task::JoinSet::new();
+        runtime_tasks.spawn(pending.recv().await.expect("runtime receives title task"));
+        ready.await.expect("generation started");
+        request.abort();
+        assert!(request.await.expect_err("request cancelled").is_cancelled());
+        assert!(matches!(
+            ended.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        runtime_tasks.abort_all();
+        while runtime_tasks.join_next().await.is_some() {}
+        assert!(
+            ended.await.is_err(),
+            "runtime drain drops the generation future"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn cancelled_suggestion_request_still_settles_its_call_and_releases_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_application::UsageTokenAxes;
+        use signalbox_domain::{ModelCallId, ProviderModelIdentity, ResolvedProviderTarget};
+        use signalbox_persistence::{
+            credential_invocations,
+            session_titles::{
+                PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository,
+            },
+        };
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let models =
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)?;
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let selection =
+            DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000001"));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )
+        .prepare(session)
+        .map_err(|_| "session creation rejected")?;
+        signalbox_persistence::create_session::CreateSessionRepository::new(
+            pool.clone(),
+            models.session_credential_pin(),
+        )
+        .handle(creation)
+        .await?;
+        let profile = "codex-cancelled-title-fixture";
+        credential_invocations::replace_registrations(
+            &pool,
+            &[(profile.to_owned(), std::num::NonZeroU32::new(1))],
+        )
+        .await?;
+        let mut call = SessionTitleCall {
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            session,
+            selection,
+            target: ResolvedProviderTarget::naming(
+                ProviderModelIdentity::from_uuid(Uuid::now_v7()),
+            ),
+            credential_reference: profile.to_owned(),
+            input_includes_cache_tokens: false,
+            initial_for_turn: None,
+        };
+        let repository = SessionTitleRepository::new(pool.clone());
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let mut generation_call = call.clone();
+        let generation_repository = repository.clone();
+        let (tasks, mut pending) = tokio::sync::mpsc::channel(1);
+        let mut runtime_tasks = tokio::task::JoinSet::new();
+        let request = tokio::spawn(await_title_generation(tasks, async move {
+            assert!(
+                generation_repository
+                    .prepare(&mut generation_call, &Default::default())
+                    .await
+                    .expect("prepare")
+                    == PrepareSessionTitleOutcome::Prepared
+            );
+            generation_repository
+                .authorize(generation_call.call)
+                .await
+                .expect("authorize");
+            prepared_tx.send(()).expect("request observes preparation");
+            resume_rx
+                .await
+                .expect("fixture releases the provider response");
+            let title = generation_repository
+                .finish_generated(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    generation_call.call,
+                    Some("Database indexing work".to_owned()),
+                    UsageTokenAxes {
+                        input: Some(17),
+                        output: Some(5),
+                        cache_creation_input: None,
+                        cache_read_input: None,
+                    },
+                )
+                .await
+                .expect("settlement");
+            settled_tx.send(()).expect("fixture observes settlement");
+            Ok(title)
+        }));
+        runtime_tasks.spawn(pending.recv().await.expect("runtime receives title task"));
+        prepared_rx.await?;
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("request was cancelled")
+                .is_cancelled()
+        );
+        resume_tx.send(()).expect("generation outlives its request");
+        settled_rx.await?;
+        runtime_tasks
+            .join_next()
+            .await
+            .expect("title task")
+            .expect("title completes");
+        let completed: (String, Option<String>, bool) = sqlx::query_as(
+            "SELECT call.state_kind, call.title, reservation.released_at IS NOT NULL
+             FROM session_title_model_call call JOIN credential_invocation_reservation reservation USING (model_call_id)
+             WHERE model_call_id = $1").bind(call.call.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(
+            completed,
+            (
+                "terminal".to_owned(),
+                Some("Database indexing work".to_owned()),
+                true
+            )
+        );
+        call.call = ModelCallId::from_uuid(Uuid::now_v7());
+        assert!(
+            repository.prepare(&mut call, &Default::default()).await?
+                == PrepareSessionTitleOutcome::Prepared,
+            "the next invocation can use capacity"
+        );
+        repository.abandon(call.call).await?;
+        pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]

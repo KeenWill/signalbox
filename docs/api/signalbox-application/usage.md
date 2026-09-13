@@ -144,6 +144,7 @@ pub enum UsageCallKind {
     ModelCall,
     ApprovalJudge,
     ContextCompaction,
+    SessionTitle,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
 ```
@@ -155,6 +156,7 @@ pub enum UsageCallScope {
     ModelCall(signalbox_domain::TurnId),
     ApprovalJudge(signalbox_domain::TurnId),
     ContextCompaction,
+    SessionTitle,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl UsageCallScope {

@@ -115,6 +115,8 @@ pub struct ConfigurationReload {
     startup: toml::Table,
     watch: Option<RepositoryWatchRuntime>,
     runtime_factory: Option<crate::model_catalog_runtime::ModelRuntimeFactory>,
+    title_invocation_processes:
+        Option<crate::credential_invocations::CredentialInvocationProcesses>,
     github_tool_credential: Option<PathBuf>,
     integration_credentials: crate::FileCredentialAccess,
     convergence: PostgresConvergenceSweepStore,
@@ -260,6 +262,7 @@ impl ConfigurationReload {
             pool,
             watch: None,
             runtime_factory: None,
+            title_invocation_processes: None,
             github_tool_credential: None,
             integration_credentials: crate::FileCredentialAccess::from_files([]),
             model_path,
@@ -295,6 +298,52 @@ impl ConfigurationReload {
     pub fn with_github_tool_credential(mut self, path: PathBuf) -> Self {
         self.github_tool_credential = Some(path);
         self
+    }
+
+    /// Shares ordinary invocation supervision with session-title calls.
+    pub fn with_title_invocation_processes(
+        mut self,
+        processes: crate::credential_invocations::CredentialInvocationProcesses,
+    ) -> Self {
+        self.title_invocation_processes = Some(processes);
+        self
+    }
+
+    pub(crate) fn start_initial_title(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+    ) {
+        if self.catalogs().models.session_title_selection().is_some()
+            && let Some(processes) = &self.title_invocation_processes
+        {
+            processes.retain_initial_title(session, turn);
+        }
+    }
+
+    pub(crate) fn session_titles(
+        &self,
+        pool: sqlx::PgPool,
+    ) -> Option<crate::session_titles::SessionTitles> {
+        let models = self.catalogs().models;
+        let (_, target, mut settings) = models.session_title_settings()?;
+        let catalog = models.runtime_model_catalog();
+        let definition = catalog.resolve(target)?;
+        crate::session_titles::title_input_budget(
+            &mut settings,
+            definition.context_window_tokens(),
+        )?;
+        let adapter = models.adapter_for_provider_model(definition.provider_model())?;
+        let factory = self.runtime_factory.as_ref()?;
+        if !factory.adapter_available(adapter) {
+            return None;
+        }
+        Some(crate::session_titles::SessionTitles::new(
+            pool,
+            models,
+            factory.clone(),
+            self.title_invocation_processes.clone()?,
+        ))
     }
 
     /// Rechecks the startup integration credential files on each reload.
@@ -406,6 +455,18 @@ impl ConfigurationReload {
                     )
                 })?;
                 self.deliver(request, &intent, replacement, true).await?;
+            }
+        }
+        self.restore_pending_titles().await?;
+        Ok(())
+    }
+
+    async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
+        if let Some(processes) = &self.title_invocation_processes {
+            if self.catalogs().models.session_title_selection().is_none() {
+                processes.clear_pending_titles();
+            } else {
+                processes.restore_pending_titles().await?;
             }
         }
         Ok(())
@@ -588,6 +649,7 @@ impl ConfigurationReload {
             })?;
             watch.nudge_restored(restored).await;
         }
+        self.restore_pending_titles().await?;
         self.repository
             .finish_profile_reload(request, &changed_profiles)
             .await?;

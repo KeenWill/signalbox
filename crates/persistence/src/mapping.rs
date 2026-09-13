@@ -191,6 +191,7 @@ pub(crate) const fn usage_call_kind_to_str(value: UsageCallKind) -> &'static str
         UsageCallKind::ModelCall => "model_call",
         UsageCallKind::ApprovalJudge => "approval_judge",
         UsageCallKind::ContextCompaction => "context_compaction",
+        UsageCallKind::SessionTitle => "session_title",
     }
 }
 
@@ -199,6 +200,7 @@ pub(crate) fn usage_call_kind_from_str(value: &str) -> Option<UsageCallKind> {
         "model_call" => Some(UsageCallKind::ModelCall),
         "approval_judge" => Some(UsageCallKind::ApprovalJudge),
         "context_compaction" => Some(UsageCallKind::ContextCompaction),
+        "session_title" => Some(UsageCallKind::SessionTitle),
         _ => None,
     }
 }

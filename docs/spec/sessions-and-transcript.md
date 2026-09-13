@@ -512,7 +512,51 @@ boundary's not-found response.
 `SubmitInput` and `ReplaceSessionMetadata` are the conversational command
 payloads that carry an actor. `SubmitInput` and the process-facing metadata
 request fix the user actor, and a separate constructor accepts only the tool
-actor for the exact executing tool request.
+actor for the exact executing tool request. Title generation fixes the core
+actor. Public metadata replacement handling rejects core commands; only title
+settlement installs core metadata.
+
+When `session_titles.selection_id` names a configured model selection, a
+completed assistant turn claims one title call if the title is unset and no
+initial claim is held. The configured model receives recent conversation text
+excluding opaque provider reasoning and compaction payloads, and a short
+plain-language title request; completion installs the title only if it is still
+unset, preserving other metadata under the session lock. Generated titles must
+fit the complete preserved metadata snapshot before being accepted.
+Initial-title installation and terminal call evidence commit atomically.
+`POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
+`{ "title": "..." }` without saving; accepting a suggestion uses the metadata
+PATCH route. Generation continues through settlement if the requesting browser
+disconnects or cancels. Recovery after guard loss aborts and drains all title
+work. At most four title tasks run at once; recovery prepares each conversation
+inside an admitted task without blocking reservation reconciliation. A full
+initial-title handoff defers work instead of waiting for title execution.
+Conversation-read and credential-read failures abandon unsent title claims.
+Title calls record their target, credentials, send boundary, completion, and
+reported token axes as session-level `session_title` usage evidence. Runtime
+validation uses the selectable model and retains its mapped fast target. Title
+calls use ordinary credential-pool admission and invocation capacity. Initial
+work without an available title runtime, contention, and transient preparation
+failures remain with periodic invocation recovery until admission or
+ineligibility, using the current model catalog at admission; a terminal report
+naming another call leaves usage unreported. Startup closes abandoned title
+calls and releases their initial claims and unregistered invocation
+reservations. Startup and successful reload delivery reconstruct deferred
+initial work from completed turns in untitled sessions without an initial claim
+regardless of current title runtime availability. Settlement retries once before
+abandoning the call. Post-preparation database failures requeue initial work.
+Failed title cleanup remains registered with periodic invocation recovery until
+it succeeds; a later completed turn can claim after abandonment. Title requests
+cap output at 256 tokens and half the context window, within the configured
+model limit. A window too small for the fixed prompt and conservative framing
+allowance is rejected before claiming a call. Generated titles are at most 256
+UTF-8 bytes. Bootstrap advertises runtime availability through
+`capabilities.session_title_generation`, including startup availability of the
+selected effective adapter and sufficient prompt room. Unconfigured title
+generation clears deferred work. Title conversation SQL limits projected
+membership and nonempty payload rows to 64, newest first, and each text payload
+to the input byte budget. Completed-turn dispatch retains identifiers; title
+preparation runs inside an admitted task.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

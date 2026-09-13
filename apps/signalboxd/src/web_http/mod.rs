@@ -140,6 +140,7 @@ const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
 struct WebHttpState {
+    pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     blob_read_budget: Arc<Semaphore>,
 }
@@ -264,6 +265,9 @@ impl fmt::Display for WebHttpRuntimeError {
 
 impl Error for WebHttpRuntimeError {}
 
+/// Title work submitted to the daemon incarnation's runtime task set.
+pub type SessionTitleTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 /// Bound browser HTTP runtime.
 pub struct WebHttpRuntime {
     listener: TcpListener,
@@ -319,6 +323,12 @@ impl BoundWebHttpListener {
 }
 
 impl WebHttpRuntime {
+    /// Hands suggestion execution to the runtime task owner.
+    pub fn with_session_title_tasks(mut self, tasks: mpsc::Sender<SessionTitleTask>) -> Self {
+        self.router = self.router.layer(axum::Extension(tasks));
+        self
+    }
+
     /// Shares the daemon's ordering between tool dispatch and turn interruption.
     pub fn with_tool_dispatch_gate(
         mut self,
@@ -541,6 +551,7 @@ fn production_router_with_budget(
     eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
     let http_state = WebHttpState {
+        pool: pool.clone(),
         blobs,
         blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
     };
@@ -573,6 +584,10 @@ fn production_router_with_budget(
         .route(
             "/sessions/{session_id}/metadata",
             patch(metadata::replace_title),
+        )
+        .route(
+            "/sessions/{session_id}/title/suggest",
+            post(metadata::suggest_title),
         )
         .route("/sessions/{session_id}/input", post(session_submit_input))
         .route("/sessions/{session_id}/cancel", post(actions::cancel_turn))

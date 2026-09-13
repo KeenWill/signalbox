@@ -51,6 +51,8 @@ pub struct WebContractCapabilities {
     pub bounded_json: bool,
     /// JSON mutations validate a supplied browser origin against authority.
     pub same_origin_json_mutations: bool,
+    /// This runtime has configured model-backed session name generation.
+    pub session_title_generation: bool,
     /// Incremental response items use newline-delimited JSON.
     pub ndjson_streaming: bool,
     /// Immutable same-origin blob descriptors and byte delivery are available.
@@ -137,6 +139,7 @@ impl WebContractBootstrap {
             capabilities: WebContractCapabilities {
                 bounded_json: true,
                 same_origin_json_mutations: true,
+                session_title_generation: false,
                 ndjson_streaming: true,
                 immutable_blob_content,
                 blob_derivations: image_derivatives,
@@ -253,6 +256,18 @@ pub struct WebCreateSessionRequest {
 pub struct WebCreateSessionResponse {
     pub session_id: WebSessionId,
     pub summary: WebSessionCatalogSummary,
+}
+
+/// Maximum UTF-8 bytes in a generated session title.
+pub const MAX_WEB_SESSION_TITLE_UTF8_BYTES: usize = 256;
+
+/// A generated session name awaiting user acceptance.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTitleSuggestion {
+    /// Generated title of at most 256 UTF-8 bytes, saved only after acceptance.
+    #[schemars(length(min = 1, max = MAX_WEB_SESSION_TITLE_UTF8_BYTES))]
+    pub title: String,
 }
 
 /// Human title replacement preserving the other loaded metadata fields.
@@ -2306,6 +2321,7 @@ pub enum WebUsageCallKind {
     ModelCall,
     ApprovalJudge,
     ContextCompaction,
+    SessionTitle,
 }
 
 /// Closed provenance of one token-evidence projection.
@@ -2610,7 +2626,7 @@ pub struct WebUsageCall {
     pub call_kind: WebUsageCallKind,
     pub call_id: WebUuid,
     pub session_id: WebSessionId,
-    /// Owning turn, present-but-null exactly for context compaction.
+    /// Owning turn, present-but-null for context compaction and session title calls.
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub turn_id: Option<WebUuid>,
@@ -3166,6 +3182,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebCreateSessionResponse",
             decoder: "decodeWebCreateSessionResponse",
             schema: create_session_response_schema,
+        },
+        ContractSchema {
+            name: "WebSessionTitleSuggestion",
+            decoder: "decodeWebSessionTitleSuggestion",
+            schema: canonical_schema(schemars::schema_for!(WebSessionTitleSuggestion).to_value()),
         },
         ContractSchema {
             name: "WebSessionTitleRequest",
@@ -5304,11 +5325,11 @@ export function decodeWebUsageCallPage(value, order) {{
     if (profileBytes === 0 || profileBytes > 256) {{
       fail(`usage_call_page.calls[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
     }}
-    const isCompaction = call.call_kind === "context_compaction";
-    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {{
+    const isSessionLevel = call.call_kind === "context_compaction" || call.call_kind === "session_title";
+    if (!Object.hasOwn(call, "turn_id") || isSessionLevel !== (call.turn_id === null)) {{
       fail(
         `usage_call_page.calls[${{index}}].turn_id`,
-        "null exactly for context compaction calls",
+        "null exactly for session-level calls",
       );
     }}
     const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};
@@ -5431,6 +5452,11 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
                 max_json_body_bytes = current_bootstrap.limits.max_json_body_bytes,
                 max_ndjson_item_bytes = current_bootstrap.limits.max_ndjson_item_bytes,
                 max_session_live_queued_turns = current_bootstrap.limits.max_session_live_queued_turns,
+            ));
+        }
+        if schema.name == "WebSessionTitleSuggestion" {
+            output.push_str(&format!(
+                "  if (new TextEncoder().encode(value.title).length > {MAX_WEB_SESSION_TITLE_UTF8_BYTES}) {{\n    fail(\"session_title_suggestion.title\", \"at most {MAX_WEB_SESSION_TITLE_UTF8_BYTES} UTF-8 bytes\");\n  }}\n"
             ));
         }
         if schema.name == "WebSessionLiveSnapshot" {
