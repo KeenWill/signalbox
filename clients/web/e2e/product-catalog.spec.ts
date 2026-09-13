@@ -1077,12 +1077,13 @@ test('releases the rename editor while the acknowledged catalog refresh is stall
   expect(requests[1]?.command_id).toBe(requests[0]?.command_id)
 })
 
-for (const [leaveCatalog, firstRequestArrived] of [
-  [false, true],
-  [true, true],
-  [true, false],
+for (const [leaveCatalog, firstRequestArrived, concurrentFailure] of [
+  [false, true, false],
+  [true, true, false],
+  [true, false, false],
+  [true, true, true],
 ] as const) {
-  test(`replays an ambiguous rename after editor closure with catalog unmount ${leaveCatalog} and first request delivered ${firstRequestArrived}`, async ({
+  test(`replays an ambiguous rename after editor closure with catalog unmount ${leaveCatalog} and first request delivered ${firstRequestArrived} and concurrent retry failure ${concurrentFailure}`, async ({
     page,
   }) => {
     await useCatalogFixture(page)
@@ -1091,6 +1092,7 @@ for (const [leaveCatalog, firstRequestArrived] of [
     let stallRefresh = false
     let refreshStalled = false
     let releaseRefresh: (() => Promise<void>) | undefined
+    let failRetry: (() => Promise<void>) | undefined
     await page.route('**/api/sessions?**', (route) => {
       const fulfill = () =>
         route.fulfill({
@@ -1110,6 +1112,10 @@ for (const [leaveCatalog, firstRequestArrived] of [
     })
     await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
       requests.push(route.request().postDataJSON())
+      if (concurrentFailure && requests.length === 3) {
+        failRetry = () => route.abort('failed')
+        return
+      }
       if (requests.length === 1) {
         if (!firstRequestArrived) {
           await route.abort('failed')
@@ -1169,6 +1175,12 @@ for (const [leaveCatalog, firstRequestArrived] of [
       await expect(input).toHaveAttribute('readonly', '')
       await expect(input).toHaveValue('My ambiguous title')
       await expect(page.getByRole('alert')).toContainText('Rename acknowledged')
+      if (concurrentFailure) {
+        await page.getByRole('button', { name: 'Save', exact: true }).click()
+        await expect.poll(() => requests.length).toBe(3)
+        expect(requests[2]).toEqual(requests[0])
+        await expect(input).toBeDisabled()
+      }
       const refreshed = page.waitForResponse((response) =>
         response.url().includes('/api/sessions?'),
       )
@@ -1179,14 +1191,18 @@ for (const [leaveCatalog, firstRequestArrived] of [
           name: firstRequestArrived ? /Another writer title/ : /My ambiguous title/,
         }),
       ).toBeVisible()
+      if (concurrentFailure) {
+        await expect(input).toHaveValue('Another writer title')
+        await failRetry?.()
+      }
     }
     await expect(input).toBeEditable()
     const confirmedTitle = firstRequestArrived ? 'Another writer title' : 'My ambiguous title'
     await expect(input).toHaveValue(confirmedTitle)
     await page.getByRole('button', { name: 'Save', exact: true }).click()
-    await expect.poll(() => requests.length).toBe(3)
-    expect(requests[2]?.title).toBe(confirmedTitle)
-    expect(requests[2]?.command_id).not.toBe(requests[0]?.command_id)
+    await expect.poll(() => requests.length).toBe(concurrentFailure ? 4 : 3)
+    expect(requests.at(-1)?.title).toBe(confirmedTitle)
+    expect(requests.at(-1)?.command_id).not.toBe(requests[0]?.command_id)
     await expect(input).toBeHidden()
     await expect(page.getByRole('button', { name: new RegExp(confirmedTitle) })).toBeVisible()
   })
