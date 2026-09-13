@@ -5,6 +5,7 @@ export function ToolResultMedia({ media }: { media?: WebTimelineToolMediaReferen
   if (!media) return null
   return (
     <AttachmentReferences
+      presentationKind={media.presentation_kind}
       attachments={[
         { blob_id: media.digest, length_bytes: media.length_bytes, media_type: media.media_type },
       ]}

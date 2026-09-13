@@ -11,6 +11,25 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('summarizes media reads without displaying their digest', () => {
+    const markup = render(
+      toolExample(
+        'file_read',
+        { digest: 'sha256:source', view: 'page_image', options: { page: 2 } },
+        {
+          status: 'read',
+          output: 'image',
+          digest: 'sha256:result',
+          media_type: 'image/png',
+          byte_length: '100',
+        },
+      ),
+    )
+    expect(markup).toContain('Page image')
+    expect(markup).toContain('Image returned')
+    expect(markup).not.toContain('sha256:')
+  })
+
   it.each([0, 512])('retains the requested read window at byte %s', (offset) => {
     const [tool] = toolExample('read_file', { path: 'file.txt', offset, max_bytes: 1024 }, {})
     const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))

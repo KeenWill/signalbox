@@ -52,10 +52,16 @@ export const nextResolutionSequence = (): number => {
   return lastResolutionSequence
 }
 
-export const attachmentTypeLabel = (mediaType?: string | null): string => {
+export const attachmentTypeLabel = (
+  mediaType?: string | null,
+  presentationKind?: 'image' | 'document',
+): string => {
   const normalizedMediaType = attachmentDescriptorMediaType(mediaType)
     .split(';', 1)[0]
     ?.toLowerCase()
+  if (presentationKind === 'image') return 'Image'
+  if (presentationKind === 'document')
+    return normalizedMediaType === 'application/pdf' ? 'PDF' : 'Document'
   if (normalizedMediaType?.startsWith('image/')) return 'Image'
   if (normalizedMediaType?.startsWith('audio/')) return 'Audio'
   if (normalizedMediaType?.startsWith('video/')) return 'Video'
@@ -70,14 +76,18 @@ export const attachmentTypeLabel = (mediaType?: string | null): string => {
 export const inspectedArtifact = (
   descriptor: WebBlobDescriptor,
   sequence: number,
+  presentationKind?: 'image' | 'document',
 ): ArtifactItem => {
   const identity = {
     id: artifactResolutionId({ digest: descriptor.digest, sequence }),
     displayName:
-      descriptor.display_filename[0] ?? attachmentTypeLabel(descriptor.declared_media_type),
+      descriptor.display_filename[0] ??
+      attachmentTypeLabel(descriptor.declared_media_type, presentationKind),
   }
-  return selectImageView(descriptor) !== undefined ||
-    selectBoundedOriginalView(descriptor) !== undefined
+  return presentationKind === 'image' ||
+    (presentationKind !== 'document' &&
+      (selectImageView(descriptor) !== undefined ||
+        selectBoundedOriginalView(descriptor) !== undefined))
     ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
     : { ...identity, kind: 'blob', descriptor }
 }
@@ -96,8 +106,10 @@ export function ArtifactInspector({
   commandContext,
   onClose,
   state,
+  presentationKind,
 }: {
   available: boolean
+  presentationKind?: 'image' | 'document'
   commandContext: CommandContext
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
@@ -110,8 +122,8 @@ export function ArtifactInspector({
   const resolved = descriptor.data
   const sequence = request?.sequence ?? 0
   const artifact = useMemo(
-    () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence)),
-    [resolved, sequence],
+    () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence, presentationKind)),
+    [resolved, sequence, presentationKind],
   )
   // The registry gates original loading on the invoking context, so the inspector admits exactly
   // the artifact it resolved, and only when the descriptor proves a bounded original.
