@@ -1427,6 +1427,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambient_file_credentials_reject_empty_values_at_load_reload_and_use() {
+        use signalbox_model_runtime::CredentialAccessFailure;
+
+        const PURPOSE: &str = "task-fixture";
+        const VALID_CREDENTIAL: &str = "synthetic-task-secret";
+        let (directory, reload) = fixture();
+        let path = directory.path().join("ambient-file");
+        std::fs::write(&path, VALID_CREDENTIAL).expect("valid initial credential");
+        let configured = format!(
+            "{}\n[[credential_profiles]]\nname = {PURPOSE:?}\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\nfile = {path:?}\n",
+            reload.catalogs().models.source()
+        );
+        std::fs::write(&reload.model_path, configured).expect("ambient profile");
+        let models = reload
+            .read_replacement()
+            .expect("valid credential admitted")
+            .models;
+        assert_eq!(
+            models
+                .resolve_ambient_task_credential(PURPOSE)
+                .await
+                .expect("valid credential resolves")
+                .1
+                .expose_bytes(),
+            VALID_CREDENTIAL.as_bytes()
+        );
+
+        for empty_value in [b"".as_slice(), b"\r\n".as_slice()] {
+            std::fs::write(&path, empty_value).expect("rotate to normalized empty credential");
+            assert_eq!(
+                models
+                    .validate_credential_files()
+                    .expect_err("normalized empty credential rejected at load")
+                    .failure,
+                CredentialAccessFailure::Unavailable
+            );
+            assert_eq!(
+                models
+                    .resolve_ambient_task_credential(PURPOSE)
+                    .await
+                    .expect_err("normalized empty credential rejected at use")
+                    .failure,
+                CredentialAccessFailure::Unavailable
+            );
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("normalized empty credential rejected on reload"),
+                failure(
+                    ReloadPhase::Validate,
+                    "credential reference `task-fixture` could not be resolved: Unavailable"
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn reload_accepts_a_model_credential_with_permissive_mode() {
         let (directory, reload) = fixture();
         reload

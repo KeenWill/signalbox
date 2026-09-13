@@ -638,11 +638,15 @@ impl super::HubModelConfiguration {
 fn ambient_environment(variable: &str) -> Result<Vec<u8>, CredentialAccessFailure> {
     let value = read_environment(variable)?;
     let bytes = credential_bytes(&value);
-    validate_ambient_utf8(bytes)?;
+    validate_ambient_bytes(bytes)?;
     Ok(bytes.to_vec())
 }
 
-fn validate_ambient_utf8(bytes: &[u8]) -> Result<(), CredentialAccessFailure> {
+fn validate_ambient_bytes(bytes: &[u8]) -> Result<(), CredentialAccessFailure> {
+    let bytes = credential_bytes(bytes);
+    if bytes.is_empty() {
+        return Err(CredentialAccessFailure::Unavailable);
+    }
     std::str::from_utf8(bytes)
         .map(|_| ())
         .map_err(|_| CredentialAccessFailure::InvalidUtf8)
@@ -654,7 +658,7 @@ fn validate_ambient_source(
 ) -> Result<(), CredentialAccessError> {
     match source {
         crate::credential_pools::AmbientCredentialSource::File(path) => read_credential_file(path)
-            .and_then(|bytes| validate_ambient_utf8(&bytes))
+            .and_then(|bytes| validate_ambient_bytes(&bytes))
             .map_err(|failure| CredentialAccessError::new(reference, failure)),
         crate::credential_pools::AmbientCredentialSource::Environment(variable) => {
             ambient_environment(variable)
@@ -695,7 +699,7 @@ impl super::HubModelConfiguration {
                     .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?,
             ),
         };
-        validate_ambient_utf8(value.expose_bytes())
+        validate_ambient_bytes(value.expose_bytes())
             .map_err(|failure| CredentialAccessError::new(reference, failure))?;
         Ok((source.clone(), value))
     }
