@@ -1471,8 +1471,12 @@ for (const [open, close, collapseFrom] of [
   })
 }
 
-for (const afterOutput of [false, true]) {
-  test(`shows later batch members as separate chips${afterOutput ? ' after reading tool output' : ''}`, async ({
+for (const [afterOutput, members] of [
+  [false, 3],
+  [true, 3],
+  [false, 40],
+] as const) {
+  test(`shows later batch members as separate chips${afterOutput ? ' after reading tool output' : ''}${members > 3 ? ` with ${members} bounded members` : ''}`, async ({
     page,
   }, testInfo) => {
     const original = detailItems[1]
@@ -1497,7 +1501,7 @@ for (const afterOutput of [false, true]) {
           {
             ...tool,
             request_id: `00000000-0000-0000-0000-${String(140 + index).padStart(12, '0')}`,
-            tool_name: ['exec_command', 'read_file', 'apply_patch'][index] ?? 'tool',
+            tool_name: ['exec_command', 'read_file', 'apply_patch'][index] ?? `tool_${index}`,
             arguments: detailExcerpt(`Arguments for tool ${index}`),
             evidence: index === 0 && afterOutput ? tool.evidence : { type: 'request_only' },
           },
@@ -1554,7 +1558,7 @@ for (const afterOutput of [false, true]) {
           [member(index)],
           index === 0 && afterOutput
             ? cursor(0, 'tool_result')
-            : index < 2
+            : index < members - 1
               ? cursor(index + 1)
               : null,
         ),
@@ -1603,8 +1607,27 @@ for (const afterOutput of [false, true]) {
     await expect(
       chips.getByRole('region', { name: 'apply_patch details', exact: true }),
     ).toContainText('Arguments for tool 2')
+    for (let index = 3; index < members; index++) {
+      await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
+      await expect(
+        chips.getByRole('button', { name: `Open turn details for tool_${index}`, exact: true }),
+      ).toBeVisible()
+      await expect(
+        page.getByRole('region', { name: 'Transcript text', exact: true }),
+      ).toHaveAttribute('data-retained-tool-pages', '3')
+      await expect(chips.getByRole('button', { name: /^Open turn details for / })).toHaveCount(4)
+      if (index > 3)
+        await expect(
+          chips.getByRole('button', { name: /^Open turn details for read_file/ }),
+        ).toHaveCount(0)
+    }
     await expect(chips.getByRole('button', { name: 'Show more tools', exact: true })).toHaveCount(0)
-    expect(reads).toEqual(afterOutput ? [0, 0, 1, 1, 2] : [1, 1, 2])
+    expect(reads).toEqual([
+      ...(afterOutput ? [0, 0] : []),
+      1,
+      1,
+      ...Array.from({ length: members - 2 }, (_, index) => index + 2),
+    ])
     await page.screenshot({ path: testInfo.outputPath('separate-batch-chips.png') })
     await transcript.getByRole('button', { name: 'Open turn details', exact: true }).first().click()
     await expect(transcript.locator('[data-event-sequence="2"]')).toBeVisible()
