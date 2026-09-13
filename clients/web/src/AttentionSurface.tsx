@@ -38,7 +38,14 @@ export function AttentionSurface({
 }: {
   registerEscapeHandler: (handler: (() => boolean) | null) => void
 }) {
-  return <Navigate to="/$surface" params={{ surface: 'sessions' }} replace />
+  return (
+    <Navigate
+      to="/$surface"
+      params={{ surface: 'sessions' }}
+      search={{ needsAttention: true }}
+      replace
+    />
+  )
 }
 
 export function AttentionSessions({

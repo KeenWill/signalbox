@@ -233,7 +233,9 @@ maintaining a second session-state classifier, and sort and filter state are
 client-local inputs, not durable session state. Activating a catalog row opens
 its session workspace directly; browser Back or Escape returns to the catalog
 with the lifecycle filter and page order retained, and restores focus to the
-launching row when it remains in the page.
+launching row when it remains in the page. The needs-attention filter is carried
+in the Sessions URL; the wordmark, Attention command, and `/attention` redirect
+select that filter.
 
 Projected-size values on the timeline are loading-policy estimates, not
 encoded-response promises. Text masked before durable storage stays masked:

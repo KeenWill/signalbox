@@ -571,7 +571,7 @@ test('returns from the scenario studio through the command palette', async ({ pa
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('button', { name: /Go to Attention/ }).click()
 
-  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

@@ -129,7 +129,8 @@ export function ProductNavigation({
         <Link
           className="brand product-brand"
           to="/$surface"
-          params={{ surface: 'attention' }}
+          params={{ surface: 'sessions' }}
+          search={{ needsAttention: true }}
           aria-label="Signalbox home"
           aria-disabled={context.navigationLocked || undefined}
           tabIndex={context.navigationLocked ? -1 : undefined}
@@ -644,7 +645,6 @@ export function ProductApp({
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
   const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
-  const [catalogNeedsAttention, setCatalogNeedsAttention] = useState(false)
   const [catalogAttentionAfter, setCatalogAttentionAfter] = useState<string | null>(null)
   const catalogReturnSessionId = useRef<string | undefined>(undefined)
   const consumeCatalogReturnFocus = useCallback(() => {
@@ -775,10 +775,10 @@ export function ProductApp({
       sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
-        if (path === '/attention') setCatalogNeedsAttention(true)
         void navigate({
           to: '/$surface',
           params: { surface: path === '/attention' ? 'sessions' : path.slice(1) },
+          search: path === '/attention' ? { needsAttention: true } : {},
         }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
@@ -1001,8 +1001,13 @@ export function ProductApp({
       <SessionCatalogSurface
         returnSessionId={catalogReturnSessionId.current}
         onReturnFocusConsumed={consumeCatalogReturnFocus}
-        needsAttention={catalogNeedsAttention}
-        onNeedsAttentionChange={setCatalogNeedsAttention}
+        needsAttention={sessionState.needsAttention === true}
+        onNeedsAttentionChange={(needsAttention) =>
+          updateSessionSearch(
+            { ...sessionState, needsAttention: needsAttention || undefined },
+            'replace',
+          )
+        }
         attentionAfter={catalogAttentionAfter}
         onAttentionAfterChange={setCatalogAttentionAfter}
         lifecycleFilter={catalogLifecycleFilter}

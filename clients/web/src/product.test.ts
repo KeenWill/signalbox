@@ -1715,6 +1715,13 @@ describe('readProductSearchState', () => {
 })
 
 describe('readProductRouteState', () => {
+  it('retains the attention filter only for an explicit route boolean', () => {
+    expect(readProductRouteState({ needsAttention: true }).needsAttention).toBe(true)
+    for (const needsAttention of [false, undefined, 'true', ['true']]) {
+      expect(readProductRouteState({ needsAttention }).needsAttention).toBeUndefined()
+    }
+  })
+
   it('preserves catalog queries through their own byte limit', () => {
     const q = 'é'.repeat(512)
     expect(readProductRouteState({ q }).q).toBe(q)

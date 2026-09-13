@@ -5,7 +5,7 @@ import { sessionApi } from './session-fixture'
 const waitingSession = '10000000-0000-4000-8000-000000000001'
 const idleSession = '10000000-0000-4000-8000-000000000002'
 
-async function installSessions(page: Page, laterPage = false) {
+async function installSessions(page: Pick<Page, 'route'>, laterPage = false) {
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({ json: webContractBootstrapFixture }),
   )
@@ -101,7 +101,7 @@ test('the attention URL redirects to Sessions without a separate navigation entr
 }) => {
   await installSessions(page)
   await page.goto('/attention')
-  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
   await expect(
     page
       .getByRole('navigation', { name: 'Product', exact: true })
@@ -146,7 +146,7 @@ for (const laterPage of [false, true]) {
         await page.getByRole('main').focus()
         await page.keyboard.press('Escape')
       }
-      await expect(page).toHaveURL(/\/sessions$/)
+      await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
       await expect(filter).toBeChecked()
       await expect(row).toBeFocused()
       await page.route(/\/api\/sessions\?/, (route) =>
@@ -193,7 +193,42 @@ test('Go to Attention opens the Sessions filter', async ({ page }) => {
   await page.getByRole('main').focus()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
-  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
   await expect(filter).toBeChecked()
   await expect(page.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
 })
+
+for (const activation of ['click', 'ControlOrMeta', 'middle', 'bookmark'] as const) {
+  test(`the wordmark opens the same attention route through ${activation}`, async ({
+    page,
+    context,
+  }) => {
+    await installSessions(context)
+    await page.goto('/sessions')
+    const home = page.getByRole('link', { name: 'Signalbox home' })
+    await expect(home).toHaveAttribute('href', '/sessions?needsAttention=true')
+    let destination = page
+    if (activation === 'bookmark') {
+      destination = await context.newPage()
+      await destination.goto((await home.getAttribute('href')) ?? '')
+    } else if (activation === 'click') {
+      await home.click()
+    } else {
+      const popup = context.waitForEvent('page')
+      if (activation === 'middle') await home.click({ button: 'middle' })
+      else await home.click({ modifiers: [activation] })
+      destination = await popup
+    }
+    await expect(destination).toHaveURL(/\/sessions\?needsAttention=true$/)
+    await expect(
+      destination.getByRole('checkbox', { name: 'Needs attention', exact: true }),
+    ).toBeChecked()
+    await expect(destination.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
+    await destination.reload()
+    await expect(
+      destination.getByRole('checkbox', { name: 'Needs attention', exact: true }),
+    ).toBeChecked()
+    await destination.getByRole('checkbox', { name: 'Needs attention', exact: true }).uncheck()
+    await expect(destination).toHaveURL(/\/sessions$/)
+  })
+}
