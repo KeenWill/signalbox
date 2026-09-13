@@ -45,6 +45,11 @@ summary text; its provider-neutral message keeps the producing call and the
 summarized range. Attachments render as the bounded textual stubs
 [blob-storage](blob-storage.md) defines.
 
+Claude Code CLI declares bounded PDF document presentation beside image
+presentation. Preparation authenticates durable document references before
+materialization; native document blocks and images share the complete encoded
+request bound.
+
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
 ordinary calls. The compaction call's own input budget is its context window

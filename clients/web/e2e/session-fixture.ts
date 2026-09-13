@@ -35,6 +35,7 @@ export async function sessionApi(
     grown: false,
     observed: false,
     historyReads: [] as string[],
+    historyAddresses: [] as Array<string | null>,
     textReads: [] as string[],
     submissions: [] as Array<{ command_id: string; message: string }>,
   }
@@ -123,6 +124,7 @@ export async function sessionApi(
     const latest = state.grown ? '44' : '43'
     if (url.pathname.endsWith('/timeline')) {
       state.historyReads.push(url.searchParams.get('anchor') ?? '')
+      state.historyAddresses.push(url.searchParams.get('address'))
       return route.fulfill({
         json: {
           session_id: selectedSessionId,

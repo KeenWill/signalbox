@@ -111,6 +111,12 @@ pub(crate) fn translate<C>(
         &crate::image::image_presentation_capability(),
     )
     .map_err(TranslationError::Failure)?;
+    let document_limit = signalbox_model_runtime::document_request_byte_limit(
+        operation,
+        &crate::document_presentation_capability(),
+    )
+    .map_err(TranslationError::Failure)?;
+    let image_limit = image_limit.into_iter().chain(document_limit).min();
     let history = render_history(&operation.messages)?;
     let mut catalog_tools = operation
         .tools
@@ -304,7 +310,7 @@ fn native_message(message: &ConversationMessage) -> Result<NativeMessage, Transl
                 (message.role, part),
                 (
                     ConversationRole::User,
-                    MessagePart::ToolResult(_) | MessagePart::Image(_)
+                    MessagePart::ToolResult(_) | MessagePart::Image(_) | MessagePart::Document(_)
                 ) | (
                     ConversationRole::Assistant,
                     MessagePart::ToolCall(_)
@@ -341,10 +347,11 @@ fn native_message(message: &ConversationMessage) -> Result<NativeMessage, Transl
 fn render_part(part: &MessagePart) -> Result<crate::image::InputPart, TranslationError> {
     let historical = match part {
         MessagePart::Image(image) => return Ok(crate::image::image_content(image)),
-        MessagePart::ImageReference(_) => {
+        MessagePart::Document(document) => return Ok(crate::image::document_content(document)),
+        MessagePart::ImageReference(_) | MessagePart::DocumentReference(_) => {
             return Err(TranslationError::Failure(
                 PreparationFailure::UnsupportedOperation {
-                    detail: String::from("image reference was not authenticated"),
+                    detail: String::from("media reference was not authenticated"),
                 },
             ));
         }
@@ -469,12 +476,21 @@ pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> 
     let mut projected = message.clone();
     let mut image_bytes = 0_usize;
     for part in &mut projected.parts {
+        let is_document = matches!(
+            part,
+            MessagePart::Document(_) | MessagePart::DocumentReference(_)
+        );
         let (media_type, length) = match part {
             MessagePart::ImageReference(reference) => (
                 reference.media_type.clone(),
                 usize::try_from(reference.byte_length.get()).ok()?,
             ),
             MessagePart::Image(image) => (image.media_type.clone(), image.bytes.len()),
+            MessagePart::DocumentReference(reference) => (
+                reference.media_type.clone(),
+                usize::try_from(reference.byte_length.get()).ok()?,
+            ),
+            MessagePart::Document(document) => (document.media_type.clone(), document.bytes.len()),
             MessagePart::Text(_)
             | MessagePart::ToolCall(_)
             | MessagePart::ToolResult(_)
@@ -483,13 +499,20 @@ pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> 
             | MessagePart::ProviderReasoning { .. }
             | MessagePart::ProviderCompaction { .. } => continue,
         };
-        // The empty-image record includes its envelope; reserve the base64 payload.
+        // The empty media record includes its envelope; reserve the base64 payload.
         image_bytes =
             image_bytes.checked_add(length.checked_add(2)?.checked_div(3)?.checked_mul(4)?)?;
-        *part = MessagePart::Image(signalbox_model_runtime::ImageInput {
-            media_type,
-            bytes: std::sync::Arc::from([]),
-        });
+        *part = if is_document {
+            MessagePart::Document(signalbox_model_runtime::DocumentInput {
+                media_type,
+                bytes: std::sync::Arc::from([]),
+            })
+        } else {
+            MessagePart::Image(signalbox_model_runtime::ImageInput {
+                media_type,
+                bytes: std::sync::Arc::from([]),
+            })
+        };
     }
     let message = native_message(&projected).ok()?;
     let identity = Uuid::now_v7().to_string();
@@ -599,6 +622,65 @@ mod tests {
         assert!(
             translate(&operation).is_err(),
             "history plus request controls exceed the presentation limit"
+        );
+    }
+
+    #[test]
+    fn native_pdf_bytes_keep_their_position_and_share_the_complete_image_request_bound() {
+        use base64::Engine as _;
+        use signalbox_model_runtime::{ConversationRole, DocumentInput, ImageInput, MessagePart};
+        // Opaque synthetic bytes: format validation belongs to the reader.
+        let pdf = b"%PDF-fixture\n";
+        let mut operation = operation_with_message(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![
+                MessagePart::Text(String::from("Read both parts.")),
+                MessagePart::Document(DocumentInput {
+                    media_type: "application/pdf".into(),
+                    bytes: std::sync::Arc::from(&pdf[..]),
+                }),
+                MessagePart::Image(ImageInput {
+                    media_type: "image/png".into(),
+                    bytes: std::sync::Arc::from([1_u8, 2, 3]),
+                }),
+            ],
+        });
+        operation.image_presentation = Some(crate::image_presentation_capability());
+        assert!(
+            translate(&operation).is_err(),
+            "document capability is required"
+        );
+        operation.document_presentation = Some(crate::document_presentation_capability());
+        let translated = translate(&operation).expect("mixed native history renders");
+        let row: serde_json::Value = serde_json::from_slice(&translated.history).unwrap();
+        let content = &row["message"]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "document");
+        assert_eq!(content[1]["source"]["media_type"], "application/pdf");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(content[1]["source"]["data"].as_str().unwrap())
+                .unwrap(),
+            pdf
+        );
+        assert_eq!(content[2]["type"], "image");
+        let complete =
+            translated.history.len() + translated.prompt.len() + translated.system_prompt.len();
+        operation.document_presentation =
+            Some(crate::document_presentation_capability().limited_by(u64::MAX, complete));
+        assert!(translate(&operation).is_ok());
+        operation.document_presentation =
+            Some(crate::document_presentation_capability().limited_by(u64::MAX, complete - 1));
+        assert!(
+            translate(&operation).is_err(),
+            "images and framing count against the document request bound"
+        );
+        operation.document_presentation = Some(
+            crate::document_presentation_capability().limited_by(pdf.len() as u64 - 1, usize::MAX),
+        );
+        assert!(
+            translate(&operation).is_err(),
+            "document bytes have their own bound"
         );
     }
 

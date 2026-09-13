@@ -4475,15 +4475,18 @@ pub(crate) fn tool_result_content_from_str(value: &str) -> Option<ToolResultCont
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MediaPresentationStorageKind {
     Image,
+    Document,
 }
 pub(crate) const fn media_presentation_to_str(kind: MediaPresentationStorageKind) -> &'static str {
     match kind {
         MediaPresentationStorageKind::Image => "image",
+        MediaPresentationStorageKind::Document => "document",
     }
 }
 pub(crate) fn media_presentation_from_str(value: &str) -> Option<MediaPresentationStorageKind> {
     match value {
         "image" => Some(MediaPresentationStorageKind::Image),
+        "document" => Some(MediaPresentationStorageKind::Document),
         _ => None,
     }
 }

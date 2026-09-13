@@ -1,5 +1,5 @@
 load("//tooling/bazel:package.bzl", "rust_package")
-load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:rust.bzl", "RUSTC_FLAGS", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_DEPS = [
@@ -22,6 +22,7 @@ rust_library(
 rust_binary(
     name = "signalbox-file-media-image-worker",
     crate_root = "src/bin/signalbox-file-media-image-worker.rs",
+    rustc_flags = RUSTC_FLAGS + ["-Cstrip=symbols"],
     deps = CRATE_DEPS,
 )
 
