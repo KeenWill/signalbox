@@ -92,9 +92,8 @@ watchdog together.
 
 ## Design decisions
 
-The daemon uses mimalloc for Rust allocations. Why: mixed-lifetime buffers on
-concurrent workers must not accumulate as free memory in glibc's per-thread
-arenas.
+The daemon uses jemalloc with background reclamation for Rust allocations so
+freed buffers can leave resident memory while their allocating workers are idle.
 
 Eligibility is a derived predicate, never a durable state, because acceptance
 positions, priority relations, and the active-slot owner are already durable and

@@ -180,8 +180,11 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static connect(request: typeof fetch = fetch): Promise<HttpSearchUsageSource> {
-    return HttpSearchUsageSource.connectSource(request, true)
+  static connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSearchUsageSource> {
+    return HttpSearchUsageSource.connectSource(request, true, signal)
   }
 
   static connectUsage(
@@ -193,8 +196,9 @@ export class HttpSearchUsageSource implements SearchUsageSource {
   private static async connectSource(
     request: typeof fetch,
     requireSearch: boolean,
+    signal?: AbortSignal,
   ): Promise<HttpSearchUsageSource> {
-    const response = await request('/api/bootstrap')
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     return HttpSearchUsageSource.fromBootstrap(bootstrap, request, requireSearch)

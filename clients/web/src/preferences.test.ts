@@ -37,6 +37,18 @@ const oversizedLogicalPositionsFixture = () =>
   )
 
 describe('browser preferences', () => {
+  it('starts a new profile in Summary', () => {
+    vi.stubGlobal('localStorage', { getItem: () => null })
+    expect(loadBrowserPreferences().detail).toBe('results')
+  })
+
+  it('preserves the stored Tools level', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => JSON.stringify({ ...defaultBrowserPreferences, detail: 'condensed' }),
+    })
+    expect(loadBrowserPreferences().detail).toBe('condensed')
+  })
+
   it('fails closed to defaults for an unrelated stored value', () => {
     expect(() => decodeBrowserPreferences('not-an-object')).toThrow('preferences must be an object')
   })
