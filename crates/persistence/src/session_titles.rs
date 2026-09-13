@@ -22,6 +22,17 @@ pub struct SessionTitleCall {
     pub initial_for_turn: Option<TurnId>,
 }
 
+/// Admission result for a session title call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrepareSessionTitleOutcome {
+    /// The call and its invocation reservation committed.
+    Prepared,
+    /// The session or completed turn is absent, titled, or already claimed.
+    Ineligible,
+    /// No credential can currently admit the call.
+    Unavailable,
+}
+
 /// Storage for dedicated title calls; no method appends transcript content.
 #[derive(Clone, Debug)]
 pub struct SessionTitleRepository {
@@ -39,7 +50,7 @@ impl SessionTitleRepository {
         &self,
         call: &mut SessionTitleCall,
         pools: &crate::model_execution::CredentialPoolRuntimeCatalog,
-    ) -> Result<bool, crate::model_execution::ModelCallRepositoryError> {
+    ) -> Result<PrepareSessionTitleOutcome, crate::model_execution::ModelCallRepositoryError> {
         let mut tx = self.pool.begin().await?;
         let exists =
             sqlx::query_scalar::<_, uuid::Uuid>(crate::lock_inventory::REPLACE_SESSION_METADATA)
@@ -48,7 +59,7 @@ impl SessionTitleRepository {
                 .await?
                 .is_some();
         if !exists {
-            return Ok(false);
+            return Ok(PrepareSessionTitleOutcome::Ineligible);
         }
         if let Some(turn) = call.initial_for_turn {
             let eligible: bool = sqlx::query_scalar(
@@ -58,7 +69,7 @@ impl SessionTitleRepository {
                      AND state_kind = 'terminal' AND terminal_disposition_kind = 'completed')")
                 .bind(call.session.into_uuid()).bind(turn.into_uuid()).fetch_one(&mut *tx).await?;
             if !eligible {
-                return Ok(false);
+                return Ok(PrepareSessionTitleOutcome::Ineligible);
             }
         }
         crate::model_execution::credential_pool::acquire_model_call_outbox_order_guard(&mut tx)
@@ -75,7 +86,7 @@ impl SessionTitleRepository {
             )
             .await?
         else {
-            return Ok(false);
+            return Ok(PrepareSessionTitleOutcome::Unavailable);
         };
         call.credential_reference = credential.as_str().to_owned();
         sqlx::query("INSERT INTO session_title_model_call
@@ -89,7 +100,7 @@ impl SessionTitleRepository {
         crate::credential_invocations::reserve(&mut tx, call.call, &call.credential_reference)
             .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(PrepareSessionTitleOutcome::Prepared)
     }
 
     /// Closes abandoned title calls at startup and releases their initial claims.
@@ -210,7 +221,7 @@ impl SessionTitleRepository {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT session_id, initial_for_turn IS NOT NULL AS initial, state_kind, title
-                FROM session_title_model_call WHERE model_call_id = $1",
+                FROM session_title_model_call WHERE model_call_id = $1 FOR UPDATE",
         )
         .bind(call.into_uuid())
         .fetch_one(&mut *transaction)

@@ -11,7 +11,9 @@ use signalbox_model_runtime::{
     ObservationSink, PreparationOutcome, ProviderCompactionMode, RequestedTarget, ResolvedTarget,
     TerminalEvidence, TokenUsage,
 };
-use signalbox_persistence::session_titles::{SessionTitleCall, SessionTitleRepository};
+use signalbox_persistence::session_titles::{
+    PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository,
+};
 use signalbox_web_contract::MAX_WEB_SESSION_TITLE_UTF8_BYTES as TITLE_MAX_UTF8_BYTES;
 use std::sync::Arc;
 
@@ -22,6 +24,8 @@ const TITLE_PROMPT: &str = "Name this conversation in three to six words. Use pl
 const TITLE_WORDS: usize = 6;
 /// Short titles reserve only a small part of the model's context for output.
 const TITLE_MAX_OUTPUT_TOKENS: u32 = 256;
+// Conservative room for provider framing beyond the fixed prompt.
+const REQUEST_MARGIN_BYTES: usize = 1024;
 
 #[derive(Clone)]
 pub(crate) struct SessionTitles {
@@ -37,12 +41,33 @@ pub(crate) struct PreparedTitle {
     max_output_tokens: u32,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingInitialTitle {
+    pub(crate) session: SessionId,
+    turn: TurnId,
+    models: Arc<HubModelConfiguration>,
+    factory: ModelRuntimeFactory,
+}
+
+impl PendingInitialTitle {
+    pub(crate) async fn prepare(
+        self,
+        pool: sqlx::PgPool,
+        processes: crate::credential_invocations::CredentialInvocationProcesses,
+    ) -> Result<Option<(SessionTitles, PreparedTitle)>, TitleError> {
+        let titles = SessionTitles::new(pool, self.models, self.factory, processes);
+        let prepared = titles.prepare(self.session, Some(self.turn)).await?;
+        Ok(prepared.map(|prepared| (titles, prepared)))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum TitleError {
     Configuration,
     NotFound,
     Generation,
     Database,
+    Unavailable,
 }
 
 impl From<sqlx::Error> for TitleError {
@@ -58,6 +83,15 @@ impl From<signalbox_persistence::model_execution::ModelCallRepositoryError> for 
 }
 
 impl SessionTitles {
+    pub(crate) fn defer_initial(&self, session: SessionId, turn: TurnId) {
+        self.processes.retain_initial_title(PendingInitialTitle {
+            session,
+            turn,
+            models: self.models.clone(),
+            factory: self.factory.clone(),
+        });
+    }
+
     pub(crate) fn new(
         pool: sqlx::PgPool,
         models: Arc<HubModelConfiguration>,
@@ -129,6 +163,11 @@ impl SessionTitles {
         if !exists {
             return Err(TitleError::NotFound);
         }
+        let input_budget =
+            configure_title_budget(&mut settings, definition.context_window_tokens());
+        if input_budget as usize <= TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES {
+            return Err(TitleError::Configuration);
+        }
         let credential = signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
             &self.pool, session, family, route.migration_credential_family(),
         ).await.map_err(|error| match error { sqlx::Error::RowNotFound => TitleError::Configuration, _ => TitleError::Database })?;
@@ -149,16 +188,12 @@ impl SessionTitles {
             Ok(admitted) => admitted,
             Err(error) => return Err(self.close_before_send(call.call, error.into()).await),
         };
-        if !admitted {
-            return if initial_for_turn.is_some() {
-                Ok(None)
-            } else {
-                Err(TitleError::Generation)
-            };
+        match admitted {
+            PrepareSessionTitleOutcome::Prepared => {}
+            PrepareSessionTitleOutcome::Ineligible => return Ok(None),
+            PrepareSessionTitleOutcome::Unavailable => return Err(TitleError::Unavailable),
         }
         let resolved = ResolvedTarget::new(definition.provider_model().to_owned());
-        let input_budget =
-            configure_title_budget(&mut settings, definition.context_window_tokens());
         let max_output_tokens = settings.max_output_tokens;
         let conversation = match repository
             .conversation(session, i32::try_from(input_budget).unwrap_or(i32::MAX))
@@ -358,7 +393,10 @@ impl ObservationSink<ModelCallId> for TitleObservations {
 }
 
 fn configure_title_budget(settings: &mut ModelSettings, context_window_tokens: u32) -> u32 {
-    settings.max_output_tokens = settings.max_output_tokens.min(TITLE_MAX_OUTPUT_TOKENS);
+    settings.max_output_tokens = settings
+        .max_output_tokens
+        .min(TITLE_MAX_OUTPUT_TOKENS)
+        .min(context_window_tokens / 2);
     context_window_tokens.saturating_sub(settings.max_output_tokens)
 }
 
@@ -369,7 +407,6 @@ fn fit_title_context(
 ) -> bool {
     // One input byte per available token is conservative for conversation text.
     // Reserve 1024 bytes for provider framing, in addition to the fixed prompt.
-    const REQUEST_MARGIN_BYTES: usize = 1024;
     let available = input_budget.saturating_sub(TITLE_PROMPT.len() + REQUEST_MARGIN_BYTES);
     let end = source.floor_char_boundary(source.len().min(available));
     operation.messages = vec![ConversationMessage::user_text(&source[..end])];
@@ -498,7 +535,10 @@ mod tests {
                 input_includes_cache_tokens: false,
                 initial_for_turn: None,
             };
-            assert!(repository.prepare(&mut call, &Default::default()).await?);
+            assert!(
+                repository.prepare(&mut call, &Default::default()).await?
+                    == PrepareSessionTitleOutcome::Prepared
+            );
             repository.authorize(call.call).await?;
             processes.finished(call.call, None, false).await;
             let usage = UsageTokenAxes {
@@ -568,7 +608,8 @@ mod tests {
             assert!(
                 repository
                     .prepare(&mut next_call, &Default::default())
-                    .await?,
+                    .await?
+                    == PrepareSessionTitleOutcome::Prepared,
                 "capacity admits another call after recovery"
             );
             repository.abandon(next_call.call).await?;
@@ -601,6 +642,20 @@ mod tests {
                 input_budget + operation.settings.max_output_tokens,
                 CONTEXT_WINDOW
             );
+        }
+    }
+
+    #[test]
+    fn small_equal_output_windows_retain_input_budget() {
+        for (context, expected_input, expected_output) in
+            [(256, 128, 128), (128, 64, 64), (2, 1, 1)]
+        {
+            let mut settings = ModelSettings::new(context);
+            assert_eq!(
+                configure_title_budget(&mut settings, context),
+                expected_input
+            );
+            assert_eq!(settings.max_output_tokens, expected_output);
         }
     }
 

@@ -17,6 +17,17 @@ pub struct SessionTitleCall {
 // derives: clone::Clone, fmt::Debug
 ```
 
+## PrepareSessionTitleOutcome
+
+```rust
+pub enum PrepareSessionTitleOutcome {
+    Prepared,
+    Ineligible,
+    Unavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SessionTitleRepository
 
 ```rust
@@ -28,7 +39,10 @@ impl session_titles::SessionTitleRepository {
         &self,
         call: &mut session_titles::SessionTitleCall,
         pools: &model_execution::CredentialPoolRuntimeCatalog,
-    ) -> result::Result<bool, model_execution::ModelCallRepositoryError>;
+    ) -> result::Result<
+        session_titles::PrepareSessionTitleOutcome,
+        model_execution::ModelCallRepositoryError,
+    >;
     pub async fn abandon_incomplete(&self) -> result::Result<(), error::Error>;
     pub async fn abandon(
         &self,

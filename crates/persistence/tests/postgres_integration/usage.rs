@@ -23,7 +23,7 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     use signalbox_domain::{Actor, ReplaceSessionMetadata, SessionMetadataContent};
     use signalbox_persistence::{
         session_metadata::SessionMetadataRepository,
-        session_titles::{SessionTitleCall, SessionTitleRepository},
+        session_titles::{PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository},
     };
     let (container, pool, _) = migrated_postgres().await?;
     let seed = 0x98_000;
@@ -42,7 +42,8 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         initial_for_turn: Some(fixture.turn),
     };
     assert!(
-        !titles.prepare(&mut call, &Default::default()).await?,
+        titles.prepare(&mut call, &Default::default()).await?
+            == PrepareSessionTitleOutcome::Ineligible,
         "an active turn must not trigger a title call"
     );
     let observation = authorized
@@ -142,7 +143,10 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             call: ModelCallId::from_uuid(Uuid::now_v7()),
             ..call.clone()
         };
-        assert!(titles.prepare(&mut abandoned, &Default::default()).await?);
+        assert!(
+            titles.prepare(&mut abandoned, &Default::default()).await?
+                == PrepareSessionTitleOutcome::Prepared
+        );
         titles.authorize(abandoned.call).await?;
         if startup {
             titles.abandon_incomplete().await?;
@@ -160,11 +164,12 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     }
     call.initial_for_turn = Some(later_turn);
     assert!(
-        titles.prepare(&mut call, &Default::default()).await?,
+        titles.prepare(&mut call, &Default::default()).await?
+            == PrepareSessionTitleOutcome::Prepared,
         "a later completion claims the initial title after earlier calls were abandoned"
     );
     assert!(
-        !titles
+        titles
             .prepare(
                 &mut SessionTitleCall {
                     call: ModelCallId::from_uuid(Uuid::now_v7()),
@@ -172,7 +177,8 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
                 },
                 &Default::default()
             )
-            .await?,
+            .await?
+            == PrepareSessionTitleOutcome::Ineligible,
         "duplicate completion delivery must not call the model again"
     );
     assert!(
@@ -244,17 +250,46 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     sqlx::query("ALTER TABLE session_title_model_call DROP CONSTRAINT fixture_reject_title")
         .execute(&pool)
         .await?;
-    assert_eq!(
-        titles
+    // Hold the metadata lock until both settlements are waiting. Without a call-row
+    // lock both readers see in_flight, and the second update loses the terminal race.
+    let mut held = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE")
+        .bind(fixture.session.into_uuid())
+        .execute(&mut *held)
+        .await?;
+    let first_titles = titles.clone();
+    let first = tokio::spawn(async move {
+        first_titles
             .finish_generated(
                 command,
                 call.call,
                 Some("Database indexing work".to_owned()),
-                usage
+                usage,
             )
-            .await?,
-        Some("Database indexing work".to_owned())
-    );
+            .await
+    });
+    let second_titles = titles.clone();
+    let second = tokio::spawn(async move {
+        second_titles
+            .finish_generated(
+                command,
+                call.call,
+                Some("Database indexing work".to_owned()),
+                usage,
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")
+                .fetch_one(&pool).await?;
+            if waiting >= 2 { break Ok::<_, sqlx::Error>(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await??;
+    held.commit().await?;
+    assert_eq!(first.await??, Some("Database indexing work".to_owned()));
+    assert_eq!(second.await??, Some("Database indexing work".to_owned()));
     let snapshot = metadata
         .load_session_metadata(fixture.session)
         .await?
@@ -294,7 +329,10 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         initial_for_turn: None,
         ..call
     };
-    assert!(titles.prepare(&mut suggestion, &Default::default()).await?);
+    assert!(
+        titles.prepare(&mut suggestion, &Default::default()).await?
+            == PrepareSessionTitleOutcome::Prepared
+    );
     titles.authorize(suggestion.call).await?;
     titles
         .finish_generated(
@@ -393,7 +431,9 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         target: pool_target,
         ..suggestion.clone()
     };
-    assert!(titles.prepare(&mut outside_turn, &pools).await?);
+    assert!(
+        titles.prepare(&mut outside_turn, &pools).await? == PrepareSessionTitleOutcome::Prepared
+    );
     assert_eq!(
         outside_turn.credential_reference, "displaced-title-home",
         "a session-level title does not inherit a turn chain's exclusions"
@@ -408,14 +448,14 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         ..suggestion.clone()
     };
-    assert!(titles.prepare(&mut admitted, &pools).await?);
+    assert!(titles.prepare(&mut admitted, &pools).await? == PrepareSessionTitleOutcome::Prepared);
     assert_eq!(admitted.credential_reference, "available-title-home");
     let mut contended = SessionTitleCall {
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         ..suggestion
     };
     assert!(
-        !titles.prepare(&mut contended, &pools).await?,
+        titles.prepare(&mut contended, &pools).await? == PrepareSessionTitleOutcome::Unavailable,
         "a saturated pool cannot invoke a title model"
     );
     titles
@@ -431,7 +471,7 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         )
         .await?;
     assert!(
-        titles.prepare(&mut contended, &pools).await?,
+        titles.prepare(&mut contended, &pools).await? == PrepareSessionTitleOutcome::Prepared,
         "an uninvoked terminal title releases its reservation"
     );
     titles.authorize(contended.call).await?;
@@ -451,7 +491,7 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         ..contended.clone()
     };
-    assert!(titles.prepare(&mut unsent, &pools).await?);
+    assert!(titles.prepare(&mut unsent, &pools).await? == PrepareSessionTitleOutcome::Prepared);
     titles.authorize(unsent.call).await?;
     titles
         .finish(
@@ -480,7 +520,9 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             call: ModelCallId::from_uuid(Uuid::now_v7()),
             ..contended.clone()
         };
-        assert!(titles.prepare(&mut abandoned, &pools).await?);
+        assert!(
+            titles.prepare(&mut abandoned, &pools).await? == PrepareSessionTitleOutcome::Prepared
+        );
         if in_flight {
             titles.authorize(abandoned.call).await?;
         }
@@ -502,7 +544,7 @@ async fn generated_titles_validate_preserved_metadata_and_keep_concurrent_manual
     use signalbox_domain::{ReplaceSessionMetadata, SessionMetadataContent};
     use signalbox_persistence::{
         session_metadata::SessionMetadataRepository,
-        session_titles::{SessionTitleCall, SessionTitleRepository},
+        session_titles::{PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository},
     };
     let (container, pool, _) = migrated_postgres().await?;
     let titles = SessionTitleRepository::new(pool.clone());
@@ -542,7 +584,10 @@ async fn generated_titles_validate_preserved_metadata_and_keep_concurrent_manual
             input_includes_cache_tokens: false,
             initial_for_turn: Some(fixture.turn),
         };
-        assert!(titles.prepare(&mut call, &Default::default()).await?);
+        assert!(
+            titles.prepare(&mut call, &Default::default()).await?
+                == PrepareSessionTitleOutcome::Prepared
+        );
         // The metadata writer wins after the initial claim, before model completion.
         let preserved = if manual {
             SessionMetadataContent::try_new(
@@ -579,7 +624,10 @@ async fn generated_titles_validate_preserved_metadata_and_keep_concurrent_manual
             if !initial {
                 call.call = ModelCallId::from_uuid(Uuid::now_v7());
                 call.initial_for_turn = None;
-                assert!(titles.prepare(&mut call, &Default::default()).await?);
+                assert!(
+                    titles.prepare(&mut call, &Default::default()).await?
+                        == PrepareSessionTitleOutcome::Prepared
+                );
             }
             titles.authorize(call.call).await?;
             let result = titles

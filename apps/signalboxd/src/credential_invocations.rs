@@ -24,6 +24,7 @@ pub struct CredentialInvocationProcesses {
     pool: sqlx::PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     observed: Arc<Mutex<BTreeMap<ModelCallId, ObservedInvocation>>>,
+    pending_titles: Arc<Mutex<BTreeMap<SessionId, crate::session_titles::PendingInitialTitle>>>,
 }
 
 enum ObservedInvocation {
@@ -37,6 +38,7 @@ impl CredentialInvocationProcesses {
             pool,
             eligibility_nudge,
             observed: Arc::default(),
+            pending_titles: Arc::default(),
         }
     }
 
@@ -82,7 +84,63 @@ impl CredentialInvocationProcesses {
                 credential_invocations::release(&self.pool, call).await?;
             }
         }
-        self.nudge_eligible_waits().await
+        self.nudge_eligible_waits().await?;
+        for (titles, prepared) in self.prepare_pending_titles().await {
+            tokio::spawn(async move {
+                if let Err(error) = titles.generate_prepared(prepared).await {
+                    tracing::warn!(?error, "recovered initial session title generation failed");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retain_initial_title(&self, title: crate::session_titles::PendingInitialTitle) {
+        self.pending_titles
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(title.session)
+            .or_insert(title);
+    }
+
+    async fn prepare_pending_titles(
+        &self,
+    ) -> Vec<(
+        crate::session_titles::SessionTitles,
+        crate::session_titles::PreparedTitle,
+    )> {
+        let pending = self
+            .pending_titles
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut ready = Vec::new();
+        for title in pending {
+            let session = title.session;
+            match title.prepare(self.pool.clone(), self.clone()).await {
+                Ok(prepared) => {
+                    self.pending_titles
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&session);
+                    ready.extend(prepared);
+                }
+                Err(
+                    crate::session_titles::TitleError::Unavailable
+                    | crate::session_titles::TitleError::Database,
+                ) => {}
+                Err(error) => {
+                    self.pending_titles
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&session);
+                    tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title recovery failed");
+                }
+            }
+        }
+        ready
     }
 
     pub(crate) async fn abandon_title(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
@@ -221,8 +279,175 @@ mod tests {
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
         scheduler::PostgresEligibilitySweep,
-        session_titles::{SessionTitleCall, SessionTitleRepository},
+        session_titles::{PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository},
     };
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn contended_initial_title_is_admitted_by_recovery_without_another_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_application::{
+            InProcessAttemptDispatchGate, StartEligibleTurnOutcome, StartEligibleTurnService,
+            SubmitInputRequest, SubmitInputService,
+        };
+        use signalbox_domain::{
+            AssistantText, DeliveryRequest, ModelSelectionOverride, PerInputConfigurationChoices,
+            SessionConfigurationDefaultsVersion, UserContent,
+        };
+        use signalbox_persistence::{
+            model_execution::PostgresModelCallRepository,
+            start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+        };
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(6).await?;
+        let models = Arc::new(crate::HubModelConfiguration::parse(&format!(
+            "{}\n[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\n",
+            crate::configuration::tests::CONFIGURATION,
+        ))?);
+        let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let selection =
+            DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000001"));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )
+        .prepare(session)
+        .map_err(|_| "session creation rejected")?;
+        CreateSessionRepository::new(pool.clone(), models.session_credential_pin())
+            .handle(creation)
+            .await?;
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        SubmitInputService::new(
+            signalbox_application::UuidV7SubmitInputIdGenerator,
+            SubmitInputRepository::new(pool.clone()),
+            nudge.clone(),
+            signalbox_application::InProcessToolDispatchGate::default(),
+        )
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            session,
+            UserContent::try_text("Describe database indexes".to_owned()).expect("fixture input"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )?)
+        .await?;
+        let StartEligibleTurnOutcome::Activated(activated) = StartEligibleTurnService::new(
+            signalbox_application::UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        )
+        .execute(session)
+        .await?
+        else {
+            panic!("fixture turn activates")
+        };
+        let turn = activated.turn();
+        crate::workspace_instruction_runtime::WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )
+        .prepare(session, turn)
+        .await?;
+        let route = models
+            .resolve_direct_model(selection)
+            .expect("fixture route");
+        let profile = route.credential_profile().to_owned();
+        crate::PostgresScriptedModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                models.target_catalog(),
+                signalbox_application::ModelCallCredentialReference::new(&profile),
+            ),
+            InProcessAttemptDispatchGate::default(),
+            AssistantText::try_new("Database indexes accelerate queries".to_owned())
+                .expect("fixture reply"),
+        )
+        .execute_all(activated)
+        .await?;
+        credential_invocations::replace_registrations(
+            &pool,
+            &[(profile.clone(), std::num::NonZeroU32::new(1))],
+        )
+        .await?;
+        let repository = SessionTitleRepository::new(pool.clone());
+        let mut occupying = SessionTitleCall {
+            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            session,
+            selection,
+            target: route.target(),
+            credential_reference: profile,
+            input_includes_cache_tokens: false,
+            initial_for_turn: None,
+        };
+        assert_eq!(
+            repository
+                .prepare(&mut occupying, &models.credential_pool_runtime_catalog())
+                .await?,
+            PrepareSessionTitleOutcome::Prepared
+        );
+        let processes = CredentialInvocationProcesses::new(pool.clone(), nudge);
+        let titles = crate::session_titles::SessionTitles::new(
+            pool.clone(),
+            models,
+            crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
+            processes.clone(),
+        );
+        assert!(matches!(
+            titles.prepare(session, Some(turn)).await,
+            Err(crate::session_titles::TitleError::Unavailable)
+        ));
+        titles.defer_initial(session, turn);
+        titles.defer_initial(session, turn);
+        assert!(processes.prepare_pending_titles().await.is_empty());
+        assert_eq!(
+            processes
+                .pending_titles
+                .lock()
+                .expect("pending titles")
+                .len(),
+            1
+        );
+        repository.abandon(occupying.call).await?;
+        let ready = processes.prepare_pending_titles().await;
+        assert_eq!(ready.len(), 1);
+        assert!(processes.prepare_pending_titles().await.is_empty());
+        let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2")
+            .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(
+            repository
+                .finish_generated(
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                    ModelCallId::from_uuid(recovered),
+                    Some("Database query indexes".to_owned()),
+                    signalbox_application::UsageTokenAxes {
+                        input: Some(20),
+                        output: Some(4),
+                        cache_creation_input: None,
+                        cache_read_input: None
+                    },
+                )
+                .await?,
+            Some("Database query indexes".to_owned())
+        );
+        let saved: String =
+            sqlx::query_scalar("SELECT title FROM session_metadata WHERE session_id = $1")
+                .bind(session.into_uuid())
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(saved, "Database query indexes");
+        pool.close().await;
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
@@ -275,7 +500,10 @@ mod tests {
                 input_includes_cache_tokens: false,
                 initial_for_turn: None,
             };
-            assert!(titles.prepare(&mut call, &Default::default()).await?);
+            assert!(
+                titles.prepare(&mut call, &Default::default()).await?
+                    == PrepareSessionTitleOutcome::Prepared
+            );
             observer.recover().await?;
             let prepared: bool = sqlx::query_scalar(
                 "SELECT state_kind = 'prepared' FROM session_title_model_call WHERE model_call_id = $1",
