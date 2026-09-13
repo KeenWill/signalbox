@@ -5,6 +5,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -208,6 +209,7 @@ export function VirtualTranscript({
   autoFocus = false,
   initialEnd = false,
   followEnd = false,
+  loadingLater = false,
   onRange,
   onEndChange,
   onEdge,
@@ -228,6 +230,7 @@ export function VirtualTranscript({
   autoFocus?: boolean
   initialEnd?: boolean
   followEnd?: boolean
+  loadingLater?: boolean
   onRange?: (start: number, end: number) => void
   onEndChange?: (atEnd: boolean) => void
   onEdge?: (direction: 'before' | 'after') => void
@@ -242,6 +245,7 @@ export function VirtualTranscript({
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
   const atEnd = useRef(initialEnd)
+  const restoringLaterAnchor = useRef(false)
   const previousLast = useRef<string | undefined>(undefined)
   const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
@@ -273,7 +277,13 @@ export function VirtualTranscript({
   useEffect(() => {
     if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })
   }, [selected, virtualizer])
+  const reportEnd = useEffectEvent((value: boolean) => onEndChange?.(value))
   useLayoutEffect(() => {
+    if (loadingLater) {
+      restoringLaterAnchor.current = true
+      atEnd.current = false
+      return
+    }
     if (!ids.length) return
     if (!initialized.current) {
       initialized.current = true
@@ -289,9 +299,16 @@ export function VirtualTranscript({
       const index = ids.indexOf(anchor.current.id)
       const position = index < 0 ? undefined : virtualizer.getOffsetForIndex(index, 'start')
       if (position) virtualizer.scrollToOffset(position[0] + anchor.current.offset)
+      if (restoringLaterAnchor.current) {
+        const element = parent.current
+        atEnd.current =
+          !!element && element.scrollHeight - element.scrollTop - element.clientHeight <= 1
+        reportEnd(atEnd.current)
+      }
     }
+    restoringLaterAnchor.current = false
     previousLast.current = ids.at(-1)
-  }, [ids, initialEnd, followEnd, selected, virtualizer])
+  }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
   const remember = () => {
     const offset = parent.current?.scrollTop ?? 0
     const row = virtualizer.getVirtualItems().find((item) => item.end > offset)
@@ -302,7 +319,9 @@ export function VirtualTranscript({
     if (!element) return
     remember()
     atEnd.current =
-      direction !== 'before' && element.scrollHeight - element.scrollTop - element.clientHeight <= 1
+      !loadingLater &&
+      direction !== 'before' &&
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 1
     onEndChange?.(atEnd.current)
     if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
     else if (

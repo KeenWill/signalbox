@@ -54,6 +54,113 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   await page.screenshot({ path: testInfo.outputPath('transcript-scroll.png') })
 })
 
+test('preserves the reading position when loading the final later window', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  let latest = 16
+  let releaseGrowth = () => {}
+  const growth = new Promise<void>((resolve) => {
+    releaseGrowth = resolve
+  })
+  let requestedLater = false
+  let releaseLater = () => {}
+  const later = new Promise<void>((resolve) => {
+    releaseLater = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${transcriptSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            {
+              kind: 'snapshot',
+              snapshot: {
+                session_id: transcriptSessionId,
+                observed_through: '16',
+                active: null,
+                queued_turn_count: '0',
+                queued_turn_ids: [],
+                reconciliation: null,
+                runner: null,
+              },
+            },
+            {
+              kind: 'durable',
+              cursor: '17',
+              address: { event_sequence: '17' },
+              event_kind: 'input_accepted',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'after') {
+      requestedLater = true
+      await later
+    }
+    return route.fulfill({ json: transcriptFixture(url, latest) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /^First/ }).click()
+  await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect.poll(() => requestedLater).toBe(true)
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  const anchor = transcript.getByText('Message 8', { exact: true })
+  await expect(anchor).toBeVisible()
+  const anchorTop = await anchor.evaluate((element) => element.getBoundingClientRect().top)
+  releaseLater()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await expect(transcript).toHaveAttribute('data-total-loaded', '16')
+  await expect
+    .poll(async () =>
+      Math.abs(
+        (await anchor.evaluate((element) => element.getBoundingClientRect().top)) - anchorTop,
+      ),
+    )
+    .toBeLessThan(2)
+  await expect(transcript.getByText('Message 16', { exact: true })).not.toBeInViewport()
+  await page.screenshot({ path: testInfo.outputPath('final-window-anchor.png') })
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  latest = 17
+  releaseGrowth()
+  await expect(transcript.getByText('Message 17', { exact: true })).toBeVisible()
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (element) => element.scrollHeight - element.scrollTop - element.clientHeight,
+      ),
+    )
+    .toBeLessThanOrEqual(1)
+  expect(problems).toEqual([])
+})
+
 for (const [maximumItems, internal] of [
   [1, false],
   [8, false],

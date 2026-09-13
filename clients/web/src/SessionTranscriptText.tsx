@@ -307,6 +307,7 @@ function TranscriptWindow({
       <VirtualTranscript
         scrollRef={scrollRef}
         ids={ids}
+        loadingLater={transcript.isFetchingNextPage}
         initialEnd={initialAnchor.kind === 'latest'}
         onEndChange={(atEnd) => {
           readerAtEnd.current = atEnd
