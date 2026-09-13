@@ -67,6 +67,10 @@ fn lease_correlation() -> LeaseCorrelation {
         lease_id: uuid(ARBITRARY_UUID_A),
         lease_generation: positive(2),
         runner_id: uuid(ARBITRARY_UUID_B),
+        placement_revision: positive(1),
+        working_directory: WorkingDirectory::try_new("/tmp/runner-work".to_owned())
+            .expect("fixture directory"),
+        sandbox_profile: SandboxProfile::Ambient,
         tool_name: tool("git_fetch"),
         session_id: uuid(ARBITRARY_UUID_C),
         turn_id: uuid(ARBITRARY_UUID_D),
@@ -908,4 +912,59 @@ fn workspace_provision_omits_absent_recovery_and_rejects_explicit_null() {
     );
     encoded["recovery"] = serde_json::Value::Null;
     assert!(serde_json::from_value::<WorkspaceProvision>(encoded).is_err());
+}
+
+#[test]
+fn terminal_envelopes_preserve_domain_text_and_failure_evidence() {
+    use signalbox_domain::{
+        ToolAttemptEnd, ToolAttemptObservation, ToolExecutionError, ToolExecutionErrorDetail,
+        ToolExecutionErrorKind, ToolResultContent, ToolResultText,
+    };
+    let text = ToolResultContent::Text(
+        ToolResultText::try_new("exact\nUTF-8: λ".to_owned()).expect("bounded text"),
+    );
+    let envelope = TerminalResult::from_attempt_end(&ToolAttemptEnd::Completed {
+        result: text.clone(),
+    })
+    .expect("text projection");
+    assert_eq!(
+        envelope.into_observation().expect("checked evidence"),
+        ToolAttemptObservation::Completed { result: text }
+    );
+    for kind in [
+        ToolExecutionErrorKind::UnknownTool,
+        ToolExecutionErrorKind::InvalidArguments,
+        ToolExecutionErrorKind::ExecutionFailed,
+        ToolExecutionErrorKind::ResultTooLarge,
+        ToolExecutionErrorKind::ResultContainsNull,
+        ToolExecutionErrorKind::CrashLost,
+    ] {
+        let error = ToolExecutionError::new(
+            kind,
+            Some(
+                ToolExecutionErrorDetail::try_new("verbatim λ".to_owned()).expect("bounded detail"),
+            ),
+        );
+        let envelope = TerminalResult::from_attempt_end(&ToolAttemptEnd::KnownFailed {
+            error: error.clone(),
+        })
+        .expect("failure projection");
+        assert_eq!(
+            envelope.into_observation().expect("checked evidence"),
+            ToolAttemptObservation::KnownFailed { error }
+        );
+    }
+    assert_eq!(
+        TerminalResult::from_attempt_end(&ToolAttemptEnd::Ambiguous)
+            .expect("ambiguity projection")
+            .into_observation()
+            .expect("checked evidence"),
+        ToolAttemptObservation::Ambiguous
+    );
+    assert!(
+        TerminalResult::from_attempt_end(&ToolAttemptEnd::KnownFailed {
+            error: ToolExecutionError::new(ToolExecutionErrorKind::PreauthorizationRejected, None)
+        })
+        .is_err()
+    );
 }

@@ -1,6 +1,6 @@
 //! Hub-side serial registration and lifecycle runtime for the local runner wire.
 
-use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
+use std::{error::Error, fmt, future::Future, io, pin::Pin, time::Duration};
 
 use rustix::process::geteuid;
 use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge, ToolCatalog as _};
@@ -15,21 +15,21 @@ use signalbox_persistence::runner_protocol::{
     PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
     RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
     RunnerConnectionTransitionOutcome, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
-    RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
-    RunnerRegistrationRevision,
+    RunnerEnrollmentRequestId, RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome,
+    RunnerProtocolStore, RunnerProtocolStoreError, RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
-    Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
-    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, MAX_FRAME_BYTES, Message,
-    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed,
-    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest, decode_line,
-    encode_line,
+    Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
+    Enroll, Enrolled, Frame, FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase,
+    LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64, ReconnectDirectives, Registered,
+    Rejected, RejectionCode, Resume, Resumed, Shutdown, ShutdownReason,
+    WorkspaceFailureCorrelation, advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    sync::{Mutex, watch},
+    sync::watch,
     task::{JoinError, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -78,6 +78,57 @@ impl RunnerEnrollmentResponse {
 
 /// Durable-before-ack boundary consumed by the runner socket runtime.
 pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
+    /// Observes newly committed lease work without reconstructing authority in memory.
+    fn lease_changes(&self) -> Option<watch::Receiver<()>> {
+        None
+    }
+    /// Wakes retained dispatch reads at the existing liveness boundary.
+    fn lease_tick(&self) {}
+    /// Loads one durable offer for this exact connection.
+    fn pending_tool_offer(
+        &self,
+        _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
+    ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::LeaseOffer>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Commits a claim before issuing its capability and immutable dispatch payload.
+    fn claim_tool_offer(
+        &self,
+        _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
+        claim: signalbox_runner_wire::LeaseClaim,
+    ) -> RunnerRegistrationFuture<
+        '_,
+        (
+            signalbox_runner_wire::LeaseClaimed,
+            signalbox_runner_wire::Dispatch,
+        ),
+    > {
+        Box::pin(async move {
+            Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::LeaseClaim,
+                AvailableCorrelation::Lease(claim.correlation),
+                RejectionCode::Unavailable,
+            ))
+        })
+    }
+    /// Commits terminal evidence before acknowledging its exact result.
+    fn record_tool_result(
+        &self,
+        _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
+        result: signalbox_runner_wire::ResultFrame,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::ResultRecorded> {
+        Box::pin(async move {
+            Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Result,
+                AvailableCorrelation::Lease(result.correlation),
+                RejectionCode::Unavailable,
+            ))
+        })
+    }
+
     /// Loads the committed active receipt of an explicitly promoted candidate.
     fn promotion_receipt(
         &self,
@@ -140,7 +191,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
 pub struct PostgresRunnerRegistrationService {
     store: RunnerProtocolStore,
     allowed_classes: Vec<RunnerCapabilityClass>,
-    registration_admission: Arc<Mutex<()>>,
+    dispatch: crate::runner_dispatch::RunnerDispatchService,
     eligibility_nudge: Option<InProcessEligibilityNudge>,
 }
 
@@ -150,12 +201,18 @@ impl PostgresRunnerRegistrationService {
         store: RunnerProtocolStore,
         allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
     ) -> Self {
+        let dispatch = crate::runner_dispatch::RunnerDispatchService::new(store.clone());
         Self {
             store,
+            dispatch,
             allowed_classes: allowed_classes.into_iter().collect(),
-            registration_admission: Arc::new(Mutex::new(())),
             eligibility_nudge: None,
         }
+    }
+
+    /// Shares the local runner's serial dispatch service with daemon tools.
+    pub fn dispatch_service(&self) -> crate::runner_dispatch::RunnerDispatchService {
+        self.dispatch.clone()
     }
 
     /// Schedules affected sessions after connection-loss propagation commits.
@@ -240,7 +297,9 @@ impl PostgresRunnerRegistrationService {
                     let disposition = self
                         .store
                         .propagate_connection_loss_session(loss, *session)
-                        .await?;
+                        .await;
+                    self.dispatch.changed();
+                    let disposition = disposition?;
                     if let Some(nudge) = &self.eligibility_nudge
                         && nudge.nudge(*session)
                             == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
@@ -264,7 +323,7 @@ impl PostgresRunnerRegistrationService {
         &self,
         request: Enroll,
     ) -> Result<RunnerEnrollmentResponse, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -363,7 +422,7 @@ impl PostgresRunnerRegistrationService {
     }
 
     async fn resume_durably(&self, request: Resume) -> Result<Resumed, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -372,7 +431,10 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::UnsupportedDigestVersion,
             ));
         }
-        if request.inventory != Default::default() {
+        if request.inventory.workspace_operation.is_some()
+            || request.inventory.operation_failure.is_some()
+            || request.inventory.leak_page.is_some()
+        {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
                 correlation,
@@ -400,6 +462,113 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
+        let invalid_inventory = || {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Resume,
+                correlation.clone(),
+                RejectionCode::CorrelationMismatch,
+            )
+        };
+        let evidence = match (&request.inventory.lease, &request.inventory.result) {
+            (None, None) => None,
+            (Some(lease), result) => {
+                let domain =
+                    crate::runner_dispatch_wire::domain_correlation(lease.correlation.clone())
+                        .map_err(|_| invalid_inventory())?;
+                Some(match result {
+                    Some(result)
+                        if result.correlation == lease.correlation
+                            && lease.phase == LeasePhaseKind::ExecutionMayHaveStarted =>
+                    {
+                        RunnerLeaseResumeEvidence::Result {
+                            correlation: domain,
+                            observation: result
+                                .result
+                                .clone()
+                                .into_observation()
+                                .map_err(|_| invalid_inventory())?,
+                        }
+                    }
+                    Some(_) => return Err(invalid_inventory()),
+                    None => match lease.phase {
+                        LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived => {
+                            RunnerLeaseResumeEvidence::AwaitingDispatch(domain)
+                        }
+                        LeasePhaseKind::ExecutionMayHaveStarted => {
+                            RunnerLeaseResumeEvidence::ExecutionPossible(domain)
+                        }
+                    },
+                })
+            }
+            (None, Some(_)) => return Err(invalid_inventory()),
+        };
+        let mut resolution = self
+            .store
+            .reconcile_tool_resume(
+                RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                identities,
+                prior,
+                &advertisement,
+                evidence.clone(),
+            )
+            .await
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })?;
+        if let RunnerLeaseResumeOutcome::LoseConnection(connection) = resolution {
+            self.resolve_resume_loss(request.enrollment_id, connection)
+                .await?;
+            resolution = self
+                .store
+                .reconcile_tool_resume(
+                    RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                    identities,
+                    prior,
+                    &advertisement,
+                    evidence.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?;
+        }
+        let action = match resolution {
+            RunnerLeaseResumeOutcome::Empty => None,
+            RunnerLeaseResumeOutcome::AwaitingDispatch => Some(DirectiveAction::Await),
+            RunnerLeaseResumeOutcome::Recorded => Some(DirectiveAction::DiscardAsRecorded),
+            RunnerLeaseResumeOutcome::Lost => Some(DirectiveAction::FailStale),
+            RunnerLeaseResumeOutcome::LoseConnection(_) => {
+                return Err(RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Resume,
+                    correlation,
+                    RejectionCode::Unavailable,
+                ));
+            }
+        };
+        self.dispatch.changed();
+        let directive = |correlation| {
+            action
+                .ok_or_else(invalid_inventory)
+                .map(|action| Directive {
+                    correlation,
+                    action,
+                })
+        };
+        let mut directives = ReconnectDirectives {
+            lease: request
+                .inventory
+                .lease
+                .as_ref()
+                .map(|lease| directive(lease.correlation.clone()))
+                .transpose()?,
+            result: request
+                .inventory
+                .result
+                .as_ref()
+                .map(|result| directive(result.correlation.clone()))
+                .transpose()?,
+            ..ReconnectDirectives::default()
+        };
         let previous_registration_revision = match self
             .store
             .load_enrollment(identities.enrollment())
@@ -423,7 +592,7 @@ impl PostgresRunnerRegistrationService {
                 RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
                 identities,
                 prior,
-                advertisement,
+                advertisement.clone(),
             )
             .await
             .map_err(|error| {
@@ -443,7 +612,44 @@ impl PostgresRunnerRegistrationService {
             .store
             .open_connection(receipt.enrollment().enrollment())
             .await
-            .map_err(|error| store_failure(RunnerInboundFrameKind::Resume, correlation, error))?;
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })?;
+        if action == Some(DirectiveAction::Await) {
+            // Opening the new epoch fences prior physical connections. Re-read
+            // after it in case a prior connection committed loss during admission.
+            let current = self
+                .store
+                .reconcile_tool_resume(
+                    RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                    identities,
+                    receipt.registration().revision(),
+                    &advertisement,
+                    evidence,
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?;
+            match current {
+                RunnerLeaseResumeOutcome::AwaitingDispatch => {}
+                RunnerLeaseResumeOutcome::Lost => {
+                    if let Some(directive) = &mut directives.lease {
+                        directive.action = DirectiveAction::FailStale;
+                    }
+                }
+                RunnerLeaseResumeOutcome::LoseConnection(_) => {
+                    self.resolve_resume_loss(request.enrollment_id, connection)
+                        .await?;
+                    return Err(RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        correlation,
+                        RejectionCode::Unavailable,
+                    ));
+                }
+                _ => return Err(invalid_inventory()),
+            }
+        }
         tracing::info!(
             enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
             runner_id = %receipt.enrollment().runner().into_uuid(),
@@ -454,8 +660,35 @@ impl PostgresRunnerRegistrationService {
         Ok(Resumed {
             registration_revision: positive_revision(receipt.registration().revision())?,
             connection_epoch: positive_epoch(connection.epoch())?,
-            directives: ReconnectDirectives::default(),
+            directives,
         })
+    }
+
+    async fn resolve_resume_loss(
+        &self,
+        enrollment: CanonicalUuid,
+        connection: signalbox_persistence::runner_protocol::RunnerConnectionSnapshot,
+    ) -> Result<(), RunnerRegistrationFailure> {
+        let prior_epoch = positive_epoch(connection.epoch())?;
+        let retry = || {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Resume,
+                AvailableCorrelation::ConnectionEpoch(prior_epoch),
+                RejectionCode::Unavailable,
+            )
+        };
+        let outcome = self
+            .transition_connection_durably(
+                enrollment,
+                positive_epoch(connection.epoch())?,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        if !matches!(outcome, RunnerConnectionTransitionOutcome::Current(snapshot) if snapshot.state() == RunnerConnectionState::Lost)
+        {
+            return Err(retry());
+        }
+        Ok(())
     }
 
     async fn advertise_durably(
@@ -471,7 +704,7 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             ));
         }
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Registration(request.registration_revision);
         let observed_epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
             RunnerRegistrationFailure::new(
@@ -729,6 +962,131 @@ fn echo_declaration() -> Result<RunnerToolDeclaration, RunnerDomainError> {
 }
 
 impl RunnerRegistrationService for PostgresRunnerRegistrationService {
+    fn lease_changes(&self) -> Option<watch::Receiver<()>> {
+        Some(self.dispatch.subscribe())
+    }
+    fn lease_tick(&self) {
+        self.dispatch.changed();
+    }
+
+    fn pending_tool_offer(
+        &self,
+        enrollment: CanonicalUuid,
+        epoch: PositiveU64,
+    ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::LeaseOffer>> {
+        Box::pin(async move {
+            let kind = RunnerInboundFrameKind::LeaseOffer;
+            let available = AvailableCorrelation::ConnectionEpoch(epoch);
+            let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                RunnerRegistrationFailure::new(
+                    kind,
+                    available.clone(),
+                    RejectionCode::CorrelationMismatch,
+                )
+            })?;
+            let lease = self
+                .store
+                .pending_tool_lease(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()), epoch)
+                .await
+                .map_err(|error| store_failure(kind, available.clone(), error))?;
+            lease
+                .as_ref()
+                .map(crate::runner_dispatch_wire::offer)
+                .transpose()
+                .map_err(|_| {
+                    RunnerRegistrationFailure::new(
+                        kind,
+                        available,
+                        RejectionCode::CorrelationMismatch,
+                    )
+                })
+        })
+    }
+
+    fn claim_tool_offer(
+        &self,
+        enrollment: CanonicalUuid,
+        epoch: PositiveU64,
+        claim: signalbox_runner_wire::LeaseClaim,
+    ) -> RunnerRegistrationFuture<
+        '_,
+        (
+            signalbox_runner_wire::LeaseClaimed,
+            signalbox_runner_wire::Dispatch,
+        ),
+    > {
+        Box::pin(async move {
+            let kind = RunnerInboundFrameKind::LeaseClaim;
+            let available = AvailableCorrelation::Lease(claim.correlation.clone());
+            let invalid = || {
+                RunnerRegistrationFailure::new(
+                    kind,
+                    available.clone(),
+                    RejectionCode::CorrelationMismatch,
+                )
+            };
+            let correlation = crate::runner_dispatch_wire::domain_correlation(claim.correlation)
+                .map_err(|_| invalid())?;
+            let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(invalid)?;
+            let lease = self
+                .store
+                .claim_tool_lease(
+                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                    epoch,
+                    correlation,
+                )
+                .await
+                .map_err(|error| store_failure(kind, available.clone(), error))?;
+            Ok((
+                signalbox_runner_wire::LeaseClaimed {
+                    correlation: crate::runner_dispatch_wire::wire_correlation(
+                        &lease.correlation(),
+                    )
+                    .map_err(|_| invalid())?,
+                },
+                crate::runner_dispatch_wire::dispatch(&lease).map_err(|_| invalid())?,
+            ))
+        })
+    }
+
+    fn record_tool_result(
+        &self,
+        enrollment: CanonicalUuid,
+        epoch: PositiveU64,
+        result: signalbox_runner_wire::ResultFrame,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::ResultRecorded> {
+        Box::pin(async move {
+            let kind = RunnerInboundFrameKind::Result;
+            let available = AvailableCorrelation::Lease(result.correlation.clone());
+            let invalid = || {
+                RunnerRegistrationFailure::new(
+                    kind,
+                    available.clone(),
+                    RejectionCode::CorrelationMismatch,
+                )
+            };
+            let correlation = crate::runner_dispatch_wire::domain_correlation(result.correlation)
+                .map_err(|_| invalid())?;
+            let observation = result.result.into_observation().map_err(|_| invalid())?;
+            let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(invalid)?;
+            let lease = self
+                .store
+                .record_tool_lease_result(
+                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                    epoch,
+                    correlation,
+                    observation,
+                )
+                .await
+                .map_err(|error| store_failure(kind, available.clone(), error))?;
+            self.dispatch.changed();
+            Ok(signalbox_runner_wire::ResultRecorded {
+                correlation: crate::runner_dispatch_wire::wire_correlation(&lease.correlation())
+                    .map_err(|_| invalid())?,
+            })
+        })
+    }
+
     fn promotion_receipt(
         &self,
         enrollment: CanonicalUuid,
@@ -1485,28 +1843,45 @@ where
         let mut heartbeat_state = HeartbeatState::new();
         let mut sent_provisions = std::collections::BTreeSet::new();
         let mut sent_promotion = false;
+        let mut receive_buffer = Vec::new();
+        let mut lease_changes = service.lease_changes();
+        let mut sent_lease = None;
         loop {
         tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    if transition_or_reject_not_current(
-                        &service,
-                        context,
-                        &mut writer,
-                        RunnerInboundFrameKind::Shutdown,
+                    let outcome = service.transition_connection(
+                        context.enrollment,
                         context.epoch,
                         RunnerConnectionTransition::DaemonShutdown,
-                    ).await? {
-                        write_message(&mut writer, Message::Shutdown(Shutdown {
-                            connection_epoch: context.epoch,
-                            reason: ShutdownReason::DaemonShutdown,
-                        })).await?;
+                    ).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?;
+                    match outcome {
+                        RunnerConnectionTransitionOutcome::Stale { .. } => {
+                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::Shutdown, context.epoch).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(snapshot)
+                            if snapshot.cause() == RunnerConnectionCause::EnrollmentRevoked => {
+                            write_rejected(&mut writer, RunnerRegistrationFailure::new(
+                                RunnerInboundFrameKind::Shutdown,
+                                AvailableCorrelation::ConnectionEpoch(context.epoch),
+                                RejectionCode::EnrollmentRevoked,
+                            )).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(snapshot)
+                            if snapshot.state() == RunnerConnectionState::Shutdown
+                                && snapshot.cause() == RunnerConnectionCause::DaemonShutdown => {
+                            write_message(&mut writer, Message::Shutdown(Shutdown {
+                                connection_epoch: context.epoch,
+                                reason: ShutdownReason::DaemonShutdown,
+                            })).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(_) => {}
                     }
                     return Ok(());
                 }
             }
-            frame = read_frame(&mut reader) => {
+            frame = read_frame_buffered(&mut reader, &mut receive_buffer) => {
                 let frame = match frame {
                     Ok(frame) => frame,
                     Err(RunnerProtocolRuntimeError::Closed) => {
@@ -1588,6 +1963,27 @@ where
                                 }
                                 return Ok(());
                             }
+                        }
+                    }
+                    Message::LeaseClaim(claim) => {
+                        match service.claim_tool_offer(context.enrollment, context.epoch, claim).await {
+                            Ok((claimed, dispatch)) => {
+                                write_message(&mut writer, Message::LeaseClaimed(claimed)).await?;
+                                write_message(&mut writer, Message::Dispatch(dispatch)).await?;
+                            },
+                            Err(failure) => {
+                                terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::LeaseClaim, context.epoch, failure).await?;
+                                return Ok(());
+                            },
+                        }
+                    }
+                    Message::Result(result) => {
+                        match service.record_tool_result(context.enrollment, context.epoch, result).await {
+                            Ok(recorded) => write_message(&mut writer, Message::ResultRecorded(recorded)).await?,
+                            Err(failure) => {
+                                terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::Result, context.epoch, failure).await?;
+                                return Ok(());
+                            },
                         }
                     }
                     Message::HeartbeatAck(acknowledgement) => {
@@ -1675,7 +2071,17 @@ where
                     }
                 }
             }
+            () = lease_changed(&mut lease_changes) => {
+                if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                    let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
+                    if sent_lease != Some(identity) {
+                        write_message(&mut writer, Message::LeaseOffer(offer)).await?;
+                        sent_lease = Some(identity);
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
+                service.lease_tick();
                 match heartbeat_state.next_tick()? {
                     HeartbeatTick::Challenge(challenge) => {
                         write_message(&mut writer, Message::Heartbeat(challenge)).await?;
@@ -1724,6 +2130,17 @@ where
         transition_is_current(&service, context, transition).await?;
     }
     outcome
+}
+
+async fn lease_changed(changes: &mut Option<watch::Receiver<()>>) {
+    match changes {
+        Some(changes) => {
+            if changes.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1977,7 +2394,13 @@ impl HeartbeatState {
 async fn read_frame(
     reader: &mut BufReader<OwnedReadHalf>,
 ) -> Result<Frame, RunnerProtocolRuntimeError> {
-    let mut line = Vec::new();
+    read_frame_buffered(reader, &mut Vec::new()).await
+}
+
+async fn read_frame_buffered(
+    reader: &mut BufReader<OwnedReadHalf>,
+    line: &mut Vec<u8>,
+) -> Result<Frame, RunnerProtocolRuntimeError> {
     loop {
         let available = reader
             .fill_buf()
@@ -2007,7 +2430,9 @@ async fn read_frame(
             break;
         }
     }
-    decode_line(&line).map_err(RunnerProtocolRuntimeError::Decode)
+    let decoded = decode_line(line).map_err(RunnerProtocolRuntimeError::Decode);
+    line.clear();
+    decoded
 }
 
 async fn write_rejected(
@@ -2260,6 +2685,49 @@ mod tests {
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
+    #[tokio::test]
+    async fn partial_runner_frame_survives_a_lease_notification() {
+        let (daemon, mut runner) = tokio::net::UnixStream::pair().expect("local stream pair");
+        let (reader, _) = daemon.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut buffer = Vec::new();
+        let message = Message::HeartbeatAck(HeartbeatAck {
+            challenge_sequence: PositiveU64::try_new(1).expect("first challenge"),
+            runner_sequence: PositiveU64::try_new(1).expect("first response"),
+            lease_phase: None,
+            workspace_phase: None,
+        });
+        let frame = Frame::try_new(message).expect("heartbeat acknowledgement");
+        let encoded = encode_line(&frame).expect("encoded frame");
+        let split = encoded.len() / 2;
+        runner
+            .write_all(&encoded[..split])
+            .await
+            .expect("partial frame");
+        reader
+            .get_ref()
+            .readable()
+            .await
+            .expect("partial frame is readable");
+        tokio::select! {
+            biased;
+            _ = read_frame_buffered(&mut reader, &mut buffer) => panic!("incomplete frame cannot finish"),
+            () = tokio::task::yield_now() => {},
+        }
+        assert_eq!(buffer, encoded[..split]);
+        runner
+            .write_all(&encoded[split..])
+            .await
+            .expect("remaining frame");
+        assert_eq!(
+            read_frame_buffered(&mut reader, &mut buffer)
+                .await
+                .expect("whole frame"),
+            frame
+        );
+        assert!(buffer.is_empty());
+    }
+
     const CONFIGURED_REPOSITORY: &str = "signalbox";
     const ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE: u64 = 1;
     const ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE: u64 = 1;
@@ -2269,7 +2737,6 @@ mod tests {
     const ARBITRARY_PROVISION_PLACEMENT_REVISION: u64 = 1;
     const ARBITRARY_PROVISION_REGISTRATION_REVISION: u64 = 1;
     const ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED: u128 = 0x300;
-    const ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED: u128 = 0x301;
     const ARBITRARY_RUNNER_SESSION_MODEL_SELECTION_SEED: u128 = 0x302;
     const ARBITRARY_RUNNER_SESSION_ID_SEED: u128 = 0x303;
     const RUNNER_SESSION_WORKING_DIRECTORY: &str = "/workspace/session";
@@ -2402,9 +2869,7 @@ mod tests {
         )])
         .expect("the synthetic credential pin is valid");
         let creation = CreateSession::new(
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(
-                ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED,
-            )),
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             SessionCreationProvenance::new(
                 SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
@@ -2450,6 +2915,12 @@ mod tests {
             lease_id: arbitrary_identity,
             lease_generation: first,
             runner_id: arbitrary_identity,
+            placement_revision: first,
+            working_directory: signalbox_runner_wire::WorkingDirectory::try_new(
+                "/tmp/runner-work".to_owned(),
+            )
+            .expect("fixture directory"),
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
             tool_name: signalbox_runner_wire::WireToolName::try_new("git_fetch".to_owned())
                 .expect("the fixture tool name is valid"),
             session_id: arbitrary_identity,
@@ -3665,6 +4136,82 @@ mod tests {
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn terminal_connection_loss_nudges_placed_sessions_without_periodic_reconciliation() {
         assert_terminal_connection_loss_nudge(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn committed_loss_wakes_dispatch_even_when_a_later_session_fails() {
+        let (_container, database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let RunnerEnrollmentResponse::Active(enrolled) = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("active runner")
+        else {
+            panic!("first runner is active")
+        };
+        let pool = fresh_pool(&database_url).await;
+        let first = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
+        let second =
+            SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED + 1));
+        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        create_runner_placed_session(&pool, &store, first, runner).await;
+        create_runner_placed_session(&pool, &store, second, runner).await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE FUNCTION reject_second_loss() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.session_id = '{}'::uuid AND NEW.event_kind = 'runner_lost_before_pin' THEN
+                    RAISE EXCEPTION 'injected later-session failure';
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER reject_second_loss BEFORE INSERT ON runner_session_placement_record
+            FOR EACH ROW EXECUTE FUNCTION reject_second_loss();",
+            second.into_uuid()
+        )))
+        .execute(&pool)
+        .await
+        .expect("inject a failure after the first session commits");
+        let changes = service.lease_changes().expect("dispatch change source");
+        assert!(
+            service
+                .transition_connection(
+                    enrolled.enrollment_id,
+                    enrolled.connection_epoch,
+                    RunnerConnectionTransition::TransportClosed
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            changes
+                .has_changed()
+                .expect("notification source remains open")
+        );
+        assert!(matches!(
+            store
+                .load_placement(first)
+                .await
+                .expect("first placement loads")
+                .expect("first placement")
+                .placement()
+                .state(),
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        ));
+        assert_eq!(
+            store
+                .load_placement(second)
+                .await
+                .expect("second placement loads")
+                .expect("second placement")
+                .placement()
+                .state(),
+            &SessionRunnerPlacementState::Unpinned
+        );
     }
 
     #[tokio::test]

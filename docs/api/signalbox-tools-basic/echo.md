@@ -47,6 +47,11 @@ impl EchoTool {
 ```rust
 pub struct EchoExecutor;
 // derives: clone::Clone, marker::Copy, fmt::Debug
+impl EchoExecutor {
+    pub fn evaluate(
+        arguments: &signalbox_domain::NormalizedToolArguments,
+    ) -> result::Result<&str, EchoExecutorError>;
+}
 impl signalbox_application::ToolExecutor for EchoExecutor {
     type Error = EchoExecutorError;
     fn execute(

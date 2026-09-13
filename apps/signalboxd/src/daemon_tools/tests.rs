@@ -4699,6 +4699,7 @@ fn daemon_catalog_contains_every_injected_tool_family() {
             signalbox_tools_plan::PLAN_READ_NAME,
             signalbox_tools_plan::PLAN_WRITE_NAME,
             signalbox_tools_conversations::READ_CONVERSATION_NAME,
+            super::review_diff::NAME,
             READ_FILE_NAME,
             signalbox_tools_conversations::READ_IMPORTED_CONVERSATION_NAME,
             signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME,

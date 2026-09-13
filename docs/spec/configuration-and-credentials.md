@@ -797,15 +797,18 @@ Loading a review library generates four stage templates and one template for
 each configured concern. The concern inventory is a nonempty subset of the five
 closed concern keys and retains their closed order. All nine possible names are
 reserved even when no library is configured, so an ordinary entry cannot shadow
-one. Creation by template name first consults the durable command registry, and
-an equal replay returns its stored session even when the name is absent or
-changed in the current catalog; the claim protocol is owned by
-[identity and commands](identity-and-commands.md). Only an unclaimed command
-identity resolves against the loaded catalog and copies the complete bundle into
-the session's immutable defaults version one. The session records the template
-name and content digest and retains no live catalog reference, so an edit
-affects only creations first handled under the new catalog. The process-protocol
-template list returns sorted name and version summaries.
+one. The reloadable `review_library.judgment_template` selects an existing
+catalog entry for orchestration judgment and defaults to `review-judgment`. An
+unknown name rejects the reload; the selected name and content are bound into
+the attempt's judgment digest. Creation by template name first consults the
+durable command registry, and an equal replay returns its stored session even
+when the name is absent or changed in the current catalog; the claim protocol is
+owned by [identity and commands](identity-and-commands.md). Only an unclaimed
+command identity resolves against the loaded catalog and copies the complete
+bundle into the session's immutable defaults version one. The session records
+the template name and content digest and retains no live catalog reference, so
+an edit affects only creations first handled under the new catalog. The
+process-protocol template list returns sorted name and version summaries.
 
 Model-selection validation happens at two boundaries on frozen semantic meaning
 only; credential presence is never consulted. At session creation the requested

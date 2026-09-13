@@ -4,7 +4,8 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use signalbox_domain::{
-    CredentialProfileName, RunnerCapabilityClass, ToolName, WorkspaceRepositoryKey,
+    CredentialProfileName, RunnerCapabilityClass, RunnerWorkingDirectory, ToolName,
+    WorkspaceRepositoryKey,
 };
 use uuid::Uuid;
 
@@ -19,6 +20,8 @@ pub enum ValueError {
     Digest,
     /// A portable checked name was invalid for its domain role.
     PortableName,
+    /// A runner working directory violated the bounded exact-text contract.
+    WorkingDirectory,
     /// A sorted inventory was unordered, duplicated, or over its cap.
     Inventory,
     /// A terminal result bound differed from version one's fixed contract.
@@ -38,6 +41,7 @@ impl fmt::Display for ValueError {
             Self::PositiveInteger => "integer must be positive",
             Self::Digest => "digest must be 64 lowercase hexadecimal bytes",
             Self::PortableName => "portable name is invalid",
+            Self::WorkingDirectory => "runner working directory is invalid",
             Self::Inventory => "inventory is not sorted, unique, and within its cap",
             Self::ResultBounds => "result bounds differ from runner-wire version one",
             Self::Result => "terminal result is outside its closed domain shape",
@@ -309,6 +313,37 @@ impl<'de> Deserialize<'de> for RepositoryKey {
     }
 }
 
+/// A domain-validated exact runner working directory.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct WorkingDirectory(String);
+
+impl WorkingDirectory {
+    /// Maximum UTF-8 bytes admitted by an exact runner working directory.
+    pub const MAX_BYTES: usize = RunnerWorkingDirectory::MAX_BYTES;
+
+    /// Checks and stores the bounded nonempty runner-interpreted directory.
+    pub fn try_new(value: String) -> Result<Self, ValueError> {
+        RunnerWorkingDirectory::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| ValueError::WorkingDirectory)
+    }
+
+    /// Returns the exact directory text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkingDirectory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Closed runner sandbox profiles.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -519,6 +554,84 @@ impl<'de> Deserialize<'de> for TerminalResult {
 }
 
 impl TerminalResult {
+    /// Projects the domain's terminal attempt evidence into the closed text-only wire.
+    pub fn from_attempt_end(end: &signalbox_domain::ToolAttemptEnd) -> Result<Self, ValueError> {
+        use signalbox_domain::{ToolAttemptEnd, ToolExecutionErrorKind, ToolResultContent};
+        let result = match end {
+            ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(text),
+            } => Self::Success {
+                text: text.as_str().to_owned(),
+            },
+            ToolAttemptEnd::KnownFailed { error } => Self::KnownFailure {
+                error_kind: match error.kind() {
+                    ToolExecutionErrorKind::PreauthorizationRejected => {
+                        return Err(ValueError::Result);
+                    }
+                    ToolExecutionErrorKind::UnknownTool => ExecutionErrorKind::UnknownTool,
+                    ToolExecutionErrorKind::InvalidArguments => {
+                        ExecutionErrorKind::InvalidArguments
+                    }
+                    ToolExecutionErrorKind::ExecutionFailed => ExecutionErrorKind::ExecutionFailed,
+                    ToolExecutionErrorKind::ResultTooLarge => ExecutionErrorKind::ResultTooLarge,
+                    ToolExecutionErrorKind::CrashLost => ExecutionErrorKind::CrashLost,
+                    ToolExecutionErrorKind::ResultContainsNull => {
+                        ExecutionErrorKind::ResultContainsNull
+                    }
+                },
+                detail: error.detail().map(|detail| detail.as_str().to_owned()),
+            },
+            ToolAttemptEnd::Ambiguous => Self::Ambiguous,
+            ToolAttemptEnd::Completed {
+                result: ToolResultContent::Media { .. },
+            }
+            | ToolAttemptEnd::AwaitingChild { .. } => return Err(ValueError::Result),
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    /// Reconstitutes checked executor evidence for the domain's terminal transition.
+    pub fn into_observation(self) -> Result<signalbox_domain::ToolAttemptObservation, ValueError> {
+        use signalbox_domain::{
+            ToolAttemptObservation, ToolExecutionError, ToolExecutionErrorDetail,
+            ToolExecutionErrorKind, ToolResultContent, ToolResultText,
+        };
+        self.validate()?;
+        Ok(match self {
+            Self::Success { text } => ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(text).map_err(|_| ValueError::Result)?,
+                ),
+            },
+            Self::KnownFailure { error_kind, detail } => ToolAttemptObservation::KnownFailed {
+                error: ToolExecutionError::new(
+                    match error_kind {
+                        ExecutionErrorKind::UnknownTool => ToolExecutionErrorKind::UnknownTool,
+                        ExecutionErrorKind::InvalidArguments => {
+                            ToolExecutionErrorKind::InvalidArguments
+                        }
+                        ExecutionErrorKind::ExecutionFailed => {
+                            ToolExecutionErrorKind::ExecutionFailed
+                        }
+                        ExecutionErrorKind::ResultTooLarge => {
+                            ToolExecutionErrorKind::ResultTooLarge
+                        }
+                        ExecutionErrorKind::CrashLost => ToolExecutionErrorKind::CrashLost,
+                        ExecutionErrorKind::ResultContainsNull => {
+                            ToolExecutionErrorKind::ResultContainsNull
+                        }
+                    },
+                    detail
+                        .map(ToolExecutionErrorDetail::try_new)
+                        .transpose()
+                        .map_err(|_| ValueError::Result)?,
+                ),
+            },
+            Self::Ambiguous => ToolAttemptObservation::Ambiguous,
+        })
+    }
+
     /// Enforces the domain result and error-detail bounds without rewriting.
     pub fn validate(&self) -> Result<(), ValueError> {
         match self {

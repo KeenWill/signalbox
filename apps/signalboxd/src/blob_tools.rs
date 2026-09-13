@@ -26,17 +26,21 @@ use crate::{
 };
 
 mod review_text;
-use review_text::{FindingTextContract, ReviewTextReference, ThreadTextContract};
+use review_text::{
+    FindingTextContract, ReviewTextReference, ThreadListContract, ThreadTextContract,
+};
 
 pub(crate) const BLOB_METADATA_NAME: &str = "blob_metadata";
 pub(crate) const BLOB_READ_NAME: &str = "blob_read";
 pub(crate) const FINDING_TEXT_NAME: &str = "finding_text";
 pub(crate) const REVIEW_THREAD_TEXT_NAME: &str = "review_thread_text";
+pub(crate) const REVIEW_THREAD_LIST_NAME: &str = "review_thread_list";
 pub(crate) const BLOB_TOOL_NAMES: &[&str] = &[
     BLOB_METADATA_NAME,
     BLOB_READ_NAME,
     FINDING_TEXT_NAME,
     REVIEW_THREAD_TEXT_NAME,
+    REVIEW_THREAD_LIST_NAME,
 ];
 const INVALID_ARGUMENTS: &str = "expected exact canonical blob-read arguments";
 
@@ -52,6 +56,7 @@ enum BlobToolMode {
     Read,
     FindingText,
     ThreadText,
+    ThreadList,
 }
 
 #[derive(Debug, Deserialize, ToolSchema)]
@@ -157,6 +162,17 @@ impl BlobTools {
         )
         .map_err(|_| BlobToolConstructionError)?;
         let catalog = CompiledToolCatalog::try_new([
+            CompiledTool::new(
+                compile_contract_definition::<ThreadListContract>(
+                    ToolPermissionDefault::Auto,
+                    ToolEffectClass::ExternalEffect,
+                )
+                .map_err(|_| BlobToolConstructionError)?,
+                BlobValidator {
+                    mode: BlobToolMode::ThreadList,
+                    detail: detail.clone(),
+                },
+            ),
             CompiledTool::new(
                 metadata,
                 BlobValidator {
@@ -276,6 +292,7 @@ impl ToolExecutor for BlobToolExecutor {
             BLOB_READ_NAME => BlobToolMode::Read,
             FINDING_TEXT_NAME => BlobToolMode::FindingText,
             REVIEW_THREAD_TEXT_NAME => BlobToolMode::ThreadText,
+            REVIEW_THREAD_LIST_NAME => BlobToolMode::ThreadList,
             _ => return Err(BlobToolExecutorError::Infrastructure),
         };
         let decoded = decode(invocation.request().arguments(), mode)
@@ -345,7 +362,7 @@ fn decode(
     mode: BlobToolMode,
 ) -> Result<DecodedArguments, BlobToolExecutorError> {
     match mode {
-        BlobToolMode::FindingText | BlobToolMode::ThreadText => {
+        BlobToolMode::FindingText | BlobToolMode::ThreadText | BlobToolMode::ThreadList => {
             review_text::decode(arguments, mode).map(DecodedArguments::ReviewText)
         }
         BlobToolMode::Read => {
@@ -536,7 +553,7 @@ mod tests {
         let metadata = declaration(definitions.as_ref(), BLOB_METADATA_NAME)?;
         let read = declaration(definitions.as_ref(), BLOB_READ_NAME)?;
 
-        assert_eq!(definitions.len(), 4);
+        assert_eq!(definitions.len(), 5);
         assert_eq!(metadata.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(metadata.effect_class(), ToolEffectClass::EffectFree);
         assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);

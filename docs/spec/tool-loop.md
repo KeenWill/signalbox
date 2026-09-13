@@ -189,7 +189,14 @@ The seven local Git tools perform no remote operation. `git_log` limits its
 returned page to `max_entries`; merge ancestry traversal is independent of
 worktree inspection limits.
 
-The daemon-local registry supplies no runner execution path.
+The daemon executor routes the mirrored `echo` tool through the attached
+runner's serial lease service when admitted. The service returns durable
+completion only after the runner result and completed lease commit together; the
+tool loop reloads that ended physical attempt before continuing. Connection loss
+releases runner dispatch into the existing recovery wait only after the tool
+loop verifies the lost lease and its issuing turn attempt's durable yield. An
+unavailable reread retains that verification without invoking the executor
+again.
 
 Because the attempt schema requires a closed effect class, preparation records
 `EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight
@@ -375,6 +382,10 @@ effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
 `SideEffecting`. Effect class controls crash classification, not permission
 identity.
 
+Daemon-local `echo` admission does not consume an unpinned session's runner
+permission override or credential-profile selection and does not pin the
+placement.
+
 Workspace mutation tools advertise their UTF-8 byte limits. Oversized content,
 edit strings, and patches are rejected with the argument name, actual byte
 count, and maximum byte count.
@@ -397,6 +408,13 @@ either supported object-ID width so it can bind a repository-backed derived
 session; its Git executor enforces the bound repository's format. Local Git
 requests for a plain bound root return a known tool failure. Configured pushes
 use the same bound workspace.
+
+Local Git status and worktree diff honor repository `.gitignore` files and the
+common Git directory's `info/exclude` when discovering untracked paths. Ignored
+directories are pruned before their contents consume the worktree inspection
+budget; tracked changes remain visible. Nested ignore rules and negations use
+Git precedence. Ignore files are read through pinned, no-follow filesystem
+handles; ambient global excludes are not loaded.
 
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
@@ -470,12 +488,14 @@ after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These
 effects commit or roll back together. An interrupt or crash loss that ends the
 turn appends the result suffix with its terminal marker and prepares no call.
-When at least one request entered execution, the continuation turn attempt
-already entered `Running` during authorization and owns the new call without
-moving backward. An optional configured ceiling bounds the tool rounds one turn
-may complete, and a policy of none sets no ceiling. After the last batch a
-ceiling admits resolves, continuation still projects every result and creates
-its `Prepared` call, and model execution closes that call `KnownFailed` before
+This also closes unattempted siblings when the lost tool and its turn attempt
+are still `Prepared`; the closure frontier cannot prepare a model call. When at
+least one request entered execution, the continuation turn attempt already
+entered `Running` during authorization and owns the new call without moving
+backward. An optional configured ceiling bounds the tool rounds one turn may
+complete, and a policy of none sets no ceiling. After the last batch a ceiling
+admits resolves, continuation still projects every result and creates its
+`Prepared` call, and model execution closes that call `KnownFailed` before
 capability preparation or send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's

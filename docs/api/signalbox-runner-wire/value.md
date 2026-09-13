@@ -10,6 +10,7 @@ pub enum ValueError {
     PositiveInteger,
     Digest,
     PortableName,
+    WorkingDirectory,
     Inventory,
     ResultBounds,
     Result,
@@ -186,6 +187,23 @@ impl<'de> de::Deserialize<'de> for RepositoryKey {
 }
 ```
 
+## WorkingDirectory
+
+```rust
+pub struct WorkingDirectory(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd, ser::Serialize
+impl WorkingDirectory {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: string::String) -> result::Result<Self, ValueError>;
+    pub fn as_str(&self) -> &str;
+}
+impl<'de> de::Deserialize<'de> for WorkingDirectory {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
 ## SandboxProfile
 
 ```rust
@@ -288,6 +306,12 @@ impl<'de> de::Deserialize<'de> for TerminalResult {
         D: de::Deserializer<'de>;
 }
 impl TerminalResult {
+    pub fn from_attempt_end(
+        end: &signalbox_domain::ToolAttemptEnd,
+    ) -> result::Result<Self, ValueError>;
+    pub fn into_observation(
+        self,
+    ) -> result::Result<signalbox_domain::ToolAttemptObservation, ValueError>;
     pub fn validate(&self) -> result::Result<(), ValueError>;
 }
 ```

@@ -10,7 +10,11 @@ rust_library(
     name = "signalbox_runner",
     compile_data = CRATE_COMPILE_DATA,
     crate_root = "src/lib.rs",
-    deps = ["//crates/runner-wire:signalbox_runner_wire"],
+    deps = [
+        "//crates/domain:signalbox_domain",
+        "//crates/runner-wire:signalbox_runner_wire",
+        "//crates/tools-basic:signalbox_tools_basic",
+    ],
 )
 
 rust_binary(

@@ -10,7 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from review_judge_eval import Trial, git, prepare_checkout, run_trials, validate_result
+from review_judge_eval import Trial, git, git_output, prepare_checkout, run_trials, validate_result
 from review_judge_agentic import prepare_workspace
 
 
@@ -79,6 +79,12 @@ class ScratchCheckoutTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual((first / "source.txt").read_text(), "first")
         self.assertEqual((second / "source.txt").read_text(), "second")
+
+    def test_diff_output_preserves_the_final_blank_context_line(self):
+        base = self.commit("before\nunchanged\n\n")
+        head = self.commit("after\nunchanged\n\n")
+        patch_text = git_output(self.repository, "diff", base, head, "--")
+        self.assertTrue(patch_text.endswith(" unchanged\n \n"))
 
     def test_changed_shared_source_is_rejected_without_resetting_it(self):
         tree = prepare_checkout(self.repository, self.workspace, self.head)

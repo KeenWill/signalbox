@@ -17,6 +17,7 @@ mod diff;
 mod executor;
 mod failure;
 mod identity;
+mod ignore;
 mod index_lock;
 mod layout;
 mod limits;
