@@ -1,7 +1,7 @@
 .surface-body.session-workspace-surface {
   gap: var(--product-space);
   padding: var(--product-space);
-  overflow: hidden;
+  overflow: auto;
 }
 .surface-body.session-workspace-surface > .session-workspace {
   display: flex;
