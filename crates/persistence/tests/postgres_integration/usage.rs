@@ -255,6 +255,20 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     let pool_repository = pool_repository.with_credential_pools(pools.clone());
     let (ordinary, _) =
         prepare_and_authorize_pool_call(&pool_repository, pool_session, pool_seed + 100).await?;
+    sqlx::query("INSERT INTO credential_pool_chain_exclusion (session_id, turn_id, credential_reference, predecessor_model_call_id, cause_kind) VALUES ($1, $2, 'displaced-title-home', $3, 'overloaded')")
+        .bind(pool_session.into_uuid()).bind(pool_turn.into_uuid()).bind(ordinary.call().id().into_uuid()).execute(&pool).await?;
+    let mut outside_turn = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        session: pool_session,
+        target: pool_target,
+        ..suggestion.clone()
+    };
+    assert!(titles.prepare(&mut outside_turn, &pools).await?);
+    assert_eq!(
+        outside_turn.credential_reference, "displaced-title-home",
+        "a session-level title does not inherit a turn chain's exclusions"
+    );
+    titles.finish(outside_turn.call, None, usage).await?;
     sqlx::query("INSERT INTO credential_pool_member_action (pool_name, credential_reference, action_kind, observed_session_id, observed_turn_id, observation_model_call_id, cause_kind) VALUES ('title-pool','displaced-title-home','switch_next_turn',$1,$2,$3,'credential_rejected')")
         .bind(pool_session.into_uuid()).bind(pool_turn.into_uuid()).bind(ordinary.call().id().into_uuid()).execute(&pool).await?;
     suggestion.session = pool_session;
