@@ -197,6 +197,21 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    return HttpSearchUsageSource.fromBootstrap(bootstrap, request, requireSearch)
+  }
+
+  static withAdmittedUsageBootstrap(
+    bootstrap: WebContractBootstrap,
+    request: typeof fetch = fetch,
+  ): Pick<HttpSearchUsageSource, 'limits' | 'usageSummary' | 'usageCalls'> {
+    return HttpSearchUsageSource.fromBootstrap(bootstrap, request, false)
+  }
+
+  private static fromBootstrap(
+    bootstrap: WebContractBootstrap,
+    request: typeof fetch,
+    requireSearch: boolean,
+  ): HttpSearchUsageSource {
     if (requireSearch && !bootstrap.capabilities.bounded_lexical_search) {
       throw new TypeError('bounded lexical search capability is unavailable')
     }

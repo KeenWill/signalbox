@@ -1,6 +1,8 @@
 // The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
 // readBootstrap now rejects any bootstrap whose limits contradict it.
+
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { SearchUsageScenarioSource } from '../src/search-usage/scenario'
 import { expect, type Page, type TestInfo, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
 
@@ -119,6 +121,11 @@ const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()
+  if (evidence.path === '/usage')
+    await expect(page.getByRole('rowgroup', { name: 'Usage call rows' })).toHaveAttribute(
+      'data-total-loaded',
+      '100',
+    )
   await expect.soft(page).toHaveScreenshot(`${evidence.snapshot}-desktop-dark.png`, {
     animations: 'disabled',
   })
@@ -185,6 +192,15 @@ test('captures Imports route evidence', async ({ page }, testInfo) => {
 
 test('captures Usage route evidence', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
+  const source = new SearchUsageScenarioSource()
+  await page.route('**/api/usage/summary?**', async (route) =>
+    route.fulfill({ json: await source.usageSummary({}) }),
+  )
+  await page.route('**/api/usage/calls?**', async (route) =>
+    route.fulfill({
+      json: await source.usageCalls({ filters: {}, order: 'newest', maxItems: 100 }),
+    }),
+  )
   await captureRouteEvidence(page, usageEvidence)
 })
 

@@ -1052,8 +1052,12 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' && bootstrap.isSuccess ? (
+      <UsageSurface bootstrap={bootstrap.data} />
     ) : surface === 'usage' ? (
-      <UsageSurface />
+      <p role={bootstrap.isError ? 'alert' : 'status'}>
+        {bootstrap.isError ? 'Usage could not load.' : 'Loading usage…'}
+      </p>
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (
