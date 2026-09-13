@@ -7,6 +7,7 @@ import {
 } from '../../e2e/session-detail-fixture'
 import {
   groupTranscriptTurns,
+  isToolBodyContinuation,
   isVisibleTurnEvent,
   toolContinuations,
   toolDisclosureKeys,
@@ -124,6 +125,28 @@ it('retains an unsuccessful turn outcome without a completed assistant response'
   const turn = groupTranscriptTurns([...detailItems.slice(0, 4), failure])[0]
   expect(turn?.result).toBeUndefined()
   expect(turn?.outcome).toEqual(failure)
+})
+
+it('keeps the first duplicate outcome at its chronological event', () => {
+  const terminal = detailItems[4]
+  if (terminal?.body.type !== 'turn_lifecycle') throw new Error('terminal fixture missing')
+  const first = {
+    ...terminal,
+    kind: 'turn_failed' as const,
+    body: { ...terminal.body, cause_code: 'failed' },
+  }
+  const duplicate = { ...first, address: { event_sequence: '6' } }
+  expect(groupTranscriptTurns([first, duplicate])[0]?.outcome).toBe(first)
+})
+
+it('excludes goal text from tool disclosure continuations', () => {
+  const continuation = {
+    address: { event_sequence: '2' },
+    member_index: 0,
+    offset_bytes: '0',
+  }
+  expect(isToolBodyContinuation({ ...continuation, field: 'goal_text' })).toBe(false)
+  expect(isToolBodyContinuation({ ...continuation, field: 'tool_result' })).toBe(true)
 })
 
 it('retains every continuation from merged tool evidence', () => {
