@@ -5,6 +5,7 @@ import type {
   WebTimelineToolAttempt,
 } from '../../generated/web-contract.mjs'
 import { enumLabel } from '../../labels'
+import { ToolResultMedia } from './ToolResultMedia'
 import {
   excerptFields,
   type Fields,
@@ -19,6 +20,7 @@ import './tools.css'
 
 export interface ToolCallProps {
   tool: WebTimelineToolAttempt
+  showMedia?: boolean
 }
 
 interface RendererProps {
@@ -293,7 +295,7 @@ export const toolRenderers: ReadonlyMap<string, ComponentType<RendererProps>> = 
   ].map((name) => [name, Git] as const),
 ])
 
-export function ToolCall({ tool }: ToolCallProps) {
+export function ToolCall({ tool, showMedia = true }: ToolCallProps) {
   const [raw, setRaw] = useState(false)
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
   const args = excerptFields(tool.arguments)
@@ -333,6 +335,7 @@ export function ToolCall({ tool }: ToolCallProps) {
         <small>Failure details are on another detail page</small>
       )}
       <Excerpt excerpt={evidence?.failure} label="Failure" />
+      {showMedia && <ToolResultMedia media={evidence?.result_media_reference} />}
     </article>
   )
 }

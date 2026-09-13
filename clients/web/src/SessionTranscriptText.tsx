@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { type RefObject, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
+import { ToolCall } from './features/tools/ToolCall'
 import type {
+  WebSessionTimelineDetail,
   WebSessionTimelineDetailBody,
   WebTimelineDetailContinuation,
-  WebTimelineTextExcerpt,
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
@@ -14,41 +15,34 @@ import {
 } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 
-function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
-  let content = excerpt.text
-  try {
-    content = JSON.stringify(JSON.parse(excerpt.text), null, 2)
-  } catch {
-    // Plain text and partial JSON remain readable as supplied.
-  }
-  return (
-    <section className="session-tool-text" aria-label={label}>
-      <strong>{label}</strong>
-      <pre>{content}</pre>
-      {(excerpt.offset_bytes !== '0' || excerpt.continuation != null) && (
-        <small>
-          From byte {excerpt.offset_bytes} of {excerpt.total_bytes}
-        </small>
-      )}
-    </section>
-  )
-}
-
-function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
+function BodyText({
+  body,
+  preceding,
+}: {
+  body: WebSessionTimelineDetailBody
+  preceding: readonly WebSessionTimelineDetail[]
+}) {
   if (body.type === 'tool_batch')
     return (
       <>
-        {body.tools.map((tool) => {
-          const physical = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
-          return (
-            <div key={tool.request_id} className="session-tool-entry">
-              <strong>{tool.tool_name}</strong>
-              {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
-              {physical?.result && <ToolText label="Output" excerpt={physical.result} />}
-              {physical?.failure && <ToolText label="Failure" excerpt={physical.failure} />}
-            </div>
-          )
-        })}
+        {body.tools.map((tool) => (
+          <ToolCall
+            key={tool.request_id}
+            tool={tool}
+            showMedia={
+              !preceding.some(
+                (item) =>
+                  item.body.type === 'tool_batch' &&
+                  item.body.tools.some(
+                    (prior) =>
+                      prior.request_id === tool.request_id &&
+                      prior.evidence.type === 'physical_attempt' &&
+                      prior.evidence.result_media_reference != null,
+                  ),
+              )
+            }
+          />
+        ))}
       </>
     )
   if (body.type === 'reconciliation')
@@ -146,13 +140,13 @@ function TranscriptWindow({
           </button>
         </p>
       )}
-      {transcript.data?.items.map((item) => (
+      {transcript.data?.items.map((item, index) => (
         <div
           key={conversationEntryKey(item)}
           className="session-message-entry"
           data-event-sequence={item.address.event_sequence}
         >
-          <BodyText body={item.body} />
+          <BodyText body={item.body} preceding={transcript.data?.items.slice(0, index) ?? []} />
         </div>
       ))}
       <div className="session-text-pagination">
