@@ -1047,3 +1047,121 @@ test('a stalled rename releases the form and retries the same intent', async ({ 
   await page.getByRole('button', { name: 'Cancel', exact: true }).press('Escape')
   await expect(rename).toBeFocused()
 })
+
+test('releases the rename editor while the acknowledged catalog refresh is stalled', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  let reads = 0
+  await page.route('**/api/sessions?**', async (route) => {
+    reads += 1
+    if (reads === 1) await route.fulfill({ json: firstPage })
+  })
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, (route) =>
+    route.fulfill({ status: 204 }),
+  )
+  await page.goto('/sessions')
+  const rename = page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
+  await rename.click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => reads).toBe(2)
+  await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveCount(0)
+  await expect(rename).toBeEnabled()
+  await expect(rename).toBeFocused()
+})
+
+for (const leaveCatalog of [false, true]) {
+  test(`replays an ambiguous rename after editor closure with catalog unmount ${leaveCatalog}`, async ({
+    page,
+  }) => {
+    await useCatalogFixture(page)
+    const requests: Array<{ command_id: string; title: string }> = []
+    let savedTitle = 'Release verification'
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          ...firstPage,
+          summaries: firstPage.summaries.map((row, index) =>
+            index === 0 ? { ...row, title_summary: savedTitle } : row,
+          ),
+        },
+      }),
+    )
+    await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+      requests.push(route.request().postDataJSON())
+      if (requests.length === 1) {
+        savedTitle = 'Another writer title'
+        await route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              kind: 'application',
+              code: 'metadata_outcome_unconfirmed',
+              message: 'Retry the same title and identity.',
+            },
+          },
+        })
+      } else {
+        if (requests.at(-1)?.command_id !== requests[0]?.command_id)
+          savedTitle = 'Stale title reinstalled'
+        await route.fulfill({ status: 204 })
+      }
+    })
+    await page.goto('/sessions')
+    const rename = page.getByRole('button', {
+      name: `Rename session ${firstSessionId}`,
+      exact: true,
+    })
+    await rename.click()
+    const input = page.getByRole('textbox', { name: 'Session title', exact: true })
+    await input.fill('My ambiguous title')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByRole('alert')).toBeVisible()
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+    if (leaveCatalog) {
+      await page.getByRole('link', { name: 'Settings', exact: true }).click()
+      await expect(page).toHaveURL(/\/settings$/)
+      await page.getByRole('link', { name: 'Sessions', exact: true }).click()
+    }
+    await rename.click()
+    await expect(input).toHaveValue('My ambiguous title')
+    await expect(input).toHaveAttribute('readonly', '')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByRole('button', { name: /Another writer title/ })).toBeVisible()
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toEqual(requests[0])
+    await rename.click()
+    await expect(input).toBeEditable()
+    await expect(input).toHaveValue('Another writer title')
+  })
+}
+
+test('a definitive rename rejection permits a corrected title with a new identity', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  const requests: Array<{ command_id: string; title: string }> = []
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    requests.push(route.request().postDataJSON())
+    await route.fulfill({
+      status: 400,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'invalid_session_title',
+          message: 'Title does not fit the metadata size limit.',
+        },
+      },
+    })
+  })
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true }).click()
+  const input = page.getByRole('textbox', { name: 'Session title', exact: true })
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('metadata size limit')
+  await expect(input).toBeEditable()
+  await input.fill('Corrected title')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
+})
