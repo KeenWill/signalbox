@@ -45,6 +45,7 @@ import type { CommandContext } from './commands'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { loadRetainedCommand } from './imports/retainedCommand'
+import { NewSessionDialog } from './NewSessionDialog'
 import {
   ProductContractError,
   type ProductRouteId,
@@ -1097,6 +1098,17 @@ export function ProductApp({
           <h1>{title}</h1>
           <div className="product-header-actions">
             <div className="surface-header-actions" ref={setHeaderTarget} />
+            <button
+              type="button"
+              className="new-session-button"
+              disabled={context.navigationLocked}
+              onClick={(event) => {
+                paletteOpenerRef.current = event.currentTarget
+                invokeProductCommand('session.new', context)
+              }}
+            >
+              New session
+            </button>
             {surface !== 'settings' && !bootstrap.isSuccess && (
               <div className="product-connection">
                 <span
@@ -1169,6 +1181,7 @@ export function ProductApp({
           />
         </aside>
       )}
+      <NewSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <OpenSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <CommandPalette
         context={context}

@@ -136,7 +136,9 @@ template through `CreateSession`, with an open start gate and unmonitored
 ownership. It accepts a creation command ID and an optional first text input
 with its own command ID; creation commits before input submission. A 201
 response returns the session ID and current catalog summary after both requested
-commands succeed. Retries retain both identities and payloads.
+commands succeed. Retries retain both identities and payloads. The browser shell
+opens a template picker from New session and navigates to the created workspace.
+Unconfirmed creation requests retain their identity and template across reloads.
 
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command

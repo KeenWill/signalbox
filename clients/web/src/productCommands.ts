@@ -11,6 +11,15 @@ export interface ProductCommandContext extends CommandContext {
 
 const productNavigationCommands = [
   {
+    id: 'session.new',
+    title: 'New session',
+    description: 'Start a conversation from a template.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
+    run: (context: ProductCommandContext) => context.dispatch(actions.overlaySet('new-session')),
+  },
+  {
     id: 'session.open-by-id',
     title: 'Open session by id',
     description: 'Open a session using its identifier.',
