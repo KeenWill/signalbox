@@ -27,7 +27,7 @@ export function UsageContent({
   source,
   authority,
 }: {
-  source: SearchUsageSource
+  source: Pick<SearchUsageSource, 'limits' | 'usageSummary' | 'usageCalls'>
   authority: 'http' | 'scenario'
 }) {
   const search = useLocation({ select: (location) => location.searchStr })
