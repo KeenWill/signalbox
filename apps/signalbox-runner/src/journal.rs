@@ -36,7 +36,10 @@ struct JournalDocument {
 }
 
 impl Journal {
-    pub(crate) fn open(directory: &File) -> Result<Self, RunnerStateError> {
+    pub(crate) fn open(
+        directory: &File,
+        initialize_if_missing: bool,
+    ) -> Result<Self, RunnerStateError> {
         let descriptor = match openat(
             directory,
             DocumentKind::Journal.file_name(),
@@ -44,7 +47,7 @@ impl Journal {
             Mode::empty(),
         ) {
             Ok(descriptor) => descriptor,
-            Err(rustix::io::Errno::NOENT) => {
+            Err(rustix::io::Errno::NOENT) if initialize_if_missing => {
                 let document = JournalDocument {
                     version: JOURNAL_VERSION,
                     journal: Self::default(),
@@ -138,6 +141,26 @@ mod tests {
         let reopened =
             RunnerStateRoot::open(&path).expect("only the published document is replayed");
         assert_eq!(reopened.reconnect_inventory(), inventory);
+    }
+
+    #[test]
+    fn missing_journal_in_initialized_root_fails_closed() {
+        let parent = TempDir::new().expect("temporary parent");
+        let path = parent.path().join("runner");
+        drop(RunnerStateRoot::open(&path).expect("initialize the journal"));
+        fs::remove_file(path.join(DocumentKind::Journal.file_name()))
+            .expect("remove the published journal");
+
+        let error =
+            RunnerStateRoot::open(&path).expect_err("an initialized root must retain its journal");
+        assert!(matches!(
+            error,
+            RunnerStateError::Io {
+                operation: StateOperation::Open,
+                resource: StateResource::Journal,
+                source,
+            } if source.kind() == std::io::ErrorKind::NotFound
+        ));
     }
 
     #[test]
