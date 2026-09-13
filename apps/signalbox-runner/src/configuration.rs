@@ -230,6 +230,7 @@ impl RunnerConfiguration {
             credential_profiles: credentials.keys().cloned().collect(),
             repositories: repositories
                 .iter()
+                .filter(|(_, repository)| repository.credential_profile.is_none())
                 .map(|(key, repository)| signalbox_runner_wire::RepositoryEntry {
                     key: key.clone(),
                     credential_profile: repository.credential_profile.clone(),
@@ -826,18 +827,12 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
     }
 
     #[test]
-    fn configuration_advertises_the_exact_repository_profile_pair() {
+    fn configuration_does_not_advertise_a_credentialed_repository() {
         let fixture = configured_fixture();
         let configuration = RunnerConfiguration::parse(&fixture.document)
             .expect("the configured credential and repository are valid");
 
-        assert_eq!(
-            configuration.advertisement().repositories,
-            vec![signalbox_runner_wire::RepositoryEntry {
-                key: fixture.repository,
-                credential_profile: Some(fixture.profile),
-            }]
-        );
+        assert!(configuration.advertisement().repositories.is_empty());
     }
 
     #[test]
