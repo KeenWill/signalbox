@@ -124,23 +124,31 @@ const Facts = ({ facts }: { facts: ReadonlyArray<readonly [string, ReactNode]> }
   </dl>
 )
 
-export const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
+export const GoalEventDetail = ({
+  event,
+  includeFacts = true,
+}: {
+  event: GoalEvent
+  includeFacts?: boolean
+}) => (
   <article className="session-detail-member">
-    <Facts
-      facts={[
-        ['Goal event', enumLabel(event.type)],
-        ['Generation', event.generation],
-        [
-          'Reason',
-          event.type === 'blocked'
-            ? enumLabel(event.reason)
-            : event.type === 'session_closed'
-              ? enumLabel(event.outcome)
-              : 'Not recorded',
-        ],
-      ]}
-    />
-    {event.type === 'user_stopped' && (
+    {includeFacts && (
+      <Facts
+        facts={[
+          ['Goal event', enumLabel(event.type)],
+          ['Generation', event.generation],
+          [
+            'Reason',
+            event.type === 'blocked'
+              ? enumLabel(event.reason)
+              : event.type === 'session_closed'
+                ? enumLabel(event.outcome)
+                : 'Not recorded',
+          ],
+        ]}
+      />
+    )}
+    {includeFacts && event.type === 'user_stopped' && (
       <Facts
         facts={[
           ['Closing turn', event.settling_turn_id ?? 'None'],

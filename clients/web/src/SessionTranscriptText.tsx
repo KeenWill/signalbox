@@ -95,9 +95,11 @@ function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextE
 function BodyText({
   body,
   showAttachments = true,
+  showGoalFacts = true,
 }: {
   body: WebSessionTimelineDetailBody
   showAttachments?: boolean
+  showGoalFacts?: boolean
 }) {
   if (body.type === 'tool_batch')
     return (
@@ -116,7 +118,11 @@ function BodyText({
         {body.goal_events.length > 0 && (
           <section aria-label="Goal events">
             {body.goal_events.map((event) => (
-              <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
+              <GoalEventDetail
+                key={`${event.generation}:${event.type}`}
+                event={event}
+                includeFacts={showGoalFacts}
+              />
             ))}
           </section>
         )}
@@ -1352,6 +1358,7 @@ function EventDetail({
           ),
         }
       : latestBody
+  const renderedGoalMembers = new Set<number>()
   return (
     <div ref={element} tabIndex={-1} className="session-turn-event" data-event-sequence={sequence}>
       <header>
@@ -1361,34 +1368,51 @@ function EventDetail({
       </header>
       {(factsBody?.type === 'model_call' || factsBody?.type === 'tool_batch') &&
         detailContent(factsBody, false)}
-      {chunks.map(({ key, item }, index) => (
-        <div key={key}>
-          {item.body.type === 'tool_batch' && renderTool ? (
-            <>
-              {item.body.tools.map((tool) => (
-                <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
-              ))}
-              {item.body.goal_events.length > 0 && (
-                <section aria-label="Goal events">
-                  {item.body.goal_events.map((event) => (
-                    <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
-                  ))}
-                </section>
-              )}
-            </>
-          ) : ['user_input', 'model_call', 'tool_batch'].includes(item.body.type) ? (
-            <BodyText body={item.body} showAttachments={index === 0} />
-          ) : (
-            <>
-              {detailContent(item.body)}
-              <details>
-                <summary>Raw event data</summary>
-                <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
-              </details>
-            </>
-          )}
-        </div>
-      ))}
+      {chunks.map(({ key, item }, index) => {
+        const body = item.body
+        const goalMember =
+          body.type === 'tool_batch' && body.goal_events.length > 0
+            ? (body.projected_member_index ?? 0)
+            : null
+        const showGoalFacts = goalMember === null || !renderedGoalMembers.has(goalMember)
+        if (goalMember !== null) renderedGoalMembers.add(goalMember)
+        return (
+          <div key={key}>
+            {item.body.type === 'tool_batch' && renderTool ? (
+              <>
+                {item.body.tools.map((tool) => (
+                  <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
+                ))}
+                {item.body.goal_events.length > 0 && (
+                  <section aria-label="Goal events">
+                    {item.body.goal_events.map((event) => (
+                      <GoalEventDetail
+                        key={`${event.generation}:${event.type}`}
+                        event={event}
+                        includeFacts={showGoalFacts}
+                      />
+                    ))}
+                  </section>
+                )}
+              </>
+            ) : ['user_input', 'model_call', 'tool_batch'].includes(item.body.type) ? (
+              <BodyText
+                body={item.body}
+                showAttachments={index === 0}
+                showGoalFacts={showGoalFacts}
+              />
+            ) : (
+              <>
+                {detailContent(item.body)}
+                <details>
+                  <summary>Raw event data</summary>
+                  <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
+                </details>
+              </>
+            )}
+          </div>
+        )
+      })}
       {detail.isPending ? (
         <p role="status">Loading details…</p>
       ) : detail.isError || !matches ? (

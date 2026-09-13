@@ -445,6 +445,93 @@ test('renders tool-batch goal events in All details', async ({ page }) => {
   await expect(transcript.getByText('Release approval is required.', { exact: true })).toBeVisible()
 })
 
+test('All details retains goal text chunks with one set of facts per goal member', async ({
+  page,
+}) => {
+  const input = detailItems[0]
+  const batch = detailItems[1]
+  if (!input || batch?.body.type !== 'tool_batch') throw new Error('Goal fixture missing')
+  const body = batch.body
+  const texts = ['Approval needed.', 'Release verified.']
+  const chunk = (member: number, offset: number) => {
+    const fullText = texts[member] ?? ''
+    const end = Math.min(offset + 6, fullText.length)
+    const next =
+      end < fullText.length
+        ? {
+            address: batch.address,
+            field: 'goal_text' as const,
+            member_index: member,
+            offset_bytes: String(end),
+          }
+        : member === 0
+          ? {
+              address: batch.address,
+              field: 'goal_text' as const,
+              member_index: 1,
+              offset_bytes: '0',
+            }
+          : null
+    const text = {
+      text: fullText.slice(offset, end),
+      offset_bytes: String(offset),
+      total_bytes: String(fullText.length),
+      continuation: end < fullText.length ? next : null,
+    }
+    const item: WebSessionTimelineDetail = {
+      ...batch,
+      projected_body_bytes: 128 + text.text.length,
+      body: {
+        ...body,
+        projected_member_index: member,
+        tools: [],
+        goal_events: [
+          member === 0
+            ? { type: 'blocked', generation: '1', reason: 'authorization_required', text }
+            : { type: 'achieved', generation: '1', text },
+        ],
+      },
+    }
+    return detailPage([item], next ? { type: 'more_body', body: next } : null)
+  }
+  await turnApi(page, undefined, [input, ...chunk(0, 0).items])
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '2')
+      return route.fallback()
+    return route.fulfill({
+      json: chunk(
+        Number(url.searchParams.get('cursor_member') ?? '0'),
+        Number(url.searchParams.get('cursor_offset') ?? '0'),
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const event = page
+    .getByRole('region', { name: 'Session transcript', exact: true })
+    .locator('[data-event-sequence="2"]')
+  const excerpts: string[] = []
+  for (const [member, text] of texts.entries()) {
+    for (let offset = 0; offset < text.length; offset += 6) {
+      if (member !== 0 || offset !== 0)
+        await event.getByRole('button', { name: 'Continue reading', exact: true }).click()
+      excerpts.push(text.slice(offset, offset + 6))
+      await expect(
+        event.getByRole('region', { name: 'Goal text', exact: true }).locator('pre'),
+      ).toHaveText(excerpts)
+      for (const fact of ['Goal event', 'Generation', 'Reason'])
+        await expect(event.locator('dt').filter({ hasText: new RegExp(`^${fact}$`) })).toHaveCount(
+          member + 1,
+        )
+    }
+  }
+  await expect(event.getByText('Blocked', { exact: true })).toHaveCount(1)
+  await expect(event.getByText('Achieved', { exact: true })).toHaveCount(1)
+  await expect(event.getByText('Authorization required', { exact: true })).toHaveCount(1)
+  await expect(event.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
+})
+
 test('All details retains earlier message chunks through continuation failures and retries', async ({
   page,
 }) => {
