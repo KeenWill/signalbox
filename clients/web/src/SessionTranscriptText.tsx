@@ -179,7 +179,7 @@ function TranscriptWindow({
         )
       void transcript.refetch()
     }
-  }, [observed, transcript.refetch, queries, queryKey, initialAnchor, pages])
+  }, [observed, transcript.refetch, queries, queryKey])
   const entries = useMemo(
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],

@@ -7,10 +7,10 @@ import { SESSION_WINDOW_BYTES } from '../session-workspace'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
-  initialDetailFacts,
   type InitialDetailFacts,
-  sameInitialDetailFacts,
+  initialDetailFacts,
   type SessionWindowAnchor,
+  sameInitialDetailFacts,
 } from './model'
 
 // Share one detail budget across each window; keep three neighboring windows.

@@ -137,107 +137,103 @@ it.each([
   'tool request',
   'excerpt total',
   'excerpt contents',
-] as const)(
-  'rejects changed %s across overlapping initial detail reads',
-  async (changed) => {
-    const { detailItems, detailPage, resultCursor } = await import(
-      '../../e2e/session-detail-fixture'
-    )
-    let conflict = false
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (path: string) => {
-        const url = new URL(path, 'http://localhost')
-        const payload = transcriptFixture(url, 1)
-        if (changed === 'tool request' && url.pathname.endsWith('/timeline')) {
-          const window = payload as import('../generated/web-contract.mjs').WebSessionTimelineWindow
-          const kind = 'tool_batch_transition'
-          return Response.json({
-            ...window,
-            items: window.items.map((item) => ({
-              ...item,
-              kind,
-              projected_structured_bytes: 64 + kind.length,
-            })),
-            projected_structured_bytes: 64 + kind.length,
-          })
-        }
-        if (!url.pathname.endsWith('/timeline-detail')) return Response.json(payload)
-        if (changed === 'tool request') {
-          const original = detailItems[1]
-          if (original?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
-          const item = {
-            ...original,
-            address: { event_sequence: '1' },
-            body: {
-              ...original.body,
-              tools: original.body.tools.map((tool) => ({
-                ...tool,
-                request_id: conflict ? '00000000-0000-0000-0000-000000000126' : tool.request_id,
-              })),
-            },
-          }
-          return Response.json(
-            detailPage([item], {
-              ...resultCursor,
-              body: { ...resultCursor.body, address: item.address },
-            }),
-          )
-        }
-        const page = payload as import('../generated/web-contract.mjs').WebSessionTimelineDetailPage
-        const item = page.items[0]
-        if (item?.body.type !== 'user_input') throw new Error('Input fixture missing')
-        const text =
-          conflict && changed === 'excerpt total'
-            ? `${item.body.text.text}!`
-            : conflict && changed === 'excerpt contents'
-              ? `!${item.body.text.text.slice(1)}`
-              : item.body.text.text
+] as const)('rejects changed %s across overlapping initial detail reads', async (changed) => {
+  const { detailItems, detailPage, resultCursor } = await import('../../e2e/session-detail-fixture')
+  let conflict = false
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string) => {
+      const url = new URL(path, 'http://localhost')
+      const payload = transcriptFixture(url, 1)
+      if (changed === 'tool request' && url.pathname.endsWith('/timeline')) {
+        const window = payload as import('../generated/web-contract.mjs').WebSessionTimelineWindow
+        const kind = 'tool_batch_transition'
         return Response.json({
-          ...page,
-          projected_body_bytes: 128 + text.length,
-          items: [
-            {
-              ...item,
-              projected_body_bytes: 128 + text.length,
-              body: {
-                ...item.body,
-                turn_id:
-                  conflict && changed === 'turn identity'
-                    ? '00000000-0000-0000-0000-000000000126'
-                    : item.body.turn_id,
-                attachments:
-                  changed === 'attachments'
-                    ? [
-                        {
-                          blob_id: `sha256:${'a'.repeat(64)}`,
-                          length_bytes: conflict ? '5' : '4',
-                          media_type: 'image/png',
-                        },
-                      ]
-                    : [],
-                text: { ...item.body.text, text, total_bytes: String(text.length) },
-              },
-            },
-          ],
+          ...window,
+          items: window.items.map((item) => ({
+            ...item,
+            kind,
+            projected_structured_bytes: 64 + kind.length,
+          })),
+          projected_structured_bytes: 64 + kind.length,
         })
-      }),
-    )
-    const reader = new TranscriptWindowReader(transcriptSessionId)
-    const signal = new AbortController().signal
-    await reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal)
-    conflict = true
-    await expect(
-      reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
-    ).rejects.toThrow('retained immutable facts')
-    conflict = false
-    await expect(
-      reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
-    ).resolves.toBeDefined()
-  },
-)
+      }
+      if (!url.pathname.endsWith('/timeline-detail')) return Response.json(payload)
+      if (changed === 'tool request') {
+        const original = detailItems[1]
+        if (original?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+        const item = {
+          ...original,
+          address: { event_sequence: '1' },
+          body: {
+            ...original.body,
+            tools: original.body.tools.map((tool) => ({
+              ...tool,
+              request_id: conflict ? '00000000-0000-0000-0000-000000000126' : tool.request_id,
+            })),
+          },
+        }
+        return Response.json(
+          detailPage([item], {
+            ...resultCursor,
+            body: { ...resultCursor.body, address: item.address },
+          }),
+        )
+      }
+      const page = payload as import('../generated/web-contract.mjs').WebSessionTimelineDetailPage
+      const item = page.items[0]
+      if (item?.body.type !== 'user_input') throw new Error('Input fixture missing')
+      const text =
+        conflict && changed === 'excerpt total'
+          ? `${item.body.text.text}!`
+          : conflict && changed === 'excerpt contents'
+            ? `!${item.body.text.text.slice(1)}`
+            : item.body.text.text
+      return Response.json({
+        ...page,
+        projected_body_bytes: 128 + text.length,
+        items: [
+          {
+            ...item,
+            projected_body_bytes: 128 + text.length,
+            body: {
+              ...item.body,
+              turn_id:
+                conflict && changed === 'turn identity'
+                  ? '00000000-0000-0000-0000-000000000126'
+                  : item.body.turn_id,
+              attachments:
+                changed === 'attachments'
+                  ? [
+                      {
+                        blob_id: `sha256:${'a'.repeat(64)}`,
+                        length_bytes: conflict ? '5' : '4',
+                        media_type: 'image/png',
+                      },
+                    ]
+                  : [],
+              text: { ...item.body.text, text, total_bytes: String(text.length) },
+            },
+          },
+        ],
+      })
+    }),
+  )
+  const reader = new TranscriptWindowReader(transcriptSessionId)
+  const signal = new AbortController().signal
+  await reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal)
+  conflict = true
+  await expect(
+    reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
+  ).rejects.toThrow('retained immutable facts')
+  conflict = false
+  await expect(
+    reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
+  ).resolves.toBeDefined()
+})
 
 it('accepts shorter initial excerpts under a smaller budget without changing immutable facts', async () => {
+  let conflict = false
   vi.stubGlobal(
     'fetch',
     vi.fn(async (path: string) => {
@@ -265,7 +261,9 @@ it('accepts shorter initial excerpts under a smaller budget without changing imm
             body: {
               ...item.body,
               text: {
-                text: 'a'.repeat(length),
+                text: conflict
+                  ? 'a'.repeat(300) + 'b' + 'a'.repeat(length - 301)
+                  : 'a'.repeat(length),
                 total_bytes: '1000',
                 offset_bytes: '0',
                 continuation: cursor,
@@ -278,7 +276,7 @@ it('accepts shorter initial excerpts under a smaller budget without changing imm
   )
   const reader = new TranscriptWindowReader(transcriptSessionId)
   const signal = new AbortController().signal
-  for (const maxBytes of [512, 256]) {
+  for (const maxBytes of [512, 256, 384]) {
     const page = await reader.read(
       { kind: 'latest' },
       { ...webContractBootstrapFixture.limits, max_timeline_detail_bytes: maxBytes },
@@ -286,6 +284,14 @@ it('accepts shorter initial excerpts under a smaller budget without changing imm
     )
     expect(page.details[0]?.projected_body_bytes).toBe(maxBytes)
   }
+  conflict = true
+  await expect(
+    reader.read(
+      { kind: 'latest' },
+      { ...webContractBootstrapFixture.limits, max_timeline_detail_bytes: 512 },
+      signal,
+    ),
+  ).rejects.toThrow('retained immutable facts')
 })
 
 it('bounds immutable detail facts while traversing history', async () => {
