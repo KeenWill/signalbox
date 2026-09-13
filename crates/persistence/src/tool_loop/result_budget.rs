@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn context_prefix_reports_exact_utf8_counts_within_escaped_budget() {
-        let source = "𠜎\t\n\"".repeat(100);
+        let source = "🙂\u{0008}\u{000c}\t\"".repeat(100);
         let limit = 160;
         let bounded = context_text(&source, limit);
         let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
@@ -196,7 +196,7 @@ mod tests {
             format!(
                 "\n[tool result truncated: retained {} bytes; dropped {} bytes]",
                 prefix.len(),
-                source.len() - prefix.len(),
+                source.len() - prefix.len() + 1,
             )
         );
         assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
