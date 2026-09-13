@@ -37,6 +37,52 @@ it('browses a hundred thousand messages with bounded reads in both directions', 
   expect(requests.filter((url) => url.pathname.endsWith('/timeline-detail'))).toHaveLength(24)
 })
 
+it.each(['1', '8'])(
+  'rejects a detail kind contradicting header %s on the first read',
+  async (sequence) => {
+    let conflict = true
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string) => {
+        const url = new URL(path, 'http://localhost')
+        const payload = transcriptFixture(url, 8)
+        if (
+          conflict &&
+          url.pathname.endsWith('/timeline-detail') &&
+          url.searchParams.get('first') === sequence
+        ) {
+          const page =
+            payload as import('../generated/web-contract.mjs').WebSessionTimelineDetailPage
+          return Response.json({
+            ...page,
+            projected_body_bytes: 128,
+            items: page.items.map((item) => ({
+              ...item,
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            })),
+          })
+        }
+        return Response.json(payload)
+      }),
+    )
+    const reader = new TranscriptWindowReader(transcriptSessionId)
+    const signal = new AbortController().signal
+    await expect(
+      reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
+    ).rejects.toThrow('Transcript detail kind contradicts its timeline header')
+    conflict = false
+    const page = await reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal)
+    expect(page.details.flatMap((detail) => detail.items)).toHaveLength(8)
+  },
+)
+
 it('rejects changed immutable kinds on overlapping transcript reads', async () => {
   let conflict = false
   vi.stubGlobal(
