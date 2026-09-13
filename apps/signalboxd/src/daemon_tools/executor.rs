@@ -120,6 +120,18 @@ where
         self
     }
 
+    /// Supplies the live credential catalog for judged sandboxed tasks.
+    pub fn with_ambient_credentials(
+        mut self,
+        catalogs: crate::configuration_reload::ConfigurationReload,
+        pool: sqlx::PgPool,
+    ) -> Self {
+        if let Some(workspaces) = self.workspace_bound.as_mut() {
+            workspaces.ambient_credentials = Some((catalogs, pool));
+        }
+        self
+    }
+
     /// Installs the executor whose resolver and worker composed the file declarations.
     pub fn with_file_media_executor(
         mut self,

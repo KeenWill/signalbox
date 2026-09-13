@@ -525,7 +525,11 @@ export function ProductApp({
     catalogReturnSessionId.current = undefined
   }, [])
   const updateSessionSearch = useCallback(
-    (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+    (nextState: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+      const next =
+        mode === 'close' || nextState.session !== currentCatalogSession.current
+          ? { ...nextState, around: undefined }
+          : nextState
       if (mode === 'push' && next.workspace && next.session)
         catalogReturnSessionId.current = next.session
       if (mode === 'close') {
@@ -829,11 +833,18 @@ export function ProductApp({
       <SessionWorkspaceSurface
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
-          updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
+          updateSessionSearch(
+            { ...sessionState, session, workspace: true, around: undefined },
+            'replace',
+          )
         }
         focusEntry={sessionState.session === undefined}
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
+        initialAround={sessionState.around}
+        onAroundConsumed={() =>
+          updateSessionSearch({ ...sessionState, around: undefined }, 'replace')
+        }
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
