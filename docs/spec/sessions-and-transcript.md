@@ -541,7 +541,12 @@ an equal share of the detail budget; unread body continuations remain available
 on demand. Attachment references are included in the response bound. Scrolling
 loads earlier or later windows. Session and anchor changes reset the view;
 observation refreshes retain visible text while rereading loaded windows, or
-refresh from latest when following the live end.
+refresh from latest when following the live end, retaining current text through
+a failed reread. The session-scoped reader compares immutable detail facts,
+including identities, attachment references and excerpt byte totals, across
+overlapping initial reads. It retains facts for at most 24 recently read event
+addresses; changed excerpt lengths under different read budgets do not change
+those facts.
 
 Windows advance past metadata-only detail records automatically within the
 workspace record budget and projected-byte budget. All returned headers, detail

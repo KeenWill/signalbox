@@ -735,16 +735,21 @@ export const detailExcerptAt = (body: DetailBody, cursor: BodyCursor) => {
   }
 }
 
-// Excerpt contents advance by page; their immutable byte totals are checked separately.
-const immutableDetailFacts = (value: unknown): string | undefined =>
+// Excerpt positions and contents depend on the selected projection budget.
+const immutableDetailFacts = (value: unknown, retainExcerptTotals = false): string | undefined =>
   JSON.stringify(value, (_key, child: unknown) => {
     if (child == null) return undefined
     if (typeof child !== 'object' || Array.isArray(child)) return child
-    if ('text' in child && 'offset_bytes' in child && 'total_bytes' in child) return undefined
+    if ('text' in child && 'offset_bytes' in child && 'total_bytes' in child)
+      return retainExcerptTotals ? { total_bytes: child.total_bytes } : undefined
     return Object.fromEntries(
       Object.entries(child).sort(([left], [right]) => left.localeCompare(right)),
     )
   })
+
+// Initial projections can vary in excerpt length while identifying the same durable facts.
+export const initialDetailFacts = (item: WebSessionTimelineDetailPage['items'][number]): string =>
+  immutableDetailFacts({ kind: item.kind, body: item.body }, true) ?? ''
 
 const bodyFacts = (body: DetailBody) =>
   immutableDetailFacts(

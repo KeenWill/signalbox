@@ -4,7 +4,12 @@ import type {
 } from '../generated/web-contract.mjs'
 import { readSessionTranscript, type SessionTranscriptLimits } from '../product'
 import { SESSION_WINDOW_BYTES } from '../session-workspace'
-import { BoundedSessionHistory, HttpSessionTimelineSource, type SessionWindowAnchor } from './model'
+import {
+  BoundedSessionHistory,
+  HttpSessionTimelineSource,
+  initialDetailFacts,
+  type SessionWindowAnchor,
+} from './model'
 
 // Share one detail budget across each window; keep three neighboring windows.
 export const TRANSCRIPT_WINDOW_ITEMS = 8
@@ -22,6 +27,7 @@ export type TranscriptReadAnchor = SessionWindowAnchor & {
 
 export class TranscriptWindowReader {
   private history: BoundedSessionHistory | undefined
+  private readonly facts = new Map<string, string>()
 
   constructor(private readonly sessionId: string) {}
 
@@ -61,6 +67,22 @@ export class TranscriptWindowReader {
         ),
       ),
     )
+    const facts = details.flatMap((page) =>
+      page.items.map((item) => [item.address.event_sequence, initialDetailFacts(item)] as const),
+    )
+    for (const [sequence, current] of facts) {
+      const previous = this.facts.get(sequence)
+      if (previous !== undefined && previous !== current)
+        throw new TypeError('Transcript detail changed its retained immutable facts')
+    }
+    for (const [sequence, current] of facts) {
+      this.facts.delete(sequence)
+      this.facts.set(sequence, current)
+    }
+    while (this.facts.size > TRANSCRIPT_RETAINED_WINDOWS * TRANSCRIPT_WINDOW_ITEMS) {
+      const oldest = this.facts.keys().next().value
+      if (oldest !== undefined) this.facts.delete(oldest)
+    }
     return { window, details }
   }
 }
