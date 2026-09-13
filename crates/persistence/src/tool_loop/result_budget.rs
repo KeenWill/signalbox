@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn context_prefix_keeps_a_small_result_exact() {
-        let source = "unchanged \"界\" \\ result";
+        let source = "unchanged \"雪\" \\ result\t\u{000b}\u{000c}\r\n";
         let limit = serde_json::to_vec(source).expect("fixture encodes").len();
         assert_eq!(context_text(source, limit), source);
     }

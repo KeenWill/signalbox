@@ -60,6 +60,7 @@ pub struct PostgresCommissionedDispatchStore {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl commissioned_dispatch::PostgresCommissionedDispatchStore {
     pub fn new(pool: sqlx_postgres::PgPool, credential_pin: SessionCredentialPin) -> Self;
+    pub fn with_runner_placement_catalog(self, catalog: signalbox_domain::RunnerCatalog) -> Self;
     pub async fn load(
         &self,
         command: signalbox_domain::DurableCommandId,

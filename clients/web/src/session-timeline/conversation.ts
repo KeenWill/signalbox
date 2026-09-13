@@ -14,7 +14,19 @@ export const hasConversationContent = (
       return body.tools.some((tool) => {
         if (
           tool.evidence.type === 'physical_attempt' &&
-          (tool.evidence.result != null || tool.evidence.failure != null)
+          (tool.evidence.result != null ||
+            tool.evidence.failure != null ||
+            (tool.evidence.result_media_reference != null &&
+              !preceding.some(
+                (prior) =>
+                  prior.body.type === 'tool_batch' &&
+                  prior.body.tools.some(
+                    (member) =>
+                      member.request_id === tool.request_id &&
+                      member.evidence.type === 'physical_attempt' &&
+                      member.evidence.result_media_reference != null,
+                  ),
+              )))
         )
           return true
         return (

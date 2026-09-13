@@ -55,7 +55,9 @@ if (fileExample[1].evidence?.type === 'physical_attempt')
     evidence: { ...fileExample[1].evidence, result: toolExcerpt(rawFileEvidence) },
   }
 
+export const longEvidence = 'Fetched line\r\n'.repeat(400) + 'Last fetched line'
 export const toolExamples = [
+  toolExample('long_evidence', { requested: true }, { content: longEvidence }),
   toolExample('git_diff', { scope: 'working_tree' }, { patch: '-before\n+after\n' }),
   toolExample(
     'sandboxed_exec',

@@ -86,6 +86,7 @@ pub struct CommissionDispatchRequest {
     fence: CommissionedDispatchFence,
     statement: GoalStatement,
     context: UserContent,
+    runner_placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
 }
 
 impl CommissionDispatchRequest {
@@ -109,7 +110,25 @@ impl CommissionDispatchRequest {
             fence,
             statement,
             context,
+            runner_placement: None,
         })
+    }
+
+    /// Retains the caller's optional unpinned runner placement.
+    #[must_use]
+    pub fn with_runner_placement(
+        mut self,
+        placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = placement;
+        self
+    }
+
+    /// Borrows the exact runner placement participating in replay equality.
+    pub const fn runner_placement(
+        &self,
+    ) -> Option<&signalbox_domain::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
     }
 
     /// Returns the caller-supplied idempotency identity.
@@ -167,7 +186,8 @@ impl CommissionDispatchRequest {
             }),
             template_provenance,
             resolved_defaults,
-        );
+        )
+        .with_runner_placement(self.runner_placement);
         let prepared_session = command
             .prepare(ids.next_session_id())
             .map_err(|_| CommissionDispatchPreparationError::SessionPreparation)?;

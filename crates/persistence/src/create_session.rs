@@ -33,7 +33,7 @@ use crate::outbox;
 const COMMAND_KIND: &str = "create_session";
 const WRITTEN_STORAGE_VERSION: i16 = 9;
 pub(crate) const WORKFLOW_FROM_STORAGE_VERSION: i16 = 9;
-const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 8;
+pub(crate) const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 8;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
@@ -89,6 +89,9 @@ pub enum CreateSessionCorruption {
 /// A database failure or a fail-closed durable-shape failure.
 #[derive(Debug)]
 pub enum CreateSessionRepositoryError {
+    #[error("runner placement is not admitted by the active registration")]
+    /// Requested runner placement is unavailable at creation commit.
+    RunnerPlacementRejected,
     #[error("CreateSession database failure: {field_0}")]
     /// PostgreSQL failed before any commit could have succeeded.
     Database(#[source] sqlx::Error),
@@ -135,6 +138,7 @@ pub struct CreateSessionRepository {
     credential_pin: crate::SessionCredentialPin,
     principal: signalbox_domain::CommandPrincipal,
     checkout_provisioning_pending: bool,
+    runner_placement_catalog: Option<signalbox_domain::RunnerCatalog>,
 }
 
 impl CreateSessionRepository {
@@ -145,7 +149,17 @@ impl CreateSessionRepository {
             credential_pin,
             principal: signalbox_domain::CommandPrincipal::Operator,
             checkout_provisioning_pending: false,
+            runner_placement_catalog: None,
         }
+    }
+
+    /// Checks requested runner placement under locks held through creation commit.
+    pub fn with_runner_placement_catalog(
+        mut self,
+        catalog: signalbox_domain::RunnerCatalog,
+    ) -> Self {
+        self.runner_placement_catalog = Some(catalog);
+        self
     }
 
     /// Records this explicit issuer on newly claimed creation commands.
@@ -301,7 +315,13 @@ impl CreateSessionRepository {
         }
 
         let result = prepared.applied_result();
-        if let Err(error) = insert_prepared(&mut transaction, prepared, &self.credential_pin).await
+        if let Err(error) = insert_prepared(
+            &mut transaction,
+            prepared,
+            &self.credential_pin,
+            self.runner_placement_catalog.as_ref(),
+        )
+        .await
         {
             transaction.rollback().await?;
             return Err(error);
@@ -454,8 +474,24 @@ pub(crate) async fn insert_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,
     credential_pin: &crate::SessionCredentialPin,
+    runner_catalog: Option<&signalbox_domain::RunnerCatalog>,
 ) -> Result<(), CreateSessionRepositoryError> {
     let command = prepared.command();
+    if let (Some(catalog), Some(placement)) = (runner_catalog, command.runner_placement()) {
+        crate::runner_protocol::validate_creation_placement(connection, catalog, placement)
+            .await
+            .map_err(|error| match error {
+                crate::runner_protocol::RunnerProtocolStoreError::Domain(_) => {
+                    CreateSessionRepositoryError::RunnerPlacementRejected
+                }
+                crate::runner_protocol::RunnerProtocolStoreError::Database(error) => {
+                    CreateSessionRepositoryError::Database(error)
+                }
+                _ => CreateSessionRepositoryError::Corruption(
+                    CreateSessionCorruption::Inconsistent("runner placement admission"),
+                ),
+            })?;
+    }
     let session = prepared.session();
     let defaults = session.configuration_defaults();
     let stored_selection = encode_selection(defaults.defaults().model());
@@ -573,6 +609,19 @@ pub(crate) async fn insert_prepared(
     .await?;
 
     insert_command_record(connection, command, prepared.applied_result()).await?;
+
+    if let Some(request) = command.runner_placement() {
+        crate::runner_protocol::insert_created_placement(connection, session.id(), request.clone())
+            .await
+            .map_err(|error| match error {
+                crate::runner_protocol::RunnerProtocolStoreError::Database(error) => {
+                    CreateSessionRepositoryError::Database(error)
+                }
+                _ => CreateSessionRepositoryError::Corruption(
+                    CreateSessionCorruption::Inconsistent("created runner placement"),
+                ),
+            })?;
+    }
 
     outbox::append(
         connection,

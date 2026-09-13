@@ -18,7 +18,7 @@ pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
     services: &ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError> {
-    let catalog = match crate::runner_protocol_runtime::registration_only_catalog() {
+    let catalog = match crate::runner_protocol_runtime::local_runner_catalog() {
         Ok(catalog) => catalog,
         Err(error) => {
             tracing::error!(failure = ?error, "runner recovery catalog admission failed");

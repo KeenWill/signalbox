@@ -23,6 +23,12 @@ through the session-scoped `goal_declare` tool, and may declare only blocked or
 achieved. The repository-watch session-command vocabulary contains checked goal
 operations.
 
+The same-origin JSON routes `PUT /api/sessions/{session_id}/goal` and
+`DELETE /api/sessions/{session_id}/goal` carry a durable command ID and invoke
+attach and stop respectively. PUT also carries the statement; DELETE stops the
+parent alone. A 204 acknowledges the recorded command, and refusals retain their
+application error code.
+
 For a pull-request commission, a completed turn with a successful configured
 push and a thread reply triggers a daemon GitHub check before continuation. The
 current PR head must contain the pushed commit and every thread replied on in

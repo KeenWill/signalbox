@@ -206,6 +206,7 @@ async fn pending_evaluation_coalesces_completed_checks_before_session_submission
             RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
                 pull_requests: vec![ComparisonPullRequestState::try_new(
                     RepoWatchPullRequestStateInput {
+                        required_check_conclusions: None,
                         context,
                         lifecycle: RepoWatchPullRequestLifecycle::Open,
                         mergeable_state: MergeableState::Mergeable,
@@ -215,6 +216,7 @@ async fn pending_evaluation_coalesces_completed_checks_before_session_submission
                             ChecksOutcome::Success,
                         )],
                         completed_check_runs: vec![],
+                        required_check_conclusions: None,
                         reviews: vec![],
                         threads: vec![],
                         reactions: vec![],

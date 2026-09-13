@@ -67,6 +67,7 @@ pub(crate) enum Command {
         command_id: Option<CommandId>,
         system_prompt_file: Option<PathBuf>,
         placement: SessionPlacement,
+        runner_placement: Option<Box<signalbox_process_protocol::RunnerPlacementRequest>>,
     },
     Place {
         session_id: CanonicalUuid,
@@ -1477,6 +1478,10 @@ enum ReviewSeverityArgument {
         .args(["model", "alias", "template"])
 ))]
 struct CreateArguments {
+    /// Exact runner placement JSON: selector, working_directory, credential_profile,
+    /// workspace, sandbox, and permission_overrides.
+    #[arg(long, value_name = "JSON", value_parser = parse_runner_placement)]
+    runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
     /// Select a model configuration directly.
     #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
     model: Option<CanonicalUuid>,
@@ -1504,6 +1509,18 @@ struct CreateArguments {
     /// Explicitly acknowledge that the one-segment placement grants global read.
     #[arg(long, requires = "placement")]
     root_global_read: bool,
+}
+
+fn parse_runner_placement(
+    value: &str,
+) -> Result<signalbox_process_protocol::RunnerPlacementRequest, String> {
+    let placement: signalbox_process_protocol::RunnerPlacementRequest =
+        serde_json::from_str(value).map_err(|error| error.to_string())?;
+    placement
+        .clone()
+        .try_into_domain()
+        .map_err(|_| "runner placement has invalid axes or permission overrides".to_owned())?;
+    Ok(placement)
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1986,6 +2003,7 @@ pub(crate) fn parse(
         CliCommand::Workspace(arguments) => Command::Workspace(arguments.command),
         CliCommand::Runner(arguments) => Command::Runner(arguments.command),
         CliCommand::Create(arguments) => Command::Create {
+            runner_placement: arguments.runner_placement.map(Box::new),
             selection: match (arguments.model, arguments.alias) {
                 (Some(selection_id), None) => Some(ModelSelection::Direct { selection_id }),
                 (None, Some(alias_id)) => Some(ModelSelection::Alias { alias_id }),
@@ -4190,6 +4208,38 @@ mod tests {
             .is_err()
         );
         assert!(parse(["create"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn create_preserves_explicit_runner_placement_for_models_and_templates() {
+        let placement = r#"{"selector":{"type":"capability_class","name":"echo"},"working_directory":{"type":"runner_default"},"credential_profile":null,"workspace":{"type":"none"},"sandbox":"ambient","permission_overrides":[]}"#;
+        for (flag, source) in [
+            ("--model", "00000000-0000-0000-0000-000000000001"),
+            ("--template", "review"),
+        ] {
+            let Ok(ParseOutcome::Run(arguments)) =
+                parse(["create", flag, source, "--runner-placement", placement].map(Into::into))
+            else {
+                panic!("runner placement parses")
+            };
+            let Command::Create {
+                runner_placement,
+                placement: local,
+                ..
+            } = arguments.command
+            else {
+                panic!("creation request")
+            };
+            assert_eq!(
+                serde_json::to_value(runner_placement.unwrap()).unwrap(),
+                serde_json::from_str::<serde_json::Value>(placement).unwrap()
+            );
+            assert_eq!(local, SessionPlacement::Pathless {});
+        }
+        assert!(
+            parse(["create", "--template", "review", "--runner-placement", "{}"].map(Into::into))
+                .is_err()
+        );
     }
 
     #[test]

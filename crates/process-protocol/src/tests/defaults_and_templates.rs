@@ -104,6 +104,7 @@ fn adds_the_bounded_session_system_prompt() -> Result<(), Box<dyn std::error::Er
 
     let request_id = request(8)?;
     let create = ClientRequest::CreateSession {
+        runner_placement: None,
         command_id: command(1)?,
         initial_model_selection: ModelSelection::Direct {
             selection_id: uuid(4),
@@ -130,6 +131,7 @@ fn adds_the_bounded_session_system_prompt() -> Result<(), Box<dyn std::error::Er
     assert_eq!(decode_client_line(&encoded)?, frame);
 
     let promptless_create = ClientRequest::CreateSession {
+        runner_placement: None,
         command_id: command(1)?,
         initial_model_selection: ModelSelection::Direct {
             selection_id: uuid(4),
@@ -326,6 +328,7 @@ fn template_frames_have_exact_closed_shapes() -> Result<(), Box<dyn std::error::
         ProtocolVersion::One,
         request(1)?,
         ClientRequest::CreateSessionFromTemplate {
+            runner_placement: None,
             command_id: command(2)?,
             template_name: "reviewer".to_owned(),
             placement: crate::SessionPlacement::Pathless {},
@@ -385,6 +388,7 @@ fn root_placement_creation_and_update_frames_record_global_read_intent_loudly()
         ProtocolVersion::One,
         request(70)?,
         ClientRequest::CreateSession {
+            runner_placement: None,
             command_id: command(71)?,
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(72),
