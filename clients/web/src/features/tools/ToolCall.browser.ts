@@ -71,6 +71,13 @@ for (const example of jsonExamples) {
     await expect(tool.locator('pre')).toHaveCount(0)
     expect((await tool.textContent())?.length).toBeLessThan(6000)
     expect(await tool.locator('dt').count()).toBeLessThanOrEqual(32)
+    if (['json_array_integer', 'json_array_overflow'].includes(example.name)) {
+      await expect(tool).toContainText('Output details available in Raw')
+      await expect(tool).not.toContainText('9007199254740992')
+      await expect(tool).not.toContainText('Infinity')
+    }
+    if (['json_array_multiline', 'json_array_long'].includes(example.name))
+      await expect(tool).toContainText('More in Raw')
     if (example.name === 'json_multiline_fields') {
       const values = await tool.locator('dd').allTextContents()
       expect(

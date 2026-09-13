@@ -12,6 +12,7 @@ import {
   type Fields,
   fieldLabel,
   fields,
+  parseToolJson,
   previewText,
   searchResultText,
   textField,
@@ -103,18 +104,21 @@ function Excerpt({
 function valueSummary(value: unknown): string {
   if (value === null) return 'None'
   if (Array.isArray(value)) {
-    const entries = value
-      .slice(0, ARTIFACT_PREVIEW_LINES)
-      .map((item) =>
-        item === null
-          ? 'None'
-          : Array.isArray(item)
-            ? `List · ${item.length} items`
-            : typeof item === 'object'
-              ? `Object · ${Object.keys(item).length} fields`
-              : previewText(textField(item)).content,
-      )
-    return `${value.length} items${entries.length ? `: ${entries.join(', ')}` : ''}${value.length > entries.length ? ' · More in Raw' : ''}`
+    let omitted = false
+    const entries = value.slice(0, ARTIFACT_PREVIEW_LINES).map((item) =>
+      item === null
+        ? 'None'
+        : Array.isArray(item)
+          ? `List · ${item.length} items`
+          : typeof item === 'object'
+            ? `Object · ${Object.keys(item).length} fields`
+            : (() => {
+                const preview = previewText(textField(item))
+                omitted ||= preview.omittedCharacters > 0
+                return preview.content
+              })(),
+    )
+    return `${value.length} items${entries.length ? `: ${entries.join(', ')}` : ''}${omitted || value.length > entries.length ? ' · More in Raw' : ''}`
   }
   if (typeof value === 'object') return `Object · ${Object.keys(value).length} fields`
   return textField(value)
@@ -169,7 +173,7 @@ function PresentedExcerpt({ excerpt, label }: { excerpt: WebTimelineTextExcerpt;
   if (excerpt.offset_bytes !== '0' || excerpt.continuation != null)
     return <p>{label} excerpt available in Raw</p>
   try {
-    const parsed: unknown = JSON.parse(excerpt.text)
+    const parsed = parseToolJson(excerpt.text)
     if (
       parsed !== null &&
       typeof parsed === 'object' &&
@@ -181,6 +185,7 @@ function PresentedExcerpt({ excerpt, label }: { excerpt: WebTimelineTextExcerpt;
           <p>No fields</p>
         </section>
       )
+    const summary = previewText(valueSummary(parsed))
     return (
       <section aria-label={label}>
         <p>
@@ -188,8 +193,9 @@ function PresentedExcerpt({ excerpt, label }: { excerpt: WebTimelineTextExcerpt;
             ? `Text · ${Array.from(parsed).length} characters`
             : typeof parsed === 'number'
               ? 'Number available in Raw'
-              : previewText(valueSummary(parsed)).content}
+              : summary.content}
         </p>
+        {summary.omittedCharacters > 0 && <small>More in Raw</small>}
         <small>Open Raw for the original text</small>
       </section>
     )

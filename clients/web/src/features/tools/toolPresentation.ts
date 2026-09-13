@@ -16,6 +16,14 @@ export const textField = (value: unknown): string =>
       ? String(value)
       : ''
 
+export const parseToolJson = (text: string): unknown =>
+  JSON.parse(text, (_key, value: unknown, context?: { source?: string }) => {
+    // Keep the original excerpt whenever rendering the parsed number would change its token.
+    if (typeof value === 'number' && String(value) !== context?.source)
+      throw new RangeError('JSON number requires its original representation')
+    return value
+  })
+
 export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields => {
   if (
     excerpt?.offset_bytes !== '0' ||
@@ -25,14 +33,7 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
   )
     return {}
   try {
-    return fields(
-      JSON.parse(excerpt.text, (_key, value: unknown, context?: { source?: string }) => {
-        // Keep the original excerpt whenever rendering the parsed number would change its token.
-        if (typeof value === 'number' && String(value) !== context?.source)
-          throw new RangeError('JSON number requires its original representation')
-        return value
-      }),
-    )
+    return fields(parseToolJson(excerpt.text))
   } catch {
     return {}
   }

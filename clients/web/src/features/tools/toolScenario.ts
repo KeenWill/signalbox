@@ -110,6 +110,10 @@ const jsonCase = (
   }
 }
 export const jsonExamples = [
+  jsonCase('json_array_integer', {}, []),
+  jsonCase('json_array_overflow', {}, []),
+  jsonCase('json_array_multiline', {}, ['a\n'.repeat(40)]),
+  jsonCase('json_array_long', {}, ['a'.repeat(4100)]),
   jsonCase(
     'json_multiline_fields',
     {},
@@ -154,8 +158,16 @@ if (failureCase?.tool.evidence.type === 'physical_attempt') {
   failureCase.raw = failure
 }
 for (const entry of jsonExamples) {
-  if (entry.name === 'json_number' && entry.tool.evidence.type === 'physical_attempt') {
-    entry.raw = '{"nonce":9007199254740993}'
+  if (
+    ['json_number', 'json_array_integer', 'json_array_overflow'].includes(entry.name) &&
+    entry.tool.evidence.type === 'physical_attempt'
+  ) {
+    entry.raw =
+      entry.name === 'json_array_integer'
+        ? '[9007199254740993]'
+        : entry.name === 'json_array_overflow'
+          ? '[1e400]'
+          : '{"nonce":9007199254740993}'
     entry.tool = {
       ...entry.tool,
       evidence: { ...entry.tool.evidence, result: toolExcerpt(entry.raw) },
