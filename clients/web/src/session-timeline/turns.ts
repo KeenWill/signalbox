@@ -37,7 +37,10 @@ function projectedTool(tools: WebTimelineToolAttempt[], evidence: WebTimelineToo
   )
 }
 
-export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[]): TranscriptTurn[] {
+export function groupTranscriptTurns(
+  items: readonly WebSessionTimelineDetail[],
+  windowStarts?: ReadonlySet<string>,
+): TranscriptTurn[] {
   const groups = new Map<string, TranscriptTurn>()
   for (const item of items) {
     const turnId = detailTurnId(item)
@@ -152,6 +155,7 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     let segment = segments.at(-1)
     if (
       !segment ||
+      windowStarts?.has(item.address.event_sequence) ||
       segment.turnId !== turnId ||
       (turnId === null && segment.events[0]?.address.event_sequence !== item.address.event_sequence)
     ) {

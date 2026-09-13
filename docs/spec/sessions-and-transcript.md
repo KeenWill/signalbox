@@ -567,7 +567,8 @@ unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation.
 
 The transcript groups contiguous events by turn while preserving interleaved
-chronology. Summary shows user messages, assistant text accompanying tool calls,
+chronology. Turn segments retain window boundaries so prepending history preserves
+existing rows and disclosures. Turn-wide classification uses all loaded events. Summary shows user messages, assistant text accompanying tool calls,
 final assistant text, compact tool chips, and unsuccessful turn outcomes. A
 completed response remains visible as a non-final message when its
 completed-turn closure is not loaded. Distinct physical tool attempts remain
