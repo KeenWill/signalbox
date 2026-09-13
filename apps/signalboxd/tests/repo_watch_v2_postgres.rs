@@ -59,6 +59,8 @@ mod activation;
 mod check_dispatch;
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/cooldown_reviews.rs"]
+mod cooldown_reviews;
 #[path = "repo_watch_v2/evaluation.rs"]
 mod evaluation;
 #[path = "repo_watch_v2/observations.rs"]
