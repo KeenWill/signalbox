@@ -11,6 +11,8 @@ import {
 } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import { type CommandContext, invokeCommand } from './commands'
+import { ToolCall } from './features/tools/ToolCall'
+import { ToolResultMedia } from './features/tools/ToolResultMedia'
 import type {
   WebSessionTimelineDetail,
   WebSessionTimelineDetailBody,
@@ -104,17 +106,9 @@ function BodyText({
   if (body.type === 'tool_batch')
     return (
       <>
-        {body.tools.map((tool) => {
-          const physical = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
-          return (
-            <div key={tool.request_id} className="session-tool-entry">
-              <strong>{tool.tool_name}</strong>
-              {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
-              {physical?.result && <ToolText label="Output" excerpt={physical.result} />}
-              {physical?.failure && <ToolText label="Failure" excerpt={physical.failure} />}
-            </div>
-          )
-        })}
+        {body.tools.map((tool) => (
+          <ToolCall key={tool.request_id} tool={tool} showMedia={showAttachments} />
+        ))}
         {body.goal_events.length > 0 && (
           <section aria-label="Goal events">
             {body.goal_events.map((event) => (
@@ -549,6 +543,11 @@ function TranscriptWindow({
           turn.messages.some((item) => detail === 'condensed' || item.body.type === 'user_input') ||
           turn.result ||
           (detail === 'condensed' && turn.tools.length > 0) ||
+          turn.tools.some(
+            (tool) =>
+              tool.evidence.type === 'physical_attempt' &&
+              tool.evidence.result_media_reference != null,
+          ) ||
           turn.warnings.length > 0 ||
           turn.outcome,
       ),
@@ -800,7 +799,13 @@ function TranscriptWindow({
                     turnModes[turn.turnId ?? turn.id] === 'full' ||
                     item.address.event_sequence === eventSequence)) ||
                 (isVisibleTurnEvent(turn, item, detail === 'condensed') &&
-                  (item.body.type !== 'tool_batch' || detail === 'condensed')),
+                  (item.body.type !== 'tool_batch' ||
+                    detail === 'condensed' ||
+                    turn.tools.some(
+                      (tool) =>
+                        tool.evidence.type === 'physical_attempt' &&
+                        tool.evidence.result_media_reference != null,
+                    ))),
             ),
           ),
       )
@@ -963,7 +968,13 @@ function TranscriptWindow({
                         (turn.events.includes(item) &&
                           (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
                         (isVisibleTurnEvent(turn, item, detail === 'condensed') &&
-                          (item.body.type !== 'tool_batch' || detail === 'condensed')),
+                          (item.body.type !== 'tool_batch' ||
+                            detail === 'condensed' ||
+                            turn.tools.some(
+                              (tool) =>
+                                tool.evidence.type === 'physical_attempt' &&
+                                tool.evidence.result_media_reference != null,
+                            ))),
                     ),
                   ),
               ),
@@ -1177,7 +1188,17 @@ function TurnContent({
         </button>
       </header>
       {turnSummaryParts(turn)
-        .filter((part) => detail === 'condensed' || part.kind === 'message')
+        .filter(
+          (part) =>
+            detail === 'condensed' ||
+            part.kind === 'message' ||
+            (part.kind === 'tools' &&
+              part.tools.some(
+                (tool) =>
+                  tool.evidence.type === 'physical_attempt' &&
+                  tool.evidence.result_media_reference != null,
+              )),
+        )
         .map((part) =>
           part.kind !== 'tools' ? (
             <div
@@ -1186,6 +1207,19 @@ function TurnContent({
             >
               <BodyText body={part.item.body} />
               {more(part.item.address.event_sequence)}
+            </div>
+          ) : detail === 'results' ? (
+            <div key={part.tools[0] ? disclosureKey(part.tools[0]) : undefined}>
+              {part.tools.map((tool) => (
+                <ToolResultMedia
+                  key={disclosureKey(tool)}
+                  media={
+                    tool.evidence.type === 'physical_attempt'
+                      ? tool.evidence.result_media_reference
+                      : null
+                  }
+                />
+              ))}
             </div>
           ) : (
             <section
@@ -1330,20 +1364,7 @@ function ToolSummary({
       {renderTool ? (
         renderTool({ ...tool, evidence: loaded ?? tool.evidence }, 'condensed')
       ) : (
-        <>
-          <strong>{tool.tool_name}</strong>
-          <small>Tool summaries</small>
-          {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
-          {result && <ToolText label="Output" excerpt={result} />}
-          {failure && <ToolText label="Failure" excerpt={failure} />}
-          {evidence && !evidence.result && !evidence.failure && (
-            <p className="session-turn-outcome">
-              {evidence.state === 'known_failed' || evidence.failure_present
-                ? `Failure · ${enumLabel(evidence.cause ?? evidence.state)}`
-                : enumLabel(evidence.state)}
-            </p>
-          )}
-        </>
+        <ToolCall tool={{ ...tool, evidence: loaded ?? tool.evidence }} />
       )}
       {needsOutput && output.isPending && <small role="status">Loading output…</small>}
       {needsOutput && output.isError && <small role="alert">Output could not be loaded.</small>}
