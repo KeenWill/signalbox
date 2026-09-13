@@ -466,11 +466,12 @@ impl ConfigurationReload {
     }
 
     async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
-        if self.catalogs().models.session_title_selection().is_none() {
-            return Ok(());
-        }
         if let Some(processes) = &self.title_invocation_processes {
-            processes.restore_pending_titles().await?;
+            if self.catalogs().models.session_title_selection().is_none() {
+                processes.clear_pending_titles();
+            } else {
+                processes.restore_pending_titles().await?;
+            }
         }
         Ok(())
     }
