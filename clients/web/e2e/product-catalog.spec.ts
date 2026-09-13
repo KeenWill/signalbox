@@ -1063,7 +1063,7 @@ test('releases the rename editor while the acknowledged catalog refresh is stall
   await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveCount(0)
   await expect(rename).toBeEnabled()
   await expect(rename).toBeFocused()
-  await expect(page.getByRole('button', { name: /Acknowledged title/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
   await rename.click()
   await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveValue(
     'Acknowledged title',
@@ -1074,29 +1074,47 @@ test('releases the rename editor while the acknowledged catalog refresh is stall
     'Acknowledged title',
     'Acknowledged title',
   ])
-  expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
+  expect(requests[1]?.command_id).toBe(requests[0]?.command_id)
 })
 
-for (const leaveCatalog of [false, true]) {
-  test(`replays an ambiguous rename after editor closure with catalog unmount ${leaveCatalog}`, async ({
+for (const [leaveCatalog, firstRequestArrived] of [
+  [false, true],
+  [true, true],
+  [true, false],
+] as const) {
+  test(`replays an ambiguous rename after editor closure with catalog unmount ${leaveCatalog} and first request delivered ${firstRequestArrived}`, async ({
     page,
   }) => {
     await useCatalogFixture(page)
     const requests: Array<{ command_id: string; title: string }> = []
     let savedTitle = 'Release verification'
-    await page.route('**/api/sessions?**', (route) =>
-      route.fulfill({
-        json: {
-          ...firstPage,
-          summaries: firstPage.summaries.map((row, index) =>
-            index === 0 ? { ...row, title_summary: savedTitle } : row,
-          ),
-        },
-      }),
-    )
+    let stallRefresh = false
+    let refreshStalled = false
+    let releaseRefresh: (() => Promise<void>) | undefined
+    await page.route('**/api/sessions?**', (route) => {
+      const fulfill = () =>
+        route.fulfill({
+          json: {
+            ...firstPage,
+            summaries: firstPage.summaries.map((row, index) =>
+              index === 0 ? { ...row, title_summary: savedTitle } : row,
+            ),
+          },
+        })
+      if (stallRefresh) {
+        refreshStalled = true
+        releaseRefresh = fulfill
+        return
+      }
+      return fulfill()
+    })
     await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
       requests.push(route.request().postDataJSON())
       if (requests.length === 1) {
+        if (!firstRequestArrived) {
+          await route.abort('failed')
+          return
+        }
         savedTitle = 'Another writer title'
         await route.fulfill({
           status: 503,
@@ -1110,7 +1128,9 @@ for (const leaveCatalog of [false, true]) {
         })
       } else {
         if (requests.at(-1)?.command_id !== requests[0]?.command_id)
-          savedTitle = 'Stale title reinstalled'
+          savedTitle = requests.at(-1)?.title ?? savedTitle
+        if (!firstRequestArrived) savedTitle = 'My ambiguous title'
+        stallRefresh = leaveCatalog
         await route.fulfill({ status: 204 })
       }
     })
@@ -1129,17 +1149,46 @@ for (const leaveCatalog of [false, true]) {
       await page.getByRole('link', { name: 'Settings', exact: true }).click()
       await expect(page).toHaveURL(/\/settings$/)
       await page.getByRole('link', { name: 'Sessions', exact: true }).click()
+      await expect(
+        page.getByRole('button', {
+          name: firstRequestArrived ? /Another writer title/ : /Release verification/,
+        }),
+      ).toBeVisible()
     }
     await rename.click()
     await expect(input).toHaveValue('My ambiguous title')
     await expect(input).toHaveAttribute('readonly', '')
     await page.getByRole('button', { name: 'Save', exact: true }).click()
-    await expect(page.getByRole('button', { name: /Another writer title/ })).toBeVisible()
+    await expect(input).toBeHidden()
+    if (leaveCatalog) await expect.poll(() => refreshStalled).toBe(true)
+    else await expect(page.getByRole('button', { name: /Another writer title/ })).toBeVisible()
     expect(requests).toHaveLength(2)
     expect(requests[1]).toEqual(requests[0])
     await rename.click()
+    if (leaveCatalog) {
+      await expect(input).toHaveAttribute('readonly', '')
+      await expect(input).toHaveValue('My ambiguous title')
+      await expect(page.getByRole('alert')).toContainText('Rename acknowledged')
+      const refreshed = page.waitForResponse((response) =>
+        response.url().includes('/api/sessions?'),
+      )
+      await releaseRefresh?.()
+      await (await refreshed).finished()
+      await expect(
+        page.getByRole('button', {
+          name: firstRequestArrived ? /Another writer title/ : /My ambiguous title/,
+        }),
+      ).toBeVisible()
+    }
     await expect(input).toBeEditable()
-    await expect(input).toHaveValue('Another writer title')
+    const confirmedTitle = firstRequestArrived ? 'Another writer title' : 'My ambiguous title'
+    await expect(input).toHaveValue(confirmedTitle)
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect.poll(() => requests.length).toBe(3)
+    expect(requests[2]?.title).toBe(confirmedTitle)
+    expect(requests[2]?.command_id).not.toBe(requests[0]?.command_id)
+    await expect(input).toBeHidden()
+    await expect(page.getByRole('button', { name: new RegExp(confirmedTitle) })).toBeVisible()
   })
 }
 

@@ -16,6 +16,8 @@ import {
 } from './product'
 import {
   createRenameCommandId,
+  readRenameCatalog,
+  renameNeedsReadback,
   renameSession,
   retainedRename,
   suggestSessionTitle,
@@ -100,6 +102,7 @@ const SessionTitle = ({
 const SessionMetadata = ({
   summary,
   canRename,
+  catalogUpdatedAt,
   onRename,
   selected,
   commandContext,
@@ -107,6 +110,7 @@ const SessionMetadata = ({
 }: {
   summary: SessionSummary
   canRename: boolean
+  catalogUpdatedAt: number
   onRename: () => void
   selected: boolean
   commandContext: CommandContext
@@ -139,6 +143,19 @@ const SessionMetadata = ({
       target.current?.focus()
     }
   }, [editing, suggestion, suggesting, error])
+  useEffect(() => {
+    if (
+      catalogUpdatedAt &&
+      editing &&
+      !saving &&
+      intent.current &&
+      !retainedRename(summary.session_id)
+    ) {
+      intent.current = null
+      setTitle(summary.title_truncated ? '' : (summary.title_summary ?? ''))
+      setError(null)
+    }
+  }, [catalogUpdatedAt, editing, saving, summary])
   const provenance = summary.repository_watch
   const repositoryUrl = provenance
     ? `https://github.com/${provenance.repository.split('/').map(encodeURIComponent).join('/')}`
@@ -185,7 +202,11 @@ const SessionMetadata = ({
     if (intent.current) {
       returnToSuggestion.current = true
       setTitle(intent.current.title)
-      setError('A previous rename is unconfirmed. Save retries that title.')
+      setError(
+        renameNeedsReadback(summary.session_id)
+          ? 'Rename acknowledged. Waiting for the current title. Save retries the same request.'
+          : 'A previous rename is unconfirmed. Save retries that title.',
+      )
       setEditing(true)
     } else void suggest()
   }
@@ -209,23 +230,6 @@ const SessionMetadata = ({
         intent.current = { command_id: createRenameCommandId(), title }
       }
       await renameSession(summary.session_id, intent.current)
-      const scalars = Array.from(intent.current.title)
-      queryClient.setQueriesData<WebSessionCatalogSnapshot>(
-        { queryKey: ['production', 'sessions'] },
-        (snapshot) =>
-          snapshot && {
-            ...snapshot,
-            summaries: snapshot.summaries.map((row) =>
-              row.session_id === summary.session_id
-                ? {
-                    ...row,
-                    title_summary: scalars.slice(0, MAX_SESSION_SUMMARY_SCALARS).join(''),
-                    title_truncated: scalars.length > MAX_SESSION_SUMMARY_SCALARS,
-                  }
-                : row,
-            ),
-          },
-      )
       intent.current = null
       close()
       void queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
@@ -260,7 +264,11 @@ const SessionMetadata = ({
             intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
           )
           setError(
-            intent.current ? 'A previous rename is unconfirmed. Save retries that title.' : null,
+            intent.current
+              ? renameNeedsReadback(summary.session_id)
+                ? 'Rename acknowledged. Waiting for the current title. Save retries the same request.'
+                : 'A previous rename is unconfirmed. Save retries that title.'
+              : null,
           )
           setEditing(true)
         }}
@@ -390,14 +398,16 @@ export function SessionCatalogSurface({
       state.afterActivity ?? null,
     ],
     queryFn: ({ signal }) =>
-      productTransport.readSessions(
-        {
-          sort: state.sort ?? 'activity',
-          includeArchived: state.archived ?? false,
-          afterSession: state.afterSession,
-          afterActivity: state.afterActivity,
-        },
-        signal,
+      readRenameCatalog(() =>
+        productTransport.readSessions(
+          {
+            sort: state.sort ?? 'activity',
+            includeArchived: state.archived ?? false,
+            afterSession: state.afterSession,
+            afterActivity: state.afterActivity,
+          },
+          signal,
+        ),
       ),
     gcTime: 0,
   })
@@ -723,6 +733,7 @@ export function SessionCatalogSurface({
                           keyboardSelection === summary.session_id ? null : summary.session_id
                         dispatch(actions.timelineSelected(summary.session_id))
                       }}
+                      catalogUpdatedAt={sessions.dataUpdatedAt}
                       canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
                     />
                   </li>
