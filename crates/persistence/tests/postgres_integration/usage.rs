@@ -29,7 +29,7 @@ async fn title_context_excludes_private_provider_payloads() -> Result<(), Box<dy
             AssistantResponsePart::ProviderReasoning(signalbox_domain::ProviderReasoningItem::try_new(
                 r#"{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"opaque reasoning"}"#.to_owned()
             ).expect("reasoning fixture")),
-            AssistantResponsePart::Text(AssistantText::try_new("Public title context".to_owned()).expect("assistant text")),
+            AssistantResponsePart::Text(AssistantText::try_new(format!("界界{}", "Public title context".repeat(100_000))).expect("assistant text")),
         ],
         retained_input_tokens: 19,
         retained_output_tokens: 3,
@@ -50,12 +50,18 @@ async fn title_context_excludes_private_provider_payloads() -> Result<(), Box<dy
             |_| panic!("no pending steering"),
         )
         .await?;
-    let text = signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+    let text = signalbox_persistence::session_titles::SessionTitleRepository::new(pool.clone())
         .conversation(fixture.session, 4096)
         .await?;
     assert!(text.contains("Public title context"));
     assert!(!text.contains("encrypted_content"));
     assert!(!text.contains("private summary"));
+    assert_eq!(
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+            .conversation(fixture.session, 4)
+            .await?,
+        "界"
+    );
     Ok(())
 }
 

@@ -559,8 +559,9 @@ UTF-8 bytes. Bootstrap advertises runtime availability through
 selected effective adapter and sufficient prompt room. The catalog refreshes
 this availability on window focus. Unconfigured title generation clears deferred
 work. Title conversation SQL limits projected membership and nonempty payload
-rows to the input byte budget, newest first. Completed-turn dispatch retains
-identifiers; title preparation runs inside an admitted task.
+rows to 64, newest first, and each text payload to the input byte budget.
+Completed-turn dispatch retains identifiers; title preparation runs inside an
+admitted task.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete
