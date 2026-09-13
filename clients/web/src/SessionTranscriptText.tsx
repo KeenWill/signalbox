@@ -27,6 +27,7 @@ import {
   groupTranscriptTurns,
   type TranscriptTurn,
   toolContinuations,
+  toolEvidenceKey,
   turnSummaryParts,
 } from './session-timeline/turns'
 
@@ -496,7 +497,7 @@ function TranscriptWindow({
           readerAtEnd.current = atEnd
         }}
         followEnd={
-          (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after) &&
+          !pages?.at(-1)?.window.continuation_after &&
           Boolean(
             pages
               ?.at(-1)
@@ -639,7 +640,7 @@ function TurnContent({
   onExpand: (mode: DetailMode) => void
 }) {
   const [openTool, setOpenTool] = useState<string | null>(null)
-  const tool = turn.tools.find((entry) => entry.request_id === openTool)
+  const tool = turn.tools.find((entry) => toolEvidenceKey(entry) === openTool)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
     return page?.continuation ? (
@@ -654,7 +655,7 @@ function TurnContent({
         return (
           cursor?.type === 'more_body' &&
           ((item?.body.type === 'tool_batch' &&
-            item.body.tools.at(-1)?.request_id === tool.request_id) ||
+            item.body.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool))) ||
             toolContinuations(tool).some(
               ({ continuation }) =>
                 cursor.body.address.event_sequence === continuation.address.event_sequence &&
@@ -723,20 +724,20 @@ function TurnContent({
           <section
             className="session-tool-chips"
             aria-label="Tools used"
-            key={part.tools[0]?.request_id}
+            key={part.tools[0] ? toolEvidenceKey(part.tools[0]) : undefined}
           >
             {part.tools.map((entry) => (
               <button
                 type="button"
-                key={entry.request_id}
-                aria-expanded={detail === 'condensed' ? undefined : openTool === entry.request_id}
+                key={toolEvidenceKey(entry)}
+                aria-expanded={detail === 'condensed' ? undefined : openTool === toolEvidenceKey(entry)}
                 aria-label={
                   detail === 'condensed' ? `Open turn details for ${entry.tool_name}` : undefined
                 }
                 onClick={() =>
                   detail === 'condensed'
                     ? onExpand('full')
-                    : setOpenTool(openTool === entry.request_id ? null : entry.request_id)
+                    : setOpenTool(openTool === toolEvidenceKey(entry) ? null : toolEvidenceKey(entry))
                 }
               >
                 {entry.tool_name}
@@ -744,7 +745,7 @@ function TurnContent({
             ))}
             {detail === 'condensed' &&
               part.tools.map((entry) => (
-                <div className="session-tool-slot" key={entry.request_id}>
+                <div className="session-tool-slot" key={toolEvidenceKey(entry)}>
                   <ToolSummary
                     tool={entry}
                     turn={turn}
@@ -757,7 +758,7 @@ function TurnContent({
               ))}
             {detail === 'results' &&
               tool &&
-              part.tools.some((entry) => entry.request_id === tool.request_id) && (
+              part.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)) && (
                 <div className="session-tool-slot">
                   <ToolSummary
                     tool={tool}
@@ -794,12 +795,12 @@ function ToolSummary({
   const event = turn.events.findLast(
     (item) =>
       item.body.type === 'tool_batch' &&
-      item.body.tools.some((entry) => entry.request_id === tool.request_id),
+      item.body.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)),
   )
   const member =
     event?.body.type === 'tool_batch'
       ? (event.body.projected_member_index ?? 0) +
-        event.body.tools.findIndex((entry) => entry.request_id === tool.request_id)
+        event.body.tools.findIndex((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool))
       : 0
   const field = evidence?.failure_present ? 'tool_failure' : 'tool_result'
   const needsOutput = Boolean(
@@ -834,7 +835,7 @@ function ToolSummary({
   const body = output.data?.items[0]?.body
   const returned =
     body?.type === 'tool_batch'
-      ? body.tools.find((entry) => entry.request_id === tool.request_id)?.evidence
+      ? body.tools.find((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool))?.evidence
       : null
   const loaded = returned?.type === 'physical_attempt' ? returned : null
   const result = evidence?.result ?? loaded?.result

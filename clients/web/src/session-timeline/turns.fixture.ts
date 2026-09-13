@@ -1,6 +1,7 @@
 import type { Page } from '../../e2e/fontTest'
 import {
   detailItems,
+  detailExcerpt,
   detailLive,
   detailPage,
   detailSessionId,
@@ -152,4 +153,91 @@ export async function toolGoalApi(page: Page, type: 'blocked' | 'achieved') {
     })
   })
   return { prefix, suffix }
+}
+
+export function retriedToolItems(): WebSessionTimelineDetail[] {
+  const result = toolResultItem()
+  const input = detailItems[0]
+  const response = detailItems[3]
+  const closed = detailItems[4]
+  if (
+    result.body.type !== 'tool_batch' ||
+    input?.body.type !== 'user_input' ||
+    !response ||
+    !closed
+  )
+    throw new Error('Retry fixture missing')
+  const tool = result.body.tools[0]
+  if (tool?.evidence.type !== 'physical_attempt') throw new Error('Physical attempt missing')
+  const failure = detailExcerpt('Runner disconnected during the release check.')
+  const argumentsText = detailExcerpt('{"cmd":"release status --json"}')
+  const nextInput = detailExcerpt('Check the next release too.')
+  return [
+    input,
+    {
+      ...result,
+      address: { event_sequence: '2' },
+      projected_body_bytes: 128 + Number(argumentsText.total_bytes),
+      body: {
+        ...result.body,
+        tools: [
+          {
+            ...tool,
+            arguments: argumentsText,
+            evidence: { type: 'request_only' },
+          },
+        ],
+      },
+    },
+    {
+      ...result,
+      address: { event_sequence: '3' },
+      projected_body_bytes: 128 + Number(argumentsText.total_bytes) + Number(failure.total_bytes),
+      body: {
+        ...result.body,
+        tools: [
+          {
+            ...tool,
+            arguments: argumentsText,
+            evidence: {
+              ...tool.evidence,
+              state: 'known_failed',
+              cause: 'crash_lost',
+              result: null,
+              result_present: false,
+              failure,
+              failure_present: true,
+            },
+          },
+        ],
+      },
+    },
+    {
+      ...input,
+      address: { event_sequence: '4' },
+      projected_body_bytes: 128 + Number(nextInput.total_bytes),
+      body: {
+        ...input.body,
+        turn_id: '00000000-0000-0000-0000-000000000126',
+        text: nextInput,
+      },
+    },
+    {
+      ...result,
+      address: { event_sequence: '5' },
+      projected_body_bytes: result.projected_body_bytes + Number(argumentsText.total_bytes),
+      body: {
+        ...result.body,
+        tools: [
+          {
+            ...tool,
+            arguments: argumentsText,
+            evidence: { ...tool.evidence, attempt_id: '00000000-0000-0000-0000-000000000127' },
+          },
+        ],
+      },
+    },
+    { ...response, address: { event_sequence: '6' } },
+    { ...closed, address: { event_sequence: '7' } },
+  ]
 }

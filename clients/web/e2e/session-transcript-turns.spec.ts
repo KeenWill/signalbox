@@ -613,3 +613,76 @@ for (const type of ['blocked', 'achieved'] as const) {
     await expect(next).toHaveCount(0)
   })
 }
+
+test('keeps a failed physical attempt inspectable after the same request succeeds', async ({
+  page,
+}, testInfo) => {
+  const items = retriedToolItems()
+  await turnApi(page, undefined, items)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    const item = items.find((item) => item.address.event_sequence === url.searchParams.get('first'))
+    if (item?.body.type !== 'tool_batch')
+      return item ? route.fulfill({ json: detailPage([item]) }) : route.fallback()
+    const tool = item.body.tools[0]
+    if (!tool) throw new Error('Tool fixture missing')
+    const physical = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
+    const field = physical?.failure_present ? 'tool_failure' : 'tool_result'
+    const continued = url.searchParams.has('cursor_field')
+    const excerpt = continued ? (physical?.failure ?? physical?.result) : tool.arguments
+    const projected = {
+      ...item,
+      projected_body_bytes: 128 + Number(excerpt?.total_bytes ?? '0'),
+      body: {
+        ...item.body,
+        tools: [
+          {
+            ...tool,
+            arguments: continued ? null : tool.arguments,
+            evidence: physical
+              ? {
+                  ...physical,
+                  result: continued ? physical.result : null,
+                  failure: continued ? physical.failure : null,
+                }
+              : tool.evidence,
+          },
+        ],
+      },
+    }
+    return route.fulfill({
+      json: detailPage(
+        [projected],
+        physical && !continued
+          ? {
+              type: 'more_body',
+              body: { address: item.address, field, member_index: 0, offset_bytes: '0' },
+            }
+          : null,
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  await expect(chips).toHaveCount(2)
+  await chips.first().click()
+  await chips.last().click()
+  const slots = transcript.locator('.session-tool-slot')
+  await slots.first().getByRole('button', { name: 'Read more', exact: true }).click()
+  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(slots.first().getByRole('region', { name: 'Failure', exact: true })).toContainText(
+    'Runner disconnected during the release check.',
+  )
+  await expect(slots.last().getByRole('region', { name: 'Output', exact: true })).toContainText(
+    'passed',
+  )
+  await expect(transcript.locator('.session-message-text, .session-tool-slot')).toHaveText([
+    'Inspect the release status and retain the result.',
+    /Runner disconnected/,
+    'Check the next release too.',
+    /checks.*passed/,
+    'The release checks passed. Publishing remains unapproved.',
+  ])
+  await page.screenshot({ path: testInfo.outputPath('retried-tool.png') })
+})

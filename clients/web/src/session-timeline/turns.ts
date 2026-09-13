@@ -23,6 +23,20 @@ export function detailTurnId(item: WebSessionTimelineDetail): string | null {
   return null
 }
 
+export function toolEvidenceKey(tool: WebTimelineToolAttempt): string {
+  return tool.evidence.type === 'physical_attempt'
+    ? `${tool.request_id}:${tool.evidence.attempt_id}`
+    : tool.request_id
+}
+
+function projectedTool(tools: WebTimelineToolAttempt[], evidence: WebTimelineToolAttempt) {
+  return tools.find((tool) =>
+    evidence.evidence.type === 'request_only'
+      ? tool.request_id === evidence.request_id
+      : toolEvidenceKey(tool) === toolEvidenceKey(evidence),
+  )
+}
+
 export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[]): TranscriptTurn[] {
   const groups = new Map<string, TranscriptTurn>()
   for (const item of items) {
@@ -46,9 +60,22 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
       group.warnings.push(item)
     if (item.body.type === 'tool_batch') {
       for (const tool of item.body.tools) {
-        const index = group.tools.findIndex((known) => known.request_id === tool.request_id)
+        const index = group.tools.findIndex(
+          (known) =>
+            known.request_id === tool.request_id &&
+            (known.evidence.type === 'request_only' ||
+              tool.evidence.type === 'request_only' ||
+              toolEvidenceKey(known) === toolEvidenceKey(tool)),
+        )
         const previous = group.tools[index]
-        if (!previous) group.tools.push(tool)
+        if (!previous)
+          group.tools.push({
+            ...tool,
+            arguments:
+              tool.arguments ??
+              group.tools.find((known) => known.request_id === tool.request_id)?.arguments ??
+              null,
+          })
         else
           group.tools[index] = {
             ...tool,
@@ -151,10 +178,10 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
         assignedTools.set(group.id, assigned)
       }
       for (const evidence of item.body.tools) {
-        if (assigned.has(evidence.request_id)) continue
-        assigned.add(evidence.request_id)
-        const tool = group.tools.find((known) => known.request_id === evidence.request_id)
-        if (tool) segment.tools.push(tool)
+        const tool = projectedTool(group.tools, evidence)
+        if (!tool || assigned.has(toolEvidenceKey(tool))) continue
+        assigned.add(toolEvidenceKey(tool))
+        segment.tools.push(tool)
       }
     }
   }
@@ -173,10 +200,9 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
       parts.push({ kind: 'message', item })
     if (item.body.type !== 'tool_batch') continue
     for (const evidence of item.body.tools) {
-      if (seen.has(evidence.request_id)) continue
-      seen.add(evidence.request_id)
-      const tool = turn.tools.find((tool) => tool.request_id === evidence.request_id)
-      if (!tool) continue
+      const tool = projectedTool(turn.tools, evidence)
+      if (!tool || seen.has(toolEvidenceKey(tool))) continue
+      seen.add(toolEvidenceKey(tool))
       const last = parts.at(-1)
       if (last?.kind === 'tools') last.tools.push(tool)
       else parts.push({ kind: 'tools', tools: [tool] })
