@@ -398,8 +398,9 @@ test('reads tool arguments and output in conversation order with events hidden',
         ),
     )
     .toEqual(['1', '2', '4'])
-  await conversation.focus()
-  await expect(conversation).toBeFocused()
+  const transcript = conversation.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.focus()
+  await expect(transcript).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(toolRow(page)).toBeVisible()
   await expect(page.locator('.session-telemetry')).toBeVisible()

@@ -1,5 +1,6 @@
 import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
 import { expect, test } from './fontTest'
+import { detailItems, detailPage, resultCursor, toolResultItem } from './session-detail-fixture'
 
 test('scrolls a hundred thousand messages in both directions with bounded rows', async ({
   page,
@@ -371,4 +372,99 @@ test('follows workspace navigation and restores its saved transcript anchor', as
   }, transcriptSessionId)
   await page.reload()
   await expect(transcript.getByText('Message 500', { exact: true })).toBeVisible()
+})
+
+test('uses the scrolling transcript as the single conversation focus entry', async ({ page }) => {
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    return route.fulfill({ json: transcriptFixture(url) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  const transcript = conversation.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+  await expect(conversation).not.toHaveAttribute('tabindex', '0')
+  await expect(conversation.locator('[tabindex="0"]')).toHaveCount(1)
+  const latest = page.getByRole('button', { name: /Latest/ })
+  await page.getByRole('button', { name: 'Switch to focus layout', exact: true }).click()
+  await expect(transcript).toBeFocused()
+  await page.getByRole('button', { name: 'Switch to workbench layout', exact: true }).click()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await latest.focus()
+  await page.keyboard.press('j')
+  await expect(page.getByRole('grid', { name: 'Session timeline', exact: true })).toBeFocused()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
+  await page.getByRole('button', { name: 'Switch to focus layout', exact: true }).click()
+  await expect(transcript).toBeFocused()
+})
+
+test('keeps a terminal result reachable when its repeated arguments are hidden', async ({
+  page,
+}) => {
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.endsWith('/timeline')) {
+      const kind = 'tool_batch_transition'
+      const items = ['1', '2'].map((event_sequence) => ({
+        address: { event_sequence },
+        kind,
+        projected_structured_bytes: 64 + kind.length,
+      }))
+      return route.fulfill({
+        json: {
+          session_id: transcriptSessionId,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+          continuation_before: null,
+          continuation_after: null,
+        },
+      })
+    }
+    if (url.pathname.endsWith('/timeline-detail')) {
+      const item = detailItems[1]
+      if (item?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+      if (url.searchParams.get('cursor_field') === 'tool_result')
+        return route.fulfill({ json: detailPage([toolResultItem()]) })
+      if (url.searchParams.get('first') === '1')
+        return route.fulfill({
+          json: detailPage([
+            {
+              ...item,
+              address: { event_sequence: '1' },
+              body: {
+                ...item.body,
+                tools: item.body.tools.map((tool) => ({
+                  ...tool,
+                  evidence: { type: 'request_only' },
+                })),
+              },
+            },
+          ]),
+        })
+      return route.fulfill({ json: detailPage([item], resultCursor) })
+    }
+    return route.fulfill({ json: transcriptFixture(url, 2) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByRole('region', { name: 'Arguments', exact: true })).toHaveCount(1)
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(transcript.getByRole('region', { name: 'More message text' })).toContainText(
+    'passed',
+  )
 })
