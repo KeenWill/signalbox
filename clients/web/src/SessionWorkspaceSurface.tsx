@@ -5,6 +5,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -194,6 +195,10 @@ export function SessionWorkspaceSurface({
   const workspaceRef = useRef<HTMLElement>(null)
   const detailsRef = useRef<HTMLDetailsElement>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const eventWindowPending = useRef(false)
+  const eventScrollOffset = useRef(0)
+  const restoredEventOffset = useRef<number | null>(null)
+  const eventTouchPosition = useRef<number | null>(null)
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(
     initialAround ? { kind: 'around', eventSequence: initialAround } : null,
   )
@@ -355,6 +360,39 @@ export function SessionWorkspaceSurface({
     },
     [dispatch, onAroundConsumed, refetchSession, timelineRef],
   )
+  const loadEventNeighbor = async (direction: 'before' | 'after') => {
+    if (!showEvents || session.isFetching || eventWindowPending.current) return
+    const continuation =
+      direction === 'before'
+        ? displayedSession?.window.continuation_before
+        : displayedSession?.window.continuation_after
+    if (!continuation) return
+    eventWindowPending.current = true
+    ++boundaryRequest.current
+    manualAnchorRef.current = { kind: direction, eventSequence: continuation.event_sequence }
+    requestedSelection.current = undefined
+    onAroundConsumed()
+    try {
+      await refetchSession()
+    } finally {
+      eventWindowPending.current = false
+    }
+  }
+  const traverseEventEdge = (element: HTMLDivElement, direction: 'before' | 'after') => {
+    const remaining =
+      direction === 'before'
+        ? element.scrollTop
+        : element.scrollHeight - element.clientHeight - element.scrollTop
+    if (remaining <= 1) void loadEventNeighbor(direction)
+  }
+  useLayoutEffect(() => {
+    const element = timelineRef.current
+    if (!showEvents || !element) return
+    if (displayedSession?.anchor.kind === 'before') element.scrollTop = element.scrollHeight
+    if (displayedSession?.anchor.kind === 'after') element.scrollTop = 0
+    eventScrollOffset.current = element.scrollTop
+    restoredEventOffset.current = element.scrollTop
+  }, [displayedSession?.anchor, showEvents, timelineRef])
   const toggleSelectedExpansion = useCallback(() => {
     const eventSequence = store.getState().app.selectedTimeline
     if (eventSequence === null || !timelineIds.includes(eventSequence)) return
@@ -373,7 +411,11 @@ export function SessionWorkspaceSurface({
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
     const preferred =
-      displayedSession?.anchor.kind === 'around' ? displayedSession.anchor.eventSequence : null
+      displayedSession?.anchor.kind === 'around'
+        ? displayedSession.anchor.eventSequence
+        : displayedSession?.anchor.kind === 'before'
+          ? (timelineIds.at(-1) ?? null)
+          : null
     const requested = requestedSelection.current
     if (requested !== undefined && timelineIds.includes(requested)) {
       requestedSelection.current = undefined
@@ -440,8 +482,10 @@ export function SessionWorkspaceSurface({
   useEffect(() => {
     if (app.selectedTimeline !== null) {
       rowRefs.current.get(app.selectedTimeline)?.scrollIntoView({ block: 'nearest' })
+      eventScrollOffset.current = timelineRef.current?.scrollTop ?? 0
+      restoredEventOffset.current = eventScrollOffset.current
     }
-  }, [app.selectedTimeline])
+  }, [app.selectedTimeline, timelineRef])
 
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
@@ -764,7 +808,37 @@ export function SessionWorkspaceSurface({
             ref={showEvents ? timelineRef : undefined}
             role="grid"
             tabIndex={0}
-            onKeyDown={handleTimelineKeyDown}
+            aria-busy={session.isFetching}
+            onScroll={(event) => {
+              const element = event.currentTarget
+              const previous = eventScrollOffset.current
+              eventScrollOffset.current = element.scrollTop
+              if (element.scrollTop === restoredEventOffset.current) return
+              restoredEventOffset.current = null
+              if (element.scrollTop !== previous)
+                traverseEventEdge(element, element.scrollTop < previous ? 'before' : 'after')
+            }}
+            onWheel={(event) => {
+              if (event.deltaY !== 0)
+                traverseEventEdge(event.currentTarget, event.deltaY < 0 ? 'before' : 'after')
+            }}
+            onTouchStart={(event) => {
+              eventTouchPosition.current = event.touches[0]?.clientY ?? null
+            }}
+            onTouchMove={(event) => {
+              const position = event.touches[0]?.clientY
+              const previous = eventTouchPosition.current
+              eventTouchPosition.current = position ?? null
+              if (position !== undefined && previous !== null && position !== previous)
+                traverseEventEdge(event.currentTarget, position > previous ? 'before' : 'after')
+            }}
+            onKeyDown={(event) => {
+              if (event.target === event.currentTarget) {
+                if (event.key === 'PageUp') traverseEventEdge(event.currentTarget, 'before')
+                if (event.key === 'PageDown') traverseEventEdge(event.currentTarget, 'after')
+              }
+              handleTimelineKeyDown(event)
+            }}
           >
             {items.map((item) => {
               const id = item.address.event_sequence

@@ -585,7 +585,13 @@ second before each subsequent resynchronization; leaving the session cancels the
 wait. The session synchronization service owns the selected stream and publishes
 its phase, monotonic cursor, and live projection to application state. Only the
 open workspace requests a follow subscription, and closing it cancels that
-subscription. Transcript text reads require the bounded timeline-detail
+subscription. The Events grid loads the neighboring keyset window when the
+reader scrolls to either edge. Wheel, touch, and Page Up/Down gestures can
+continue through windows that fit without a scrollbar. It displays at most 80
+headers and 65,536 projected structured bytes, clamped to the advertised limits,
+and selects the nearest boundary row in the new window. Repeated edge gestures
+share the pending read; restoring a window's scroll position does not load
+another window. Transcript text reads require the bounded timeline-detail
 capability. The virtual transcript retains three neighboring keyset windows,
 each with at most eight headers and a shared detail budget of eight items and
 65,536 projected bytes, clamped to the advertised limits. Each header receives
