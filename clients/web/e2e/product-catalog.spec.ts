@@ -1521,6 +1521,68 @@ for (const cancelKey of ['Enter', 'Escape']) {
   })
 }
 
+for (const destination of ['workspace', 'next page'] as const) {
+  test(`keeps a pending suggestion gated after returning from ${destination}`, async ({
+    page,
+  }, testInfo) => {
+    const problems = watchBrowser(page)
+    await useCatalogFixture(page)
+    const pending = Promise.withResolvers<void>()
+    let requests = 0
+    await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, async (route) => {
+      requests += 1
+      const title = requests === 1 ? 'Late generated title' : 'Fresh generated title'
+      await pending.promise
+      await route.fulfill({ json: { title } })
+    })
+    await page.goto('/sessions')
+    const suggest = page.getByRole('button', {
+      name: `Suggest a name for session ${firstSessionId}`,
+      exact: true,
+    })
+    const row = page.getByRole('button', { name: /^Release verification/ })
+    try {
+      await suggest.click()
+      await expect.poll(() => requests).toBe(1)
+      if (destination === 'workspace') {
+        await row.click()
+        await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
+      } else {
+        await page.getByRole('button', { name: 'Next page', exact: true }).click()
+        await expect(page).toHaveURL(/afterSession/)
+      }
+      await expect(suggest).toHaveCount(0)
+      await page.getByRole('link', { name: 'Sessions', exact: true }).click()
+      await expect(suggest).toBeDisabled()
+      await expect(
+        page.getByRole('button', {
+          name: `Suggest a name for session ${secondSessionId}`,
+          exact: true,
+        }),
+      ).toBeEnabled()
+      await row.focus()
+      await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+      const palette = page.getByRole('dialog', { name: 'Command palette' })
+      await expect(palette.getByRole('button', { name: /Suggest a name/ })).toHaveCount(0)
+      await page.keyboard.press('Escape')
+      expect(requests).toBe(1)
+      await page.screenshot({ path: testInfo.outputPath('remounted-suggestion-pending.png') })
+      await page.setViewportSize({ width: 390, height: 844 })
+      await page.screenshot({ path: testInfo.outputPath('remounted-suggestion-pending-phone.png') })
+      pending.resolve()
+      await expect(suggest).toBeEnabled()
+      await expect(page.getByText('Late generated title', { exact: true })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Accept', exact: true })).toHaveCount(0)
+      await suggest.click()
+      await expect(page.getByText('Fresh generated title', { exact: true })).toBeVisible()
+      expect(requests).toBe(2)
+      expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+    } finally {
+      pending.resolve()
+    }
+  })
+}
+
 test('suggests a name for the keyboard-selected session through the command palette', async ({
   page,
 }) => {

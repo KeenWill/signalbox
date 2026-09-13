@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
@@ -121,7 +121,13 @@ const SessionMetadata = ({
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [suggesting, setSuggesting] = useState(false)
-  const [suggestionPending, setSuggestionPending] = useState(false)
+  const suggestionKey = ['production', 'session-title-suggestion', summary.session_id]
+  const suggestionPending = useIsMutating({ mutationKey: suggestionKey, exact: true }) > 0
+  const suggestionMutation = useMutation({
+    mutationKey: suggestionKey,
+    mutationFn: suggestSessionTitle,
+    retry: false,
+  })
   const [suggestion, setSuggestion] = useState<string | null>(null)
   const suggestionRequest = useRef<{ dismissed: boolean } | null>(null)
   const suggestButton = useRef<HTMLButtonElement>(null)
@@ -178,15 +184,14 @@ const SessionMetadata = ({
     setEditing(false)
   }
   const suggest = async () => {
-    if (suggestionRequest.current) return
+    if (queryClient.isMutating({ mutationKey: suggestionKey, exact: true }) > 0) return
     const request = { dismissed: false }
     suggestionRequest.current = request
     returnToSuggestion.current = true
     setError(null)
     setSuggesting(true)
-    setSuggestionPending(true)
     try {
-      const result = await suggestSessionTitle(summary.session_id)
+      const result = await suggestionMutation.mutateAsync(summary.session_id)
       if (suggestionRequest.current !== request || request.dismissed) return
       setTitle(result.title)
       setSuggestion(result.title)
@@ -198,7 +203,6 @@ const SessionMetadata = ({
     } finally {
       if (suggestionRequest.current === request) {
         suggestionRequest.current = null
-        setSuggestionPending(false)
         setSuggesting(false)
       }
     }
