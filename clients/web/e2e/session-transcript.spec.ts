@@ -21,14 +21,18 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
   await transcript.hover()
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
   for (let index = 0; index < 5; index++) {
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    const previousReads = reads.filter((anchor) => anchor === 'before').length
     await transcript.evaluate((element) => {
       element.scrollTop = 0
     })
     await page.mouse.wheel(0, -900)
     await expect
       .poll(() => reads.filter((anchor) => anchor === 'before').length)
-      .toBeGreaterThan(index)
+      .toBeGreaterThan(previousReads)
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
   }
   expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
   expect(Number(await transcript.getAttribute('data-mounted-rows'))).toBeLessThanOrEqual(24)
@@ -295,7 +299,12 @@ for (const hiddenTail of [false, true]) {
       await transcript.hover()
       await page.mouse.wheel(0, -900)
       await expect.poll(() => anchors).toContain('before')
-      await expect.poll(() => transcript.getAttribute('data-total-loaded')).toBe('16')
+      await expect
+        .poll(async () => Number(await transcript.getAttribute('data-total-loaded')))
+        .toBeGreaterThanOrEqual(16)
+      await expect(
+        page.getByRole('region', { name: 'Transcript text', exact: true }),
+      ).toHaveAttribute('aria-busy', 'false')
       await transcript.evaluate((element) => {
         element.scrollTop = element.scrollHeight
       })
@@ -468,3 +477,74 @@ test('keeps a terminal result reachable when its repeated arguments are hidden',
     'passed',
   )
 })
+
+for (const [itemLimit, byteLimit, expectedReads] of [
+  [1, 65536, 1],
+  [10, 65536, 10],
+  [128, 1024, 7],
+] as const) {
+  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget`, async ({
+    page,
+  }) => {
+    const reads: URL[] = []
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url)
+      if (url.pathname === '/api/bootstrap') {
+        const bootstrap =
+          payload as typeof import('../src/product.fixture').webContractBootstrapFixture
+        return route.fulfill({
+          json: {
+            ...bootstrap,
+            limits: {
+              ...bootstrap.limits,
+              max_timeline_detail_items: itemLimit,
+              max_timeline_detail_bytes: byteLimit,
+            },
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline-detail')) {
+        reads.push(url)
+        const detail =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+        return route.fulfill({
+          json: {
+            ...detail,
+            projected_body_bytes: 128,
+            items: detail.items.map((item) => ({
+              ...item,
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            })),
+          },
+        })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    await expect.poll(() => reads.length).toBe(expectedReads)
+    const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+    await expect(
+      surface.getByText('No messages in this part of the conversation. Scroll up to keep looking.'),
+    ).toBeVisible()
+    expect(reads).toHaveLength(expectedReads)
+    expect(reads.length * 128).toBeLessThanOrEqual(byteLimit)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await transcript.hover()
+    await page.mouse.wheel(0, -900)
+    await expect.poll(() => reads.length).toBeGreaterThan(expectedReads)
+  })
+}

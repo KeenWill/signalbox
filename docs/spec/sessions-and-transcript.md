@@ -534,21 +534,27 @@ wait. The session synchronization service owns the selected stream and publishes
 its phase, monotonic cursor, and live projection to application state. Only the
 open workspace requests a follow subscription, and closing it cancels that
 subscription. Transcript text reads require the bounded timeline-detail
-capability and replace pages of at most eight items and 65,536 projected bytes,
-clamped to the advertised limits, with exact byte accounting and continuation
-matching. Pagination resets when the session, window bounds, or observation
-cursor changes; the response bound includes their attachment references. Text
-pages advance past metadata-only detail records automatically within the
-workspace record budget and projected-byte page budget; discarded records
-consume both budgets. The scan and retained-content item budgets are clamped
-independently to the advertised limit. The continuation remains available when
-either budget is exhausted. An empty detail page stops the scan and preserves
-its unreturned-item continuation. The conversation shows user and assistant text
-and attachment references, tool arguments and output, and unsuccessful turn
-outcomes in event order. Repeated terminal outcomes for the same turn and cause
-appear once. Bookkeeping is hidden until Events is selected. The last bounded
-raw detail page is retained separately from conversation content to validate
-body continuations.
+capability. The virtual transcript retains three neighboring keyset windows,
+each with at most eight headers and a shared detail budget of eight items and
+65,536 projected bytes, clamped to the advertised limits. Each header receives
+an equal share of the detail budget; unread body continuations remain available
+on demand. Attachment references are included in the response bound. Scrolling
+loads earlier or later windows. Session and anchor changes reset the view;
+observation refreshes retain visible text while rereading loaded windows, or
+refresh from latest when following the live end.
+
+Windows advance past metadata-only detail records automatically within the
+workspace record budget and projected-byte budget. All returned headers, detail
+items and projected bytes are charged, including discarded records. The scan
+item budget is clamped to the advertised detail limit; each automatic read uses
+only the remaining scan allowance. Scanning stops at a visible item, a detail
+continuation, or an exhausted budget. An empty detail page preserves its
+unreturned-item continuation. Scrolling again starts a fresh bounded scan using
+the timeline continuation. The conversation shows user and assistant text and
+attachment references, tool arguments and output, and unsuccessful turn outcomes
+in event order. Repeated terminal outcomes for the same turn and cause appear
+once. Bookkeeping is hidden until Events is selected. Raw detail pages remain
+available to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

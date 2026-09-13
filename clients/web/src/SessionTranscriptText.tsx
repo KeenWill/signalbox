@@ -12,7 +12,12 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
-import { TRANSCRIPT_RETAINED_WINDOWS, TranscriptWindowReader } from './session-timeline/transcript'
+import {
+  TRANSCRIPT_RETAINED_WINDOWS,
+  TRANSCRIPT_WINDOW_BYTES,
+  type TranscriptReadAnchor,
+  TranscriptWindowReader,
+} from './session-timeline/transcript'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
@@ -118,7 +123,7 @@ function TranscriptWindow({
   anchor,
 }: SessionTranscriptTextProps) {
   const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
-  const initialAnchor = useMemo<SessionWindowAnchor>(
+  const initialAnchor = useMemo<TranscriptReadAnchor>(
     () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
     [eventSequence, anchor],
   )
@@ -128,14 +133,16 @@ function TranscriptWindow({
   )
   const queries = useQueryClient()
   const readerAtEnd = useRef(initialAnchor.kind === 'latest')
+  const automaticLimits = useRef<SessionTranscriptLimits | undefined>(undefined)
   const transcript = useInfiniteQuery({
     queryKey,
     initialPageParam: initialAnchor,
     queryFn: ({ pageParam, signal }) => reader.read(pageParam, limits, signal),
-    getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
+    getPreviousPageParam: (page): TranscriptReadAnchor | undefined =>
       page.window.continuation_before
         ? {
             kind: 'before',
+            detailLimits: automaticLimits.current,
             eventSequence: page.window.continuation_before.event_sequence,
           }
         : undefined,
@@ -213,7 +220,7 @@ function TranscriptWindow({
     [visible, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
-  const emptyScanned = useRef({ count: 0, first: '' })
+  const emptyScanned = useRef({ headers: 0, items: 0, bytes: 0, first: '' })
   useEffect(() => {
     const oldest = pages?.[0]
     if (
@@ -221,7 +228,7 @@ function TranscriptWindow({
         (page) => page.continuation || page.items.some((item) => visible.includes(item)),
       )
     ) {
-      emptyScanned.current = { count: 0, first: '' }
+      emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
       return
     }
     if (transcript.isFetching || transcript.isError || !transcript.hasPreviousPage) return
@@ -229,14 +236,35 @@ function TranscriptWindow({
     const first = window?.items[0]?.address.event_sequence
     if (first && first !== emptyScanned.current.first) {
       emptyScanned.current = {
-        count: emptyScanned.current.count + (window?.items.length ?? 0),
+        headers: emptyScanned.current.headers + (window?.items.length ?? 0),
+        items:
+          emptyScanned.current.items +
+          (oldest?.details.reduce((sum, page) => sum + page.items.length, 0) ?? 0),
+        bytes:
+          emptyScanned.current.bytes +
+          (oldest?.details.reduce((sum, page) => sum + page.projected_body_bytes, 0) ?? 0),
         first,
       }
     }
-    if (emptyScanned.current.count >= SESSION_WINDOW_ITEMS) return
-    void transcript.fetchPreviousPage()
+    const itemsLeft = Math.min(
+      SESSION_WINDOW_ITEMS - emptyScanned.current.headers,
+      Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items) - emptyScanned.current.items,
+    )
+    const bytesLeft =
+      Math.min(TRANSCRIPT_WINDOW_BYTES, limits.max_timeline_detail_bytes) -
+      emptyScanned.current.bytes
+    if (itemsLeft < 1 || bytesLeft < limits.min_timeline_detail_bytes) return
+    automaticLimits.current = {
+      ...limits,
+      max_timeline_detail_items: itemsLeft,
+      max_timeline_detail_bytes: bytesLeft,
+    }
+    void transcript.fetchPreviousPage().finally(() => {
+      automaticLimits.current = undefined
+    })
   }, [
     visible,
+    limits,
     pages,
     transcript.isFetching,
     transcript.isError,
@@ -244,7 +272,11 @@ function TranscriptWindow({
     transcript.fetchPreviousPage,
   ])
   return (
-    <section className="session-transcript-text" aria-label="Transcript text">
+    <section
+      className="session-transcript-text"
+      aria-label="Transcript text"
+      aria-busy={transcript.isFetching}
+    >
       {transcript.isPending && <p role="status">Loading transcript…</p>}
       {transcript.isError && (
         <p role="alert">
@@ -280,8 +312,10 @@ function TranscriptWindow({
         }
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
-          if (direction === 'before' && transcript.hasPreviousPage)
+          if (direction === 'before' && transcript.hasPreviousPage) {
+            emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
             void transcript.fetchPreviousPage()
+          }
           if (direction === 'after' && transcript.hasNextPage) void transcript.fetchNextPage()
         }}
         renderRow={(index, measure, style) => {
