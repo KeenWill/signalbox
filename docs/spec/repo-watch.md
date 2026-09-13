@@ -64,7 +64,7 @@ conflicts. The example `merge-forward` template finishes without edits,
 publication or a pull request comment unless the metadata tool reports
 `mergeable: false`.
 
-The module schema contains eighteen tables:
+The module schema retains these projections and records:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the

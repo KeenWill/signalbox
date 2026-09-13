@@ -397,7 +397,10 @@ fn observation_identity_client(requests: Arc<std::sync::Mutex<Vec<String>>>) -> 
                         serde_json::json!({"data":{"viewer":{"login":"daemon"}}})
                     } else if body["query"].as_str().expect("query").contains("RequiredChecks") {
                         let head = &pages["/repos/example/project/pulls/1"].0["head"]["sha"];
-                        serde_json::json!({"data":{"repository":{"pullRequest":{"headRefOid":head,"commits":{"nodes":[{"commit":{"oid":head,"statusCheckRollup":null}}]}}}}})
+                        serde_json::json!({"data":{"repository":{"pullRequest":{
+                            "headRefOid":head,
+                            "commits":{"nodes":[{"commit":{"oid":head,"statusCheckRollup":null}}]}
+                        }}}})
                     } else {
                         serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}})
                     }
@@ -551,5 +554,84 @@ async fn a_new_polling_account_replaces_the_ready_identity_without_reload()
     );
     pool.close().await;
     core.close().await;
+    Ok(())
+}
+
+async fn review_payload_migration(
+    observer_installed: bool,
+) -> Result<Option<String>, Box<dyn Error>> {
+    const PREPARATION: i64 = 202609120620;
+    let previous = sqlx::migrate::Migrator {
+        migrations: signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| {
+                migration.version < PREPARATION
+                    || (observer_installed && migration.version != PREPARATION)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    let (_container, core, url) = unmigrated_postgres().await?;
+    previous.run(&core).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let broken_json: &[u8] = b"{";
+    let broken_utf8: &[u8] = &[0xff];
+    let valid: &[u8] = br#"{"kind":{"reviewer":"daemon"}}"#;
+    for (ordinal, payload) in [(1_i64, broken_json), (2, broken_utf8), (3, valid)] {
+        sqlx::query("INSERT INTO gh_event(event_id,content_identity,repository,event_kind,target_kind,pull_request_number,normalized_payload,recorded_at,frontier_generation,event_ordinal,producer,repository_event_ordinal) VALUES ($1,$2,'migration/project','review_submitted','pull_request',1,$3,now(),1,$4,'poll',$4)")
+            .bind(Uuid::new_v4()).bind(Sha256::digest(payload).to_vec()).bind(payload).bind(Decimal::from(ordinal)).execute(&pool).await?;
+    }
+    migrate(&core).await?;
+    let retained: Vec<(Vec<u8>, Option<String>)> = sqlx::query_as(
+        "SELECT normalized_payload,decode_error FROM gh_event ORDER BY repository_event_ordinal",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let error = "repository-watch retained event is invalid".to_owned();
+    assert_eq!(
+        retained,
+        vec![
+            (broken_json.to_vec(), Some(error.clone())),
+            (broken_utf8.to_vec(), Some(error)),
+            (valid.to_vec(), None)
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gh_readable_event")
+            .fetch_one(&pool)
+            .await?,
+        1
+    );
+    let actor: Option<String> = sqlx::query_scalar(
+        "SELECT source_review_actor FROM gh_event WHERE repository_event_ordinal=3",
+    )
+    .fetch_one(&pool)
+    .await?;
+    pool.close().await;
+    core.close().await;
+    Ok(actor)
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn malformed_review_payloads_do_not_abort_observer_identity_migration()
+-> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        review_payload_migration(false).await?,
+        Some("daemon".to_owned())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn review_payload_quarantine_preserves_an_already_applied_observer_migration()
+-> Result<(), Box<dyn Error>> {
+    assert_eq!(review_payload_migration(true).await?, None);
     Ok(())
 }
