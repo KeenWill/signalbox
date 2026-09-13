@@ -26,7 +26,7 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
-import { GoalEventDetail } from './SessionItemDetail'
+import { detailContent, GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import {
   detailExcerptAt,
@@ -615,20 +615,12 @@ function TranscriptWindow({
     },
     [allTurns],
   )
-  const focusTurnHeading = useCallback((turn: TranscriptTurn) => {
-    requestAnimationFrame(() => {
-      const rows = Array.from(
-        surface.current?.querySelectorAll<HTMLElement>('[data-transcript-turn]') ?? [],
-      )
-      const target =
-        rows.find((row) => row.dataset.transcriptTurn === turn.id) ??
-        rows.find((row) => turn.turnId && row.dataset.turnId === turn.turnId)
-      const control =
-        target?.querySelector<HTMLButtonElement>('.session-turn-heading button') ??
-        surface.current?.querySelector<HTMLInputElement>('input[type="radio"]:checked')
-      control?.focus()
-    })
-  }, [])
+  const [headingToFocus, setHeadingToFocus] = useState<TranscriptTurn | null>(null)
+  const focusTurnHeading = useCallback((turn: TranscriptTurn) => setHeadingToFocus(turn), [])
+  const survivingTurn = headingToFocus
+    ? (turns.find((turn) => turn.id === headingToFocus.id) ??
+      turns.find((turn) => headingToFocus.turnId && turn.turnId === headingToFocus.turnId))
+    : undefined
   const previousDetailRevision = useRef(detailRevision)
   useEffect(() => {
     if (previousDetailRevision.current === detailRevision) return
@@ -811,6 +803,14 @@ function TranscriptWindow({
         </p>
       )}
       <VirtualTranscript
+        revealId={survivingTurn?.id}
+        onReveal={() => {
+          const target = Array.from(
+            surface.current?.querySelectorAll<HTMLElement>('[data-transcript-turn]') ?? [],
+          ).find((row) => row.dataset.transcriptTurn === survivingTurn?.id)
+          target?.querySelector<HTMLButtonElement>('.session-turn-heading button')?.focus()
+          setHeadingToFocus(null)
+        }}
         scrollRef={scrollRef}
         ids={ids}
         loadingLater={transcript.isFetchingNextPage}
@@ -1285,11 +1285,16 @@ function EventDetail({
                   </section>
                 )}
               </>
-            ) : (
+            ) : ['user_input', 'model_call', 'tool_batch'].includes(item.body.type) ? (
               <BodyText body={item.body} showAttachments={index === 0} />
-            )}
-            {!['user_input', 'model_call', 'tool_batch'].includes(item.body.type) && (
-              <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
+            ) : (
+              <>
+                {detailContent(item.body)}
+                <details>
+                  <summary>Raw event data</summary>
+                  <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
+                </details>
+              </>
             )}
           </div>
         ),

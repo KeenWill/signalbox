@@ -92,7 +92,12 @@ const effectiveSettingsFacts = (
   ],
 ]
 
-const boundedSettingEvidence = (value: unknown): ReactNode => <code>{JSON.stringify(value)}</code>
+const boundedSettingEvidence = (value: unknown): ReactNode => (
+  <details>
+    <summary>Raw setting data</summary>
+    <code>{JSON.stringify(value)}</code>
+  </details>
+)
 
 const TextDetail = ({ label, excerpt }: { label: string; excerpt: TextExcerpt }) => {
   return (
@@ -272,7 +277,7 @@ const unreachableBody = (body: never): never => {
   throw new TypeError(`unhandled generated timeline detail body: ${String(body)}`)
 }
 
-const detailContent = (body: DetailBody): ReactNode => {
+export const detailContent = (body: DetailBody): ReactNode => {
   switch (body.type) {
     case 'session_state':
       return <Facts facts={[['State', enumLabel(body.state)]]} />

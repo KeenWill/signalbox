@@ -138,15 +138,11 @@ test('persists levels and reads bounded turn detail', async ({ page }, testInfo)
   await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect.poll(() => turnReads.length).toBeGreaterThan(0)
   await expect(
-    transcript.getByText('Publishing needs an operator decision during the release window.', {
-      exact: false,
-    }),
+    transcript.getByRole('region', { name: 'Approval rationale', exact: true }),
   ).toBeVisible()
   await page.getByRole('radio', { name: 'Summary', exact: true }).check()
   await expect(
-    transcript.getByText('Publishing needs an operator decision during the release window.', {
-      exact: false,
-    }),
+    transcript.getByRole('region', { name: 'Approval rationale', exact: true }),
   ).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('turn-levels.png') })
 })
@@ -2239,3 +2235,150 @@ for (const [state, label] of [
     await page.screenshot({ path: testInfo.outputPath(`${state}-tool-state.png`) })
   })
 }
+
+for (const close of ['button', 'Escape']) {
+  test(`restores an unmounted turn heading after collapsing a distant segment by ${close}`, async ({
+    page,
+  }) => {
+    const source = detailItems[0]
+    const tool = detailItems[1]
+    if (source?.body.type !== 'user_input' || !tool) throw new Error('Turn fixture missing')
+    const originalTurnId = source.body.turn_id
+    const entries = Array.from({ length: 24 }, (_, index) => {
+      const address = { event_sequence: String(index + 1) }
+      if (index === 23) return { ...tool, address }
+      const text = detailExcerpt(`Message ${index + 1}`)
+      return {
+        ...source,
+        address,
+        projected_body_bytes: 128 + Number(text.total_bytes),
+        body: {
+          ...source.body,
+          turn_id:
+            index === 0
+              ? originalTurnId
+              : `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+          text,
+          attachments: [],
+        },
+      }
+    })
+    await turnApi(page, undefined, entries)
+    await page.route('**/timeline?**', (route) => {
+      const window = transcriptFixture(
+        new URL(route.request().url()),
+        24,
+      ) as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind = item.address.event_sequence === '24' ? tool.kind : item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          session_id: detailSessionId,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    for (const expected of ['Message 9', 'Message 1']) {
+      await expect
+        .poll(async () => {
+          await transcript.evaluate((element) => {
+            element.scrollTop = 0
+            element.dispatchEvent(new Event('scroll'))
+          })
+          return transcript.getByText(expected, { exact: true }).isVisible()
+        })
+        .toBe(true)
+    }
+    const first = transcript
+      .locator('[data-transcript-turn]')
+      .filter({ has: page.getByText('Message 1', { exact: true }) })
+    await first.getByRole('button', { name: 'Open turn details', exact: true }).click()
+    await transcript.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    const last = transcript
+      .locator('[data-transcript-turn]')
+      .filter({ has: page.locator('[data-event-sequence="24"]') })
+    const collapse = last.getByRole('button', { name: 'Collapse turn', exact: true })
+    await expect(collapse).toBeVisible()
+    await expect(first).toHaveCount(0)
+    if (close === 'Escape') await collapse.press('Escape')
+    else await collapse.click()
+    await expect(
+      first.getByRole('button', { name: 'Open turn details', exact: true }),
+    ).toBeFocused()
+    await expect(first).toBeInViewport()
+    await expect(last).toHaveCount(0)
+    await expect(page.getByRole('radio', { name: 'Summary', exact: true })).toBeChecked()
+  })
+}
+
+test('All details renders typed facts and requires explicit raw disclosures', async ({ page }) => {
+  const input = detailItems[0]
+  const approval = detailItems[2]
+  if (input?.body.type !== 'user_input' || !approval) throw new Error('Turn fixture missing')
+  const overlay = {
+    reasoning_level: { kind: 'inherit' },
+    fast_mode: { kind: 'inherit' },
+    service_tier: { kind: 'inherit' },
+  } as const
+  const settings: WebSessionTimelineDetail = {
+    address: { event_sequence: '4' },
+    kind: 'turn_model_settings_resolved',
+    projected_body_bytes: 128,
+    body: {
+      type: 'model_settings',
+      detail: {
+        type: 'turn_resolved',
+        accepted_input_id: detailSessionId,
+        turn_id: input.body.turn_id,
+        defaults_version: '1',
+        requested_model: { kind: 'direct', selection_id: detailSessionId },
+        selected_direct_id: detailSessionId,
+        per_call_override: overlay,
+        settings: {
+          precedence: {
+            per_call: overlay,
+            session: overlay,
+            profile: overlay,
+            global_default: overlay,
+          },
+          effective: { reasoning_level: null, fast_mode: 'disabled', service_tier: null },
+        },
+        adjustments: [],
+      },
+    },
+  }
+  await turnApi(page, undefined, [input, approval, settings])
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const decision = transcript.locator('[data-event-sequence="3"]')
+  await expect(decision.getByText('Decision', { exact: true })).toBeVisible()
+  await expect(decision.getByText('Deny', { exact: true })).toBeVisible()
+  const model = transcript.locator('[data-event-sequence="4"]')
+  await expect(model.getByText('Reasoning level', { exact: true })).toBeVisible()
+  await expect(model.getByText('Disabled', { exact: true })).toBeVisible()
+  await expect(transcript.locator('.session-event-facts:visible, code:visible')).toHaveCount(0)
+  await decision.getByText('Raw event data', { exact: true }).click()
+  await expect(decision.locator('.session-event-facts')).toBeVisible()
+  await expect(decision.locator('.session-event-facts')).toContainText(
+    '"approval_judge_escalated": true',
+  )
+  await decision.getByText('Raw event data', { exact: true }).click()
+  await expect(decision.locator('.session-event-facts')).toBeHidden()
+  const rawSetting = model.getByText('Raw setting data', { exact: true }).first()
+  await rawSetting.click()
+  await expect(model.locator('code:visible')).toHaveCount(1)
+  await rawSetting.click()
+  await expect(transcript.locator('.session-event-facts:visible, code:visible')).toHaveCount(0)
+})

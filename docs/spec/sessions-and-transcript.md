@@ -581,9 +581,9 @@ Refreshes continue retaining current text through a failed reread. The
 session-scoped reader rejects detail kinds that contradict their timeline
 headers and compares immutable detail facts, including identities, attachment
 references and excerpt byte totals and overlapping excerpt content, across
-initial reads and expanded event rereads. It retains facts for at most 24 recently read event addresses;
-changed excerpt lengths under different read budgets preserve compatible
-prefixes and retain the longest checked excerpt.
+initial reads and expanded event rereads. It retains facts for at most 24
+recently read event addresses; changed excerpt lengths under different read
+budgets preserve compatible prefixes and retain the longest checked excerpt.
 
 Windows advance past metadata-only detail records, including goal-only tool
 batches hidden by the selected conversation summary, in the requested direction
@@ -614,36 +614,38 @@ message when its completed-turn closure is not loaded. Distinct physical tool
 attempts remain independently inspectable in event order even when they share
 one request. A failed attempt remains labeled as failed with its available cause
 even when it has no failure excerpt. Physical attempts without a result or
-failure excerpt show their current state. Later batch members load on demand at the
-batch position as separate tool chips. A cursor advancing to another member is
-exposed outside the preceding tool disclosure; same-member argument, output and
-failure fields remain inside that disclosure. Goal-text cursors do not belong to
-tool disclosures, including cursors returned after reading tool text; nested
-reading controls stop before a goal field. Provider failures remain visible at
-their event position, including before a later successful retry. Tool output
-reads use the matching physical attempt in the retained detail pages, including
-later turn segments. Expanded tool evidence stays beside its originating chip
-before later messages. Repeated terminal outcomes for the same turn and cause
-appear once at their first chronological position. New browser profiles start in
-Summary; stored level choices are preserved. Applying a level command clears
-local turn overrides and opened continuation readers even when that level is
-already selected. Tools shows tool chips with argument and output summaries. All
-details exposes every loaded event, including bookkeeping, independently of the
-Events control. Tool-produced goal events show their status and bounded text
-alongside tools. Turn details use the bounded per-turn detail route. Explicit
-continuation reads retain earlier opened chunks until the detail view closes or
-leaves the retained transcript. The last bounded raw detail page remains
-available to validate each body continuation. Individual turns can expand
-independently of the persisted level. Escape inside a continuation reader closes
-that reader and restores its Read more control. Otherwise, Escape collapses the
-focused expanded turn and restores a surviving heading control for that turn
-before a subsequent Escape closes the workspace. Header disclosures handle
-Escape only while focus is inside them. The scrolling transcript owns the
-conversation focus entry and command target; the enclosing section adds no focus
-stop. Invalid event-link addresses outside the unsigned 64-bit range are
-ignored. When a turn is opened, retained events without a turn identity are
-associated only by an exact per-turn route match with unchanged immutable facts;
-events skipped by that route remain outside the selected turn.
+failure excerpt show their current state. Later batch members load on demand at
+the batch position as separate tool chips. A cursor advancing to another member
+is exposed outside the preceding tool disclosure; same-member argument, output
+and failure fields remain inside that disclosure. Goal-text cursors do not
+belong to tool disclosures, including cursors returned after reading tool text;
+nested reading controls stop before a goal field. Provider failures remain
+visible at their event position, including before a later successful retry. Tool
+output reads use the matching physical attempt in the retained detail pages,
+including later turn segments. Expanded tool evidence stays beside its
+originating chip before later messages. Repeated terminal outcomes for the same
+turn and cause appear once at their first chronological position. New browser
+profiles start in Summary; stored level choices are preserved. Applying a level
+command clears local turn overrides and opened continuation readers even when
+that level is already selected. Tools shows tool chips with argument and output
+summaries. All details exposes every loaded event, including bookkeeping,
+independently of the Events control. Typed facts and text render by default; raw
+event and setting JSON requires an explicit disclosure. Tool-produced goal
+events show their status and bounded text alongside tools. Turn details use the
+bounded per-turn detail route. Explicit continuation reads retain earlier opened
+chunks until the detail view closes or leaves the retained transcript. The last
+bounded raw detail page remains available to validate each body continuation.
+Individual turns can expand independently of the persisted level. Escape inside
+a continuation reader closes that reader and restores its Read more control.
+Otherwise, Escape collapses the focused expanded turn and reveals and focuses a
+surviving heading for that turn, including a retained segment outside the
+virtual range, before a subsequent Escape closes the workspace. Header
+disclosures handle Escape only while focus is inside them. The scrolling
+transcript owns the conversation focus entry and command target; the enclosing
+section adds no focus stop. Invalid event-link addresses outside the unsigned
+64-bit range are ignored. When a turn is opened, retained events without a turn
+identity are associated only by an exact per-turn route match with unchanged
+immutable facts; events skipped by that route remain outside the selected turn.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
