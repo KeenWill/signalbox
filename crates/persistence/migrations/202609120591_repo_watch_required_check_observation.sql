@@ -6,7 +6,7 @@ SET comparison_baseline = jsonb_set(
     comparison_baseline,
     '{pull_requests}',
     COALESCE((
-        SELECT jsonb_agg(pull || jsonb_build_object('required_check_failure', NULL))
+        SELECT jsonb_agg(pull || jsonb_build_object('required_check_conclusions', NULL))
         FROM jsonb_array_elements(comparison_baseline->'pull_requests') AS pull
     ), '[]'::jsonb)
 )

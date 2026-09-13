@@ -362,7 +362,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let label = LabelName::try_new(String::from("ready"))?;
     let comparison_pull_request =
         ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-            required_check_failure: None,
+            required_check_conclusions: None,
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number: PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
                 head_sha: default_head.clone(),
@@ -2123,7 +2123,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?;
         let source = &terminal_observation.observation.state().pull_requests()[0];
         let terminal = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-            required_check_failure: None,
+            required_check_conclusions: None,
             context: source.context().clone(),
             lifecycle,
             mergeable_state: source.mergeable_state(),
@@ -2203,7 +2203,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
     let source = &comparison_baseline.state().pull_requests()[0];
     let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-        required_check_failure: None,
+        required_check_conclusions: None,
         context: source.context().clone(),
         lifecycle: RepoWatchPullRequestLifecycle::Merged,
         mergeable_state: source.mergeable_state(),
@@ -2268,7 +2268,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         CheckConclusion::Success,
     ));
     let changed = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-        required_check_failure: None,
+        required_check_conclusions: None,
         context: merged.context().clone(),
         lifecycle: RepoWatchPullRequestLifecycle::Merged,
         mergeable_state: merged.mergeable_state(),
@@ -4444,7 +4444,7 @@ impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
                     .to_owned(),
             )
             .expect("head"),
-            failed: false,
+            conclusions: vec![],
             after: None,
         })
     }
@@ -4995,7 +4995,7 @@ fn goal_review_observation(
 ) -> signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
     let mut observed = dispatch_observation(repository, 1, OffsetDateTime::now_utc());
     let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-        required_check_failure: None,
+        required_check_conclusions: None,
         context: PullRequestEventContext::new(PullRequestEventContextInput {
             number: PullRequestNumber::new(NonZeroU64::MIN),
             head_sha: observed.default_head.clone(),
@@ -6108,8 +6108,8 @@ async fn a_head_change_during_required_check_observation_restarts_the_partial_pu
         newer_head
     );
     assert_eq!(
-        baseline.state().pull_requests()[0].required_check_failure(),
-        Some(false)
+        baseline.state().pull_requests()[0].required_check_conclusions(),
+        Some([].as_slice())
     );
     Ok(())
 }

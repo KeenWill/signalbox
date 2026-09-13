@@ -2,7 +2,7 @@
 
 use crate::provider::{GitHubObservationRead, ObservationError};
 use serde_json::{Value, json};
-use signalbox_session_ownership::{CommitSha, PullRequestNumber, RepositorySlug};
+use signalbox_session_ownership::{CheckConclusion, CommitSha, PullRequestNumber, RepositorySlug};
 
 const QUERY: &str = r#"
 query RequiredChecks($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -27,19 +27,22 @@ query RequiredChecks($owner: String!, $name: String!, $number: Int!, $after: Str
 #[derive(Clone, Debug)]
 pub struct RequiredCheckPage {
     pub head: CommitSha,
-    pub failed: bool,
+    pub conclusions: Vec<CheckConclusion>,
     pub after: Option<String>,
 }
 
 impl RequiredCheckPage {
     pub(crate) fn encode(&self) -> Value {
-        json!({"head":self.head.as_str(),"failed":self.failed,"after":self.after})
+        json!({"head":self.head.as_str(),"conclusions":self.conclusions.iter().map(|value| crate::baseline::check_conclusion_storage(*value)).collect::<Vec<_>>(),"after":self.after})
     }
 
     pub(crate) fn decode(value: &Value) -> Option<Self> {
         Some(Self {
             head: CommitSha::try_new(value["head"].as_str()?.to_owned()).ok()?,
-            failed: value["failed"].as_bool()?,
+            conclusions: crate::observation_decode::array(
+                value.get("conclusions")?,
+                crate::observation_decode::conclusion,
+            )?,
             after: match value.get("after")? {
                 Value::Null => None,
                 value => Some(value.as_str()?.to_owned()),
@@ -68,34 +71,42 @@ pub(crate) fn decode_response(value: &Value) -> Option<RequiredCheckPage> {
     if rollup.is_null() {
         return Some(RequiredCheckPage {
             head,
-            failed: false,
+            conclusions: vec![],
             after: None,
         });
     }
     let connection = &rollup["contexts"];
-    let mut failed = false;
+    let mut conclusions = Vec::new();
     for node in connection["nodes"].as_array()? {
         if !node["isRequired"].as_bool()? {
             continue;
         }
-        failed |= match node["__typename"].as_str()? {
+        let conclusion = match node["__typename"].as_str()? {
             "CheckRun" => match node.get("conclusion")?.as_str() {
-                None if node["conclusion"].is_null() => false,
-                Some("SUCCESS" | "NEUTRAL" | "SKIPPED") => false,
-                Some(
-                    "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STALE"
-                    | "STARTUP_FAILURE",
-                ) => true,
+                None if node["conclusion"].is_null() => None,
+                Some("SUCCESS") => Some(CheckConclusion::Success),
+                Some("NEUTRAL") => Some(CheckConclusion::Neutral),
+                Some("SKIPPED") => Some(CheckConclusion::Skipped),
+                Some("FAILURE") => Some(CheckConclusion::Failure),
+                Some("CANCELLED") => Some(CheckConclusion::Cancelled),
+                Some("TIMED_OUT") => Some(CheckConclusion::TimedOut),
+                Some("ACTION_REQUIRED") => Some(CheckConclusion::ActionRequired),
+                Some("STALE") => Some(CheckConclusion::Stale),
+                Some("STARTUP_FAILURE") => Some(CheckConclusion::StartupFailure),
                 _ => return None,
             },
             "StatusContext" => match node["state"].as_str()? {
-                "SUCCESS" | "PENDING" | "EXPECTED" => false,
-                "ERROR" | "FAILURE" => true,
+                "SUCCESS" => Some(CheckConclusion::Success),
+                "PENDING" | "EXPECTED" => None,
+                "ERROR" | "FAILURE" => Some(CheckConclusion::Failure),
                 _ => return None,
             },
             _ => return None,
         };
+        conclusions.extend(conclusion);
     }
+    conclusions.sort_unstable();
+    conclusions.dedup();
     let after = if connection["pageInfo"]["hasNextPage"].as_bool()? {
         Some(connection["pageInfo"]["endCursor"].as_str()?.to_owned())
     } else {
@@ -103,7 +114,7 @@ pub(crate) fn decode_response(value: &Value) -> Option<RequiredCheckPage> {
     };
     Some(RequiredCheckPage {
         head,
-        failed,
+        conclusions,
         after,
     })
 }
@@ -113,13 +124,13 @@ pub(crate) async fn fetch(
     repository: &RepositorySlug,
     number: PullRequestNumber,
     head: &CommitSha,
-) -> Result<bool, ObservationError> {
+) -> Result<Vec<CheckConclusion>, ObservationError> {
     let (owner, name) = repository
         .as_str()
         .split_once('/')
         .ok_or(ObservationError::InvalidResponse)?;
     let mut after: Option<String> = None;
-    let mut failed = false;
+    let mut conclusions = Vec::new();
     loop {
         let page = io
             .required_checks(json!({"query":QUERY,"variables":{
@@ -129,11 +140,13 @@ pub(crate) async fn fetch(
         if &page.head != head {
             return Err(ObservationError::HeadChanged);
         }
-        failed |= page.failed;
+        conclusions.extend(page.conclusions);
+        conclusions.sort_unstable();
+        conclusions.dedup();
         match page.after {
             Some(next) if after.as_ref() != Some(&next) => after = Some(next),
             Some(_) => return Err(ObservationError::InvalidResponse),
-            None => return Ok(failed),
+            None => return Ok(conclusions),
         }
     }
 }
@@ -153,11 +166,19 @@ mod tests {
         let value = response(vec![
             json!({"__typename":"CheckRun","name":"validate","isRequired":false,"conclusion":"FAILURE"}),
         ]);
-        assert!(!decode_response(&value).expect("non-required check").failed);
+        assert!(
+            decode_response(&value)
+                .expect("non-required check")
+                .conclusions
+                .is_empty()
+        );
         let value = response(vec![
             json!({"__typename":"CheckRun","name":"report only","isRequired":true,"conclusion":"FAILURE"}),
         ]);
-        assert!(decode_response(&value).expect("required check").failed);
+        assert_eq!(
+            decode_response(&value).expect("required check").conclusions,
+            vec![CheckConclusion::Failure]
+        );
     }
 
     #[test]
@@ -165,7 +186,27 @@ mod tests {
         let value = response(vec![
             json!({"__typename":"StatusContext","isRequired":true,"state":"ERROR"}),
         ]);
-        assert!(decode_response(&value).expect("required status").failed);
+        assert_eq!(
+            decode_response(&value)
+                .expect("required status")
+                .conclusions,
+            vec![CheckConclusion::Failure]
+        );
+    }
+
+    #[test]
+    fn required_cancellation_and_timeout_keep_their_conclusions() {
+        let value = response(vec![
+            json!({"__typename":"CheckRun","isRequired":true,"conclusion":"CANCELLED"}),
+            json!({"__typename":"CheckRun","isRequired":true,"conclusion":"TIMED_OUT"}),
+            json!({"__typename":"CheckRun","isRequired":false,"conclusion":"FAILURE"}),
+        ]);
+        assert_eq!(
+            decode_response(&value)
+                .expect("required conclusions")
+                .conclusions,
+            vec![CheckConclusion::Cancelled, CheckConclusion::TimedOut]
+        );
     }
 
     #[test]
@@ -174,7 +215,12 @@ mod tests {
             json!({"__typename":"CheckRun","isRequired":true,"conclusion":null}),
             json!({"__typename":"StatusContext","isRequired":true,"state":"PENDING"}),
         ]);
-        assert!(!decode_response(&value).expect("pending checks").failed);
+        assert!(
+            decode_response(&value)
+                .expect("pending checks")
+                .conclusions
+                .is_empty()
+        );
     }
 
     #[test]
@@ -209,19 +255,19 @@ mod tests {
             [
                 RequiredCheckPage {
                     head: head.clone(),
-                    failed: false,
+                    conclusions: vec![],
                     after: Some("next".to_owned()),
                 },
                 RequiredCheckPage {
                     head: head.clone(),
-                    failed: true,
+                    conclusions: vec![CheckConclusion::Failure],
                     after: None,
                 },
             ]
             .into(),
         ));
         let repository = RepositorySlug::try_new("example/project".to_owned()).expect("repository");
-        assert!(
+        assert_eq!(
             fetch(
                 &pages,
                 &repository,
@@ -229,7 +275,8 @@ mod tests {
                 &head
             )
             .await
-            .expect("all pages")
+            .expect("all pages"),
+            vec![CheckConclusion::Failure]
         );
         assert!(pages.0.lock().expect("pages").is_empty());
     }
@@ -241,7 +288,7 @@ mod tests {
             [RequiredCheckPage {
                 head: CommitSha::try_new("2222222222222222222222222222222222222222".to_owned())
                     .expect("new head"),
-                failed: true,
+                conclusions: vec![CheckConclusion::Failure],
                 after: None,
             }]
             .into(),

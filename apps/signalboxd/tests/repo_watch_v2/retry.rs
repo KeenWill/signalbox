@@ -29,7 +29,7 @@ pub(super) fn observation(
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests: vec![
                 ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-                    required_check_failure: None,
+                    required_check_conclusions: None,
                     context,
                     lifecycle,
                     mergeable_state: state,
@@ -403,7 +403,11 @@ async fn an_ended_dispatch_retries_only_when_the_failed_check_is_required()
     sqlx::query("UPDATE dispatch_ledger SET session_terminal_at=$2,singleton_released_at=$2 WHERE created_session_id=$1")
         .bind(session.into_uuid()).bind(now).execute(&pool).await?;
     // The same failed check and unchanged head survive restart. Only GitHub's required fact changes.
-    for (required, expected_retry) in [(None, false), (Some(false), false), (Some(true), true)] {
+    for (required, expected_retry) in [
+        (None, false),
+        (Some(vec![]), false),
+        (Some(vec![CheckConclusion::Failure]), true),
+    ] {
         let context = observed.observation.state().pull_requests()[0]
             .context()
             .clone();
@@ -415,7 +419,7 @@ async fn an_ended_dispatch_retries_only_when_the_failed_check_is_required()
                         context,
                         lifecycle: RepoWatchPullRequestLifecycle::Open,
                         mergeable_state: MergeableState::Mergeable,
-                        required_check_failure: required,
+                        required_check_conclusions: required.clone(),
                         completed_check_suites: vec![],
                         completed_check_runs: vec![RepoWatchCheckRunObservation::new(
                             GitHubObjectId::new(NonZeroU64::MIN),
@@ -507,7 +511,7 @@ async fn required_check_migration_preserves_the_baseline_with_unknown_check_stat
             MERGED_RETENTION,
         )
         .await?;
-    sqlx::query("UPDATE repository_state SET comparison_baseline=comparison_baseline #- '{pull_requests,0,required_check_failure}' WHERE repository=$1")
+    sqlx::query("UPDATE repository_state SET comparison_baseline=comparison_baseline #- '{pull_requests,0,required_check_conclusions}' WHERE repository=$1")
         .bind(repository.as_str()).execute(&pool).await?;
     sqlx::query("INSERT INTO poll_cursor(repository,cursor) VALUES ($1,'{}')")
         .bind(repository.as_str())
