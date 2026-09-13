@@ -43,10 +43,6 @@
   white-space: pre-wrap;
 }
 
-.tool-call .tool-diff span {
-  display: block;
-}
-
 .tool-diff [data-change="added"] {
   background: color-mix(in srgb, var(--success, green) 14%, transparent);
 }

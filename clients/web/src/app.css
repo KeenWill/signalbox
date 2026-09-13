@@ -166,7 +166,7 @@ kbd {
 .product-navigation {
   display: grid;
   height: 100%;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .product-navigation nav {
   overflow: auto;
@@ -1643,6 +1643,12 @@ kbd {
   grid-template-rows: 18px 16px;
   align-items: center;
   padding: 0.8rem 0.75rem 0.65rem;
+}
+.product-brand {
+  display: flex;
+  min-height: 54px;
+  color: var(--text);
+  text-decoration: none;
 }
 .brand-mark {
   display: grid;
@@ -3238,4 +3244,61 @@ kbd {
 .session-detail-attachments span {
   display: block;
   color: var(--text-muted);
+}
+
+.surface-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.surface-header-actions:empty {
+  display: none;
+}
+
+.product-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 0.4rem;
+}
+.product-navigation .product-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.product-link svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.navigation-collapsed .product-brand-row {
+  flex-direction: column;
+  padding: 0;
+}
+.navigation-collapsed .product-link {
+  justify-content: center;
+  min-height: 34px;
+}
+
+.open-session-command {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.open-session-dialog {
+  width: min(420px, calc(100vw - 2rem));
+}
+.open-session-dialog > p {
+  margin: 0.75rem 0.75rem 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.open-session-command button {
+  justify-self: end;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 0.75rem;
 }

@@ -1,4 +1,4 @@
-//! Storage records for content-silent image evidence retained on a terminal attempt.
+//! Storage records for content-silent media evidence retained on a terminal attempt.
 
 use super::*;
 use signalbox_domain::{MediaValidationIdentity, ToolMediaReference};
@@ -38,9 +38,14 @@ pub(super) fn encode(
     reference: &ToolMediaReference,
 ) -> Result<serde_json::Value, ToolLoopRepositoryError> {
     serde_json::to_value(ReferenceRecord {
-        kind: crate::mapping::media_presentation_to_str(
-            crate::mapping::MediaPresentationStorageKind::Image,
-        )
+        kind: crate::mapping::media_presentation_to_str(match reference.kind() {
+            signalbox_domain::ToolMediaKind::Image => {
+                crate::mapping::MediaPresentationStorageKind::Image
+            }
+            signalbox_domain::ToolMediaKind::Document => {
+                crate::mapping::MediaPresentationStorageKind::Document
+            }
+        })
         .to_owned(),
         byte_length: reference.byte_length().get(),
         presented: identity_record(reference.presented()),
@@ -67,14 +72,16 @@ pub(super) fn decode(
     let record: ReferenceRecord = serde_json::from_value(value).map_err(|_| invalid())?;
     let presented = identity(record.presented).ok_or_else(invalid)?;
     let source = identity(record.source).ok_or_else(invalid)?;
-    if crate::mapping::media_presentation_from_str(&record.kind).is_none() {
-        return Err(invalid().into());
+    let length = std::num::NonZeroU64::new(record.byte_length).ok_or_else(invalid)?;
+    match crate::mapping::media_presentation_from_str(&record.kind).ok_or_else(invalid)? {
+        crate::mapping::MediaPresentationStorageKind::Image => {
+            ToolMediaReference::image(presented, source, length)
+        }
+        crate::mapping::MediaPresentationStorageKind::Document if presented == source => {
+            ToolMediaReference::direct_document(presented, length)
+        }
+        crate::mapping::MediaPresentationStorageKind::Document => None,
     }
-    ToolMediaReference::image(
-        presented,
-        source,
-        std::num::NonZeroU64::new(record.byte_length).ok_or_else(invalid)?,
-    )
     .ok_or_else(|| invalid().into())
 }
 
@@ -99,6 +106,38 @@ impl PostgresToolLoopRepository {
                 Err(ToolLoopCorruption::Inconsistent("missing media reference evidence").into())
             }
         }
+    }
+
+    /// Loads completed media evidence for the requested tools in one query.
+    pub async fn load_media_references(
+        &self,
+        requests: &[ToolRequestId],
+    ) -> Result<BTreeMap<ToolRequestId, ToolMediaReference>, ToolLoopRepositoryError> {
+        if requests.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let stored: Vec<(Uuid, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT request_id, result_media_reference FROM tool_attempt
+             WHERE request_id = ANY($1) AND terminal_disposition_kind = 'completed'
+               AND result_content_kind = 'media'",
+        )
+        .bind(
+            requests
+                .iter()
+                .map(|request| request.into_uuid())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        stored
+            .into_iter()
+            .map(|(request, value)| {
+                let value = value.ok_or(ToolLoopCorruption::Inconsistent(
+                    "missing media reference evidence",
+                ))?;
+                Ok((ToolRequestId::from_uuid(request), decode(value)?))
+            })
+            .collect()
     }
 }
 
@@ -143,6 +182,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decode(encode(&reference).unwrap()).unwrap(), reference);
+    }
+    #[test]
+    fn document_roundtrip_retains_its_kind_and_rejects_conflicting_source_evidence() {
+        let reference = ToolMediaReference::direct_document(
+            identity(1, "application/pdf"),
+            std::num::NonZeroU64::new(64).unwrap(),
+        )
+        .unwrap();
+        let mut record = encode(&reference).unwrap();
+        assert_eq!(record["kind"], "document");
+        assert_eq!(decode(record.clone()).unwrap(), reference);
+        record["source"]["digest"] =
+            serde_json::json!(signalbox_domain::BlobDigest::from_bytes([2; 32]).to_string());
+        assert!(decode(record).is_err());
+        let image = ToolMediaReference::direct_image(
+            identity(1, "application/pdf"),
+            std::num::NonZeroU64::new(64).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            decode(encode(&image).unwrap()).unwrap().kind(),
+            signalbox_domain::ToolMediaKind::Image
+        );
     }
     #[test]
     fn corrupt_reference_records_cannot_reconstitute_authority() {

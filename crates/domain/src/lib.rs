@@ -374,10 +374,10 @@ pub use tool::{
     ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
     ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
     ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolInadmissibleReason,
-    ToolMediaReference, ToolName, ToolNameError, ToolNameFailure, ToolPermissionDefault,
-    ToolRequest, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolRequestResolution,
-    ToolResultContent, ToolResultText, ToolResultTextError, ToolResultTextFailure,
-    ToolUsingAssistantResponse, ToolUsingAssistantResponseError,
+    ToolMediaKind, ToolMediaReference, ToolName, ToolNameError, ToolNameFailure,
+    ToolPermissionDefault, ToolRequest, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+    ToolRequestResolution, ToolResultContent, ToolResultText, ToolResultTextError,
+    ToolResultTextFailure, ToolUsingAssistantResponse, ToolUsingAssistantResponseError,
 };
 pub use tool_attempt::{
     ApprovedToolRequest, ApprovedToolRequestError, AuthorizedToolAttempt,

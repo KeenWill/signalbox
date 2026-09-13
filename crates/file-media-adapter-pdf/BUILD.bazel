@@ -1,9 +1,10 @@
 load("//tooling/bazel:package.bzl", "rust_package")
-load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
+load("//tooling/bazel:rust.bzl", "RUSTC_FLAGS", "rust_binary", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_DEPS = [
     ":signalbox_file_media_adapter_pdf",
+    "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
     "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
     "//crates/file-media-runtime:signalbox_file_media_runtime",
 ]
@@ -14,6 +15,7 @@ rust_library(
     name = "signalbox_file_media_adapter_pdf",
     crate_root = "src/lib.rs",
     deps = [
+        "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
         "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
         "//crates/file-media-runtime:signalbox_file_media_runtime",
     ],
@@ -22,6 +24,7 @@ rust_library(
 rust_binary(
     name = "signalbox-file-media-pdf-worker",
     crate_root = "src/bin/signalbox-file-media-pdf-worker.rs",
+    rustc_flags = RUSTC_FLAGS + ["-Cstrip=symbols"],
     deps = CRATE_DEPS,
 )
 
@@ -40,6 +43,13 @@ rust_integration_test(
     size = "small",
     srcs = glob(["tests/**/*.rs"]),
     crate_root = "tests/pdf_adapter.rs",
+    data = [":signalbox-file-media-pdf-worker", "//crates/file-media-adapters-image:signalbox-file-media-image-worker"],
+    env = {
+        "NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker": "$(rootpath :signalbox-file-media-pdf-worker)",
+        "NEXTEST_BIN_EXE_signalbox_file_media_image_worker": "$(rootpath //crates/file-media-adapters-image:signalbox-file-media-image-worker)",
+    },
+    env_inherit = ["SIGNALBOX_FILE_MEDIA_CGROUP_ROOT"],
+    rustc_env = {"CARGO_BIN_EXE_signalbox-file-media-pdf-worker": "$(rootpath :signalbox-file-media-pdf-worker)"},
     deps = CRATE_DEPS,
 )
 

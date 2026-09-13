@@ -489,6 +489,154 @@ async fn metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn title_only_edit_preserves_metadata_committed_while_waiting_for_the_session_lock()
+-> Result<(), Box<dyn Error>> {
+    const TARGET_SESSION: u128 = 0x701;
+    const CREATE_COMMAND: u128 = 0x801;
+    const INITIAL_METADATA_COMMAND: u128 = 0x901;
+    const CONCURRENT_METADATA_COMMAND: u128 = 0x902;
+    const TITLE_COMMAND: u128 = 0x903;
+    const LATER_METADATA_COMMAND: u128 = 0x904;
+    const WRITER_GATE_KEY: i64 = 903;
+
+    let (_container, pool) = migrated_postgres().await?;
+    let target = session(TARGET_SESSION);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation(CREATE_COMMAND, TARGET_SESSION))
+        .await?;
+    let repository = SessionMetadataRepository::new(pool.clone());
+    repository
+        .handle(replacement(
+            INITIAL_METADATA_COMMAND,
+            TARGET_SESSION,
+            metadata(Some("initial"), &["old"], &[("source", "old")], false),
+        ))
+        .await?;
+    let stale = repository.load_session_metadata(target).await?.unwrap();
+    let title_command = replacement(
+        TITLE_COMMAND,
+        TARGET_SESSION,
+        SessionMetadataContent::try_new(
+            Some("requested title".into()),
+            stale.content().tags().map(str::to_owned).collect(),
+            stale
+                .content()
+                .attributes()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+            stale.content().archived(),
+        )
+        .expect("valid title replacement"),
+    );
+    // The only interpolated value is the fixture's integer advisory-lock key.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        format!(
+            "CREATE FUNCTION pause_metadata_writer() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NOT NEW.title_only THEN PERFORM pg_advisory_xact_lock({WRITER_GATE_KEY}); END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER pause_metadata_writer AFTER INSERT ON replace_session_metadata_command
+         FOR EACH ROW EXECUTE FUNCTION pause_metadata_writer();",
+        )
+        .as_str(),
+    ))
+    .execute(&pool)
+    .await?;
+    let mut gate = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(WRITER_GATE_KEY)
+        .execute(&mut *gate)
+        .await?;
+    let writer = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .handle(replacement(
+                    CONCURRENT_METADATA_COMMAND,
+                    TARGET_SESSION,
+                    metadata(
+                        Some("other title"),
+                        &["new"],
+                        &[("source", "new"), ("added", "kept")],
+                        true,
+                    ),
+                ))
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the full replacement pauses before commit"
+    );
+    let titles = SessionMetadataRepository::for_title_update(pool.clone());
+    let title_writer = tokio::spawn({
+        let titles = titles.clone();
+        let title_command = title_command.clone();
+        async move { titles.handle(title_command).await }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "the title update waits for the session lock"
+    );
+    gate.commit().await?;
+    assert!(matches!(
+        writer.await??,
+        ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(_))
+    ));
+    let title_outcome = title_writer.await??;
+    let ReplaceSessionMetadataHandlingOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
+        ref applied,
+    )) = title_outcome
+    else {
+        panic!("the title edit must apply");
+    };
+    let expected = metadata(
+        Some("requested title"),
+        &["new"],
+        &[("source", "new"), ("added", "kept")],
+        true,
+    );
+    assert_eq!(applied.snapshot().content(), &expected);
+    assert_eq!(
+        repository
+            .load_session_metadata(target)
+            .await?
+            .unwrap()
+            .content(),
+        &expected
+    );
+    let receipt = titles
+        .load_command(title_command.command_id())
+        .await?
+        .unwrap();
+    assert_eq!(receipt.command().replacement(), &expected);
+    assert_eq!(
+        receipt.result(),
+        &ReplaceSessionMetadataResult::Applied(applied.clone())
+    );
+    let later = metadata(Some("later"), &["later"], &[], false);
+    repository
+        .handle(replacement(
+            LATER_METADATA_COMMAND,
+            TARGET_SESSION,
+            later.clone(),
+        ))
+        .await?;
+    assert_eq!(titles.handle(title_command).await?, title_outcome);
+    assert_eq!(
+        repository
+            .load_session_metadata(target)
+            .await?
+            .unwrap()
+            .content(),
+        &later
+    );
+    Ok(())
+}
+
 /// a blocked writer samples one post-lock statement timestamp and
 /// records that exact value in both current state and its durable receipt.
 #[tokio::test(flavor = "multi_thread")]

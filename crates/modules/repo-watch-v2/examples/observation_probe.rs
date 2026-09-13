@@ -33,6 +33,14 @@ impl GitHubObservationRead for Probe {
         );
         self.client.threads(request).await
     }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<signalbox_module_repo_watch_v2::required_checks::RequiredCheckPage, ObservationError>
+    {
+        self.graphql.fetch_add(1, Ordering::Relaxed);
+        self.client.required_checks(request).await
+    }
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

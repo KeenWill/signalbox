@@ -11,6 +11,7 @@ import {
   fieldLabel,
   fields,
   previewText,
+  searchResultText,
   textField,
   webLink,
 } from './toolPresentation'
@@ -42,7 +43,7 @@ function TextPreview({
       <pre className={diff ? 'tool-diff' : undefined}>
         <code>
           {diff
-            ? preview.content.split('\n').map((line, index) => (
+            ? preview.content.split(/(?<=\n)/u).map((line, index) => (
                 <span
                   // biome-ignore lint/suspicious/noArrayIndexKey: Immutable lines can repeat.
                   key={index}
@@ -51,7 +52,6 @@ function TextPreview({
                   }
                 >
                   {line}
-                  {'\n'}
                 </span>
               ))
             : preview.content}
@@ -103,24 +103,42 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
   const argv = Array.isArray(args.arguments)
     ? args.arguments.map((arg) => JSON.stringify(arg)).join(' ')
     : ''
-  const command =
-    textField(args.command ?? args.cmd) || [textField(args.program), argv].filter(Boolean).join(' ')
+  const command = [typeof args.program === 'string' ? JSON.stringify(args.program) : '', argv]
+    .filter(Boolean)
+    .join(' ')
   const outcome = fields(result.outcome)
-  const code = result.exit_code ?? outcome.code
+  const confinement = fields(result.confinement)
+  const code = outcome.code
   const stdout = fields(result.stdout)
   const stderr = fields(result.stderr)
   return (
     <>
       <TextPreview text={command} label="Command" />
-      {textField(args.working_directory ?? args.workdir) && (
-        <small>In {textField(args.working_directory ?? args.workdir)}</small>
+      {typeof args.timeout_seconds === 'number' && (
+        <small>Timeout: {args.timeout_seconds} seconds</small>
       )}
+      {textField(args.working_directory) && <small>In {textField(args.working_directory)}</small>}
       {typeof code === 'number' && <strong>Exit {code}</strong>}
-      {typeof outcome.kind === 'string' && <span>{fieldLabel(textField(outcome.kind))}</span>}
-      <TextPreview text={textField(stdout.text ?? result.stdout ?? result.output)} label="Output" />
-      <TextPreview text={textField(stderr.text ?? result.stderr)} label="Error output" />
+      {typeof outcome.kind === 'string' && (
+        <span>
+          {outcome.kind === 'exited' && outcome.code === null
+            ? 'Terminated by signal'
+            : fieldLabel(outcome.kind)}
+        </span>
+      )}
+      {typeof outcome.reason === 'string' && <span>{fieldLabel(outcome.reason)}</span>}
+      {typeof confinement.kind === 'string' && <span>{fieldLabel(confinement.kind)}</span>}
+      {typeof confinement.availability === 'string' && (
+        <small>Sandbox availability: {fieldLabel(confinement.availability)}</small>
+      )}
+      {typeof result.diagnostic === 'string' && <small>{fieldLabel(result.diagnostic)}</small>}
+      <TextPreview text={textField(stdout.text)} label="Output" />
+      <TextPreview text={textField(stderr.text)} label="Error output" />
       {(stdout.completeness === 'truncated' || stderr.completeness === 'truncated') && (
         <small>Output was trimmed</small>
+      )}
+      {(stdout.encoding === 'lossy_utf8' || stderr.encoding === 'lossy_utf8') && (
+        <small>Some output bytes could not be decoded</small>
       )}
       {!Object.keys(result).length && <Excerpt excerpt={resultExcerpt} label="Output" />}
     </>
@@ -130,13 +148,21 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
 function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
-      <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
+      <strong>{textField(args.path ?? result.path)}</strong>
+      {typeof args.offset === 'number' && <small>Starting byte: {args.offset}</small>}
+      {typeof args.max_bytes === 'number' && <small>Maximum bytes: {args.max_bytes}</small>}
       {typeof result.content === 'string' ? (
-        <TextPreview text={result.content} label="File contents" />
+        result.content === '' ? (
+          <p>No content in this read</p>
+        ) : (
+          <TextPreview text={result.content} label="File contents" />
+        )
       ) : (
         <Result result={result} resultExcerpt={resultExcerpt} />
       )}
-      {result.truncated === true && <small>Showing part of the file</small>}
+      {(result.truncated === true || (typeof result.offset === 'number' && result.offset > 0)) && (
+        <small>Showing part of the file</small>
+      )}
     </>
   )
 }
@@ -164,8 +190,10 @@ function FileEdit({ arguments: args, result, resultExcerpt }: RendererProps) {
       .join('\n')
   return (
     <>
-      <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
+      <strong>{textField(args.path ?? result.path)}</strong>
       <TextPreview text={patch} label="Proposed changes" diff />
+      {args.content === '' && <strong>Write empty file</strong>}
+      {args.replace_all === true && <strong>Replace every match</strong>}
       {(previewText(old).omittedCharacters > 0 ||
         previewText(replacement).omittedCharacters > 0) && (
         <small>Showing part of the changes</small>
@@ -190,17 +218,22 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
       <Link url={result.url ?? args.url} />
+      {typeof result.status === 'number' && <strong>HTTP {result.status}</strong>}
+      {typeof result.content_type === 'string' && (
+        <small>Content type: {result.content_type}</small>
+      )}
       {textField(args.query) && <strong>{textField(args.query)}</strong>}
       <TextPreview text={textField(result.body ?? result.summary)} label="Summary" />
-      {Array.isArray(result.results) && (
+      {Array.isArray(result.results) && result.results.length === 0 && <p>No results returned</p>}
+      {Array.isArray(result.results) && result.results.length > 0 && (
         <ul>
           {result.results.map((item, index) => {
             const entry = fields(item)
             return (
               // biome-ignore lint/suspicious/noArrayIndexKey: Search result positions are immutable and URLs can repeat.
               <li key={index}>
-                <Link url={entry.url} title={entry.title} />
-                <TextPreview text={textField(entry.snippet)} label="Summary" />
+                <Link url={entry.url} title={searchResultText(entry.title)} />
+                <TextPreview text={searchResultText(entry.snippet)} label="Summary" />
               </li>
             )
           })}
@@ -215,18 +248,13 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
 function Git({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
-      <strong>
-        {[
-          textField(args.repository),
-          args.number == null ? '' : `#${textField(args.number)}`,
-          textField(args.title ?? args.message ?? args.branch ?? args.name ?? result.branch),
-        ]
-          .filter(Boolean)
-          .join(' · ')}
-      </strong>
-      {typeof result.html_url === 'string' && <Link url={result.html_url} title={result.title} />}
+      <FieldList value={args} />
+      {typeof result.url === 'string' && <Link url={result.url} title={result.title} />}
       {typeof result.patch === 'string' ? (
-        <TextPreview text={result.patch} label="Diff" diff />
+        <>
+          <TextPreview text={result.patch} label="Diff" diff />
+          {result.truncated === true && <small>Showing part of the diff</small>}
+        </>
       ) : (
         <Result result={result} resultExcerpt={resultExcerpt} />
       )}
@@ -244,16 +272,10 @@ function Fallback({ arguments: args, result, resultExcerpt }: RendererProps) {
 }
 
 export const toolRenderers: ReadonlyMap<string, ComponentType<RendererProps>> = new Map([
-  ...['sandboxed_exec', 'unsandboxed_exec', 'Bash', 'bash', 'exec_command', 'shell'].map(
-    (name) => [name, Command] as const,
-  ),
-  ...['read_file', 'Read', 'list_directory', 'glob_files', 'search_files'].map(
-    (name) => [name, FileRead] as const,
-  ),
-  ...['write_file', 'edit_file', 'apply_patch', 'Edit', 'Write'].map(
-    (name) => [name, FileEdit] as const,
-  ),
-  ...['web_fetch', 'web_search', 'WebFetch', 'WebSearch'].map((name) => [name, Web] as const),
+  ...['sandboxed_exec', 'unsandboxed_exec'].map((name) => [name, Command] as const),
+  ...['read_file'].map((name) => [name, FileRead] as const),
+  ...['write_file', 'edit_file', 'apply_patch'].map((name) => [name, FileEdit] as const),
+  ...['web_fetch', 'web_search'].map((name) => [name, Web] as const),
   ...[
     'git_status',
     'git_diff',
@@ -276,12 +298,16 @@ export function ToolCall({ tool }: ToolCallProps) {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
   const args = excerptFields(tool.arguments)
   const result = excerptFields(evidence?.result)
-  const Renderer = toolRenderers.get(tool.tool_name) ?? Fallback
+  const Renderer =
+    !evidence || evidence.cause === 'invalid_arguments' || evidence.cause === 'unknown_tool'
+      ? Fallback
+      : (toolRenderers.get(tool.tool_name) ?? Fallback)
   return (
     <article className="tool-call" aria-label={`Tool ${tool.tool_name}`}>
       <header>
         <strong>{fieldLabel(tool.tool_name)}</strong>
         <span>{evidence ? enumLabel(evidence.state) : 'Requested'}</span>
+        {evidence?.cause && <span>{enumLabel(evidence.cause)}</span>}
         <button type="button" aria-expanded={raw} onClick={() => setRaw(!raw)}>
           Raw
         </button>
@@ -299,6 +325,13 @@ export function ToolCall({ tool }: ToolCallProps) {
           )}
         </>
       )}
+      {!tool.arguments && <small>Arguments are on another detail page</small>}
+      {evidence?.result_present && !evidence.result && (
+        <small>Output is on another detail page</small>
+      )}
+      {evidence?.failure_present && !evidence.failure && (
+        <small>Failure details are on another detail page</small>
+      )}
       <Excerpt excerpt={evidence?.failure} label="Failure" />
     </article>
   )
@@ -311,8 +344,8 @@ export function ToolApproval({
 }) {
   const actors = {
     policy: 'Policy',
-    user: 'You',
-    user_override: 'You (override)',
+    user: 'User',
+    user_override: 'User override',
     delegate: 'Approval reviewer',
   }
   return (

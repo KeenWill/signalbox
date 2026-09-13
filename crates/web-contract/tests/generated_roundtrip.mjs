@@ -1823,6 +1823,7 @@ test("generated attention decoder enforces collection bounds", () => {
 
 function catalogSummary(overrides = {}) {
   return {
+    repository_watch: null,
     session_id: "00000000-0000-0000-0000-000000000001",
     title_summary: null,
     title_truncated: false,
@@ -1851,6 +1852,9 @@ function catalogSnapshot(overrides = {}) {
 }
 
 test("generated catalog decoder requires explicit nullable boundaries", () => {
+  const withoutOrigin = catalogSummary();
+  delete withoutOrigin.repository_watch;
+  assert.throws(() => decodeWebSessionCatalogSnapshot(catalogSnapshot({ summaries: [withoutOrigin] })), /repository_watch must be present/);
   const withoutAction = catalogSummary();
   delete withoutAction.action;
   const withoutCurrentTurn = catalogSummary();
@@ -3398,6 +3402,8 @@ test("repository watch provenance preserves exact ledger identities and rejects 
     session_id: "00000000-0000-0000-0000-000000000001",
     supervision: null,
     repository_watch: {
+      head_branch: null,
+      base_branch: null,
       dispatch_id: "00000000-0000-0000-0000-000000000063",
       event_id: "00000000-0000-0000-0000-000000000064",
       repository: "signalbox/example", rule_id: "review-response", rule_revision: "3",
@@ -3408,6 +3414,12 @@ test("repository watch provenance preserves exact ledger identities and rejects 
     work: { active_turn_count: "0", queued_turn_count: "0" }, observed_through: "1",
   };
   assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).repository_watch, descriptor.repository_watch);
+  for (const member of ["head_branch", "base_branch"]) {
+    const origin = { ...descriptor.repository_watch };
+    delete origin[member];
+    assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: origin }));
+    assert.throws(() => decodeWebSessionCatalogSnapshot(catalogSnapshot({ summaries: [catalogSummary({ repository_watch: origin })] })));
+  }
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, event_kind: "unknown" } }));
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, action_ordinal: "0" } }));
 });
@@ -3496,4 +3508,91 @@ test("session supervision preserves retained evidence and rejects unknown classe
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, supervision: { ...descriptor.supervision, class: "unknown" } }));
   const { supervision, ...missing } = descriptor;
   assert.throws(() => decodeWebSessionTimelineDescriptor(missing));
+});
+
+
+function documentToolDetailPage() {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const media = {
+    digest: `sha256:${"01".repeat(32)}`, media_type: "application/pdf",
+    presentation_kind: "document", length_bytes: "64",
+  };
+  page.items[0].body = {
+    type: "tool_batch", turn_id: page.session_id,
+    producing_model_call_id: "00000000-0000-0000-0000-000000000993",
+    state: { type: "results_projected", frontier_id: "00000000-0000-0000-0000-000000000996" },
+    projected_member_index: 0, goal_events: [],
+    tools: [{
+      request_id: "00000000-0000-0000-0000-000000000995", tool_name: "file_read",
+      arguments: null, approval_posture: "auto", approval_judge_escalated: false,
+      evidence: {
+        type: "physical_attempt", attempt_id: "00000000-0000-0000-0000-000000000994",
+        result_present: true, failure_present: false, effect_posture: "effect_free",
+        state: "completed", result_media_reference: media,
+        result: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+      },
+    }],
+  };
+  return page;
+}
+
+test("completed tool media preserves document presentation", () => {
+  const page = documentToolDetailPage();
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.tools[0].evidence.result_media_reference.presentation_kind = "unknown";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});
+
+test("completed tool media requires a MIME type within its UTF-8 byte bound", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["", "not-a-mime", `application/x; label="${"é".repeat(120)}"`]) {
+    media.media_type = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a MIME value of at most 255 UTF-8 bytes/);
+  }
+  media.presentation_kind = "image";
+  media.media_type = `application/${"x".repeat(243)}`;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+});
+
+test("completed tool media requires canonical MIME spelling", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["APPLICATION/PDF", "application/pdf; charset=utf-8"]) {
+    media.media_type = value;
+    assert.throws(
+      () => decodeWebSessionTimelineDetailPage(page),
+      /a canonical lowercase MIME type without parameters/,
+    );
+  }
+});
+
+test("completed tool media lengths are positive u64 values", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["1", "18446744073709551615"]) {
+    media.length_bytes = value;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const value of ["0", "01", "-1", "18446744073709551616", "9".repeat(100)]) {
+    media.length_bytes = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+  }
+});
+
+test("completed document media requires PDF while image presentation retains its MIME type", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const value of ["image/png", "text/plain", "application/octet-stream"]) {
+    media.media_type = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /application\/pdf for document presentation/);
+  }
+  media.presentation_kind = "image";
+  for (const value of ["image/png", "application/pdf"]) {
+    media.media_type = value;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
 });

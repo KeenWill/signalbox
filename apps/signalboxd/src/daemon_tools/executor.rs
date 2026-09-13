@@ -4,7 +4,10 @@ use super::{
     pinned_file_system::PinFurtherWorkspaceRoot, workspace_executors::SessionWorkspaceExecutors,
 };
 use crate::{
-    blob_tools::{BLOB_METADATA_NAME, BLOB_READ_NAME, BlobToolExecutor},
+    blob_tools::{
+        BLOB_METADATA_NAME, BLOB_READ_NAME, BlobToolExecutor, FINDING_TEXT_NAME,
+        REVIEW_THREAD_TEXT_NAME,
+    },
     goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor},
     session_delegation::DaemonSessionDelegationPort,
 };
@@ -116,6 +119,18 @@ where
     ) -> Self {
         if let Some(workspaces) = self.workspace_bound.as_mut() {
             workspaces.repository_watch = watch;
+        }
+        self
+    }
+
+    /// Supplies the live credential catalog for judged sandboxed tasks.
+    pub fn with_ambient_credentials(
+        mut self,
+        catalogs: crate::configuration_reload::ConfigurationReload,
+        pool: sqlx::PgPool,
+    ) -> Self {
+        if let Some(workspaces) = self.workspace_bound.as_mut() {
+            workspaces.ambient_credentials = Some((catalogs, pool));
         }
         self
     }
@@ -327,13 +342,14 @@ where
                     .execute(invocation)
                     .await
             }
-            BLOB_METADATA_NAME | BLOB_READ_NAME => self
-                .blob
-                .as_mut()
-                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
-                .execute(invocation)
-                .await
-                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            BLOB_METADATA_NAME | BLOB_READ_NAME | FINDING_TEXT_NAME | REVIEW_THREAD_TEXT_NAME => {
+                self.blob
+                    .as_mut()
+                    .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                    .execute(invocation)
+                    .await
+                    .map_err(|error| DaemonToolExecutorError::from_error(&error))
+            }
             _ => Err(DaemonToolExecutorError::unknown_tool()),
         }
     }
