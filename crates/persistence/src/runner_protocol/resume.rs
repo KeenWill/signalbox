@@ -118,15 +118,23 @@ impl RunnerProtocolStore {
         }
         let connection =
             load_connection_head_in(transaction.as_mut(), observed.enrollment()).await?;
+        let supplied = evidence
+            .as_ref()
+            .map(RunnerLeaseResumeEvidence::correlation);
+        let omitted: bool = sqlx::query_scalar("SELECT EXISTS (
+            SELECT 1 FROM runner_lease_generation AS generation
+            JOIN runner_current_lease_event AS head USING (lease_id, generation)
+            JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+            WHERE generation.registration_enrollment_id = $1
+                AND event.state_kind IN ('offered', 'claimed')
+                AND ($2::uuid IS NULL OR generation.lease_id <> $2 OR generation.generation <> $3))")
+            .bind(observed.enrollment().into_uuid())
+            .bind(supplied.map(|correlation| correlation.lease.into_uuid()))
+            .bind(supplied.map(|correlation| Decimal::from(correlation.generation.get())))
+            .fetch_one(&mut *transaction).await?;
         let Some(evidence) = evidence else {
-            let outstanding: bool = sqlx::query_scalar("SELECT EXISTS (
-                SELECT 1 FROM runner_lease_generation AS generation
-                JOIN runner_current_lease_event AS head USING (lease_id, generation)
-                JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
-                WHERE generation.registration_enrollment_id = $1 AND event.state_kind IN ('offered', 'claimed'))")
-                .bind(observed.enrollment().into_uuid()).fetch_one(&mut *transaction).await?;
             transaction.commit().await?;
-            return if outstanding {
+            return if omitted {
                 Ok(RunnerLeaseResumeOutcome::LoseConnection(
                     connection.ok_or_else(invalid)?,
                 ))
@@ -204,6 +212,12 @@ impl RunnerProtocolStore {
             RunnerLeaseState::Offered => return Err(invalid()),
         };
         commit_mutation(transaction).await?;
-        Ok(outcome)
+        if omitted {
+            Ok(RunnerLeaseResumeOutcome::LoseConnection(
+                connection.ok_or_else(invalid)?,
+            ))
+        } else {
+            Ok(outcome)
+        }
     }
 }

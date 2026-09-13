@@ -502,7 +502,7 @@ impl PostgresRunnerRegistrationService {
             }
             (None, Some(_)) => return Err(invalid_inventory()),
         };
-        let resolution = self
+        let mut resolution = self
             .store
             .reconcile_tool_resume(
                 RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
@@ -515,15 +515,34 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        if let RunnerLeaseResumeOutcome::LoseConnection(connection) = resolution {
+            self.resolve_resume_loss(request.enrollment_id, connection)
+                .await?;
+            resolution = self
+                .store
+                .reconcile_tool_resume(
+                    RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                    identities,
+                    prior,
+                    &advertisement,
+                    evidence.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?;
+        }
         let action = match resolution {
             RunnerLeaseResumeOutcome::Empty => None,
             RunnerLeaseResumeOutcome::AwaitingDispatch => Some(DirectiveAction::Await),
             RunnerLeaseResumeOutcome::Recorded => Some(DirectiveAction::DiscardAsRecorded),
             RunnerLeaseResumeOutcome::Lost => Some(DirectiveAction::FailStale),
-            RunnerLeaseResumeOutcome::LoseConnection(connection) => {
-                self.resolve_resume_loss(request.enrollment_id, connection)
-                    .await?;
-                Some(DirectiveAction::FailStale)
+            RunnerLeaseResumeOutcome::LoseConnection(_) => {
+                return Err(RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Resume,
+                    correlation,
+                    RejectionCode::Unavailable,
+                ));
             }
         };
         self.dispatch.changed();

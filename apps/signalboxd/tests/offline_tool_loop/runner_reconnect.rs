@@ -18,6 +18,7 @@ enum InventoryCase {
     Result,
     Started,
     Omitted,
+    HistoricalResult,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +65,17 @@ async fn reconnect_phases_obey_recorded_results_and_connection_loss() -> Result<
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn historical_result_does_not_hide_an_omitted_successor_claim() -> Result<(), Box<dyn Error>>
+{
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        check_reconnect(PriorConnection::Connected, InventoryCase::HistoricalResult),
+    )
+    .await?
+}
+
 async fn check_reconnect(
     prior: PriorConnection,
     inventory: InventoryCase,
@@ -102,10 +114,18 @@ async fn check_reconnect(
     let completes = !matches!(prior, PriorConnection::Lost)
         && matches!(
             inventory,
-            InventoryCase::Waiting | InventoryCase::Received | InventoryCase::Result
+            InventoryCase::Waiting
+                | InventoryCase::Received
+                | InventoryCase::Result
+                | InventoryCase::HistoricalResult
         );
-    let serial_successor =
-        matches!(prior, PriorConnection::Connected) && matches!(inventory, InventoryCase::Result);
+    let historical_result = matches!(inventory, InventoryCase::HistoricalResult);
+    let turn_completes = completes && !historical_result;
+    let serial_successor = matches!(prior, PriorConnection::Connected)
+        && matches!(
+            inventory,
+            InventoryCase::Result | InventoryCase::HistoricalResult
+        );
     if serial_successor {
         // A test-only registration stall exposes the interval between recording
         // the first result and opening the resumed physical connection.
@@ -127,7 +147,7 @@ async fn check_reconnect(
         vec![("echo", arguments.as_str())]
     };
     let mut scripts = vec![tool_use_script(&calls)];
-    if completes {
+    if turn_completes {
         scripts.push(completion_script("observed"));
     }
     let (execution, runtime) = fixture.execution(
@@ -200,7 +220,11 @@ async fn check_reconnect(
                         _ => LeasePhaseKind::ExecutionMayHaveStarted,
                     },
                 }),
-                result: matches!(inventory, InventoryCase::Result).then(|| RetainedResult {
+                result: matches!(
+                    inventory,
+                    InventoryCase::Result | InventoryCase::HistoricalResult
+                )
+                .then(|| RetainedResult {
                     correlation: offer.correlation.clone(),
                     result: result.clone(),
                 }),
@@ -233,7 +257,10 @@ async fn check_reconnect(
                 directive.action,
                 if !completes {
                     DirectiveAction::FailStale
-                } else if matches!(inventory, InventoryCase::Result) {
+                } else if matches!(
+                    inventory,
+                    InventoryCase::Result | InventoryCase::HistoricalResult
+                ) {
                     DirectiveAction::DiscardAsRecorded
                 } else {
                     DirectiveAction::Await
@@ -242,7 +269,10 @@ async fn check_reconnect(
             );
         }
         if completes {
-            if !matches!(inventory, InventoryCase::Result) {
+            if !matches!(
+                inventory,
+                InventoryCase::Result | InventoryCase::HistoricalResult
+            ) {
                 let (_, replayed) = service
                     .claim_tool_offer(
                         receipt.enrollment_id,
@@ -316,18 +346,57 @@ async fn check_reconnect(
                         },
                     )
                     .await?;
-                service
-                    .record_tool_result(
-                        receipt.enrollment_id,
-                        resumed.connection_epoch,
-                        ResultFrame {
-                            correlation: successor.correlation,
-                            result: TerminalResult::Success {
-                                text: arguments.clone(),
+                if historical_result {
+                    let reconciled = service.resume(request.clone()).await?;
+                    assert!(reconciled.connection_epoch > resumed.connection_epoch);
+                    assert_eq!(
+                        reconciled
+                            .directives
+                            .result
+                            .expect("historical result directive")
+                            .action,
+                        DirectiveAction::DiscardAsRecorded
+                    );
+                    assert_eq!(
+                        service
+                            .recovery_store()
+                            .load_attempt_lease(signalbox_domain::ToolAttemptId::from_uuid(
+                                successor.correlation.tool_attempt_id.into_uuid()
+                            ))
+                            .await?
+                            .expect("omitted successor")
+                            .state(),
+                        signalbox_domain::RunnerLeaseState::LostClaimed
+                    );
+                    assert!(
+                        service
+                            .record_tool_result(
+                                receipt.enrollment_id,
+                                reconciled.connection_epoch,
+                                ResultFrame {
+                                    correlation: successor.correlation,
+                                    result: TerminalResult::Success {
+                                        text: arguments.clone()
+                                    }
+                                }
+                            )
+                            .await
+                            .is_err()
+                    );
+                } else {
+                    service
+                        .record_tool_result(
+                            receipt.enrollment_id,
+                            resumed.connection_epoch,
+                            ResultFrame {
+                                correlation: successor.correlation,
+                                result: TerminalResult::Success {
+                                    text: arguments.clone(),
+                                },
                             },
-                        },
-                    )
-                    .await?;
+                        )
+                        .await?;
+                }
             }
         } else {
             assert!(
@@ -353,10 +422,10 @@ async fn check_reconnect(
     executed?;
     assert_eq!(
         runtime.received_operations().len(),
-        if completes { 2 } else { 1 },
+        if turn_completes { 2 } else { 1 },
         "{prior:?}/{inventory:?}"
     );
-    if !completes {
+    if !turn_completes {
         assert!(
             service
                 .recovery_store()

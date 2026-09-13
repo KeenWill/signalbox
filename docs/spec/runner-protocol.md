@@ -231,13 +231,14 @@ inventory directives. An intact claimed lease in `waiting_dispatch` or
 `dispatch_received` permits replay of the claim acknowledgement and unchanged
 dispatch; neither phase permits replay after committed connection loss. A claim
 reported as `execution_may_have_started` without a retained result, or omitted
-from inventory, is durably lost under the effect-class ambiguity law. An equal
-recorded result is acknowledged; an unequal duplicate is fatal. The runner
-discards its journal entry only on the exact recorded or stale directive and
-never invokes a started lease again. Graceful shutdown preserves the loss fence;
-recovery requiring loss closes the resumed physical connection before retrying
-admission. Fresh offers wait until reconnect establishes the resumed connection;
-prior physical connections cannot issue authority after a new epoch.
+from inventory, is durably lost under the effect-class ambiguity law, including
+when inventory names a different historical lease. An equal recorded result is
+acknowledged; an unequal duplicate is fatal. The runner discards its journal
+entry only on the exact recorded or stale directive and never invokes a started
+lease again. Graceful shutdown preserves the loss fence; recovery requiring loss
+closes the resumed physical connection before retrying admission. Fresh offers
+wait until reconnect establishes the resumed connection; prior physical
+connections cannot issue authority after a new epoch.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
