@@ -299,6 +299,11 @@ preceding dispatch and evaluated event context, and pass through the existing
 singleton and dispatch admission limits; they do not create GitHub change
 events.
 
+For `labeled-review-response`, completed check runs and suites admit at most one
+initial dispatch per provisioned pull-request head within a rule revision, using
+the existing cooldown. Later check completions on that head are consumed without
+dispatch; new review findings and unfinished-work retries remain eligible.
+
 Each rule evaluation pass consumes eligible retained events through its captured
 tail before retries and checkout provisioning.
 
