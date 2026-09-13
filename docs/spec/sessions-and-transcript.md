@@ -564,14 +564,14 @@ item budget is clamped to the advertised detail limit; each automatic read uses
 only the remaining scan allowance. Scanning stops at a visible item, a detail
 continuation, or an exhausted budget. An empty detail page preserves its
 unreturned-item continuation. Scrolling again starts a fresh bounded scan using
-the timeline continuation.
+the timeline continuation. Turn segments retain window boundaries so prepending
+history preserves existing rows and their disclosures. Turn-wide classification
+uses all loaded events.
 
 The transcript groups contiguous events by turn while preserving interleaved
-chronology. Turn segments retain window boundaries so prepending history
-preserves existing rows and disclosures. Turn-wide classification uses all
-loaded events. Summary shows user messages, assistant text accompanying tool
-calls, final assistant text, compact tool chips, and unsuccessful turn outcomes.
-A completed response remains visible as a non-final message when its
+chronology. Summary shows user messages, assistant text accompanying tool calls,
+final assistant text, compact tool chips, and unsuccessful turn outcomes. A
+completed response remains visible as a non-final message when its
 completed-turn closure is not loaded. Distinct physical tool attempts remain
 independently inspectable in event order even when they share one request.
 Provider failures remain visible at their event position, including before a
