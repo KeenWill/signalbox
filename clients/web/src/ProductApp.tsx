@@ -34,11 +34,6 @@ import {
   useState,
 } from 'react'
 import { createPortal } from 'react-dom'
-import {
-  ArtifactInspector,
-  artifactResolutionId,
-  emptyArtifactInspectorState,
-} from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext } from './commands'
 import { Field } from './Field'
@@ -533,11 +528,6 @@ function ProductToolbar({
   )
 }
 
-// Must stay identical to the `.product-inspector { display: none }` breakpoint in app.css:
-// a wider composition threshold than the visibility threshold would mount the side pane into a
-// hidden aside and focus a Digest input nobody can see.
-const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
-
 function useMediaQuery(media: string): boolean {
   const [narrow, setNarrow] = useState(() => window.matchMedia(media).matches)
   useEffect(() => {
@@ -572,7 +562,6 @@ export function ProductApp({
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
   const helpOpenerRef = useRef<HTMLElement | null>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
-  const artifactDigestRef = useRef<HTMLInputElement>(null)
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
   const catalogSessionOpenedHere = useLocation({
     select: (location) => location.state.catalogSessionOpenedHere === true,
@@ -583,8 +572,6 @@ export function ProductApp({
       currentCatalogSession.current = sessionState.session
     }
   }, [sessionState.session, surface])
-  const artifactSideWasOpen = useRef(false)
-  const inspectorWasInSheet = useRef(false)
   const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
   const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
     surfaceEscapeRef.current = handler
@@ -595,16 +582,6 @@ export function ProductApp({
       if (surfaceEscapeRef.current === handler) surfaceEscapeRef.current = null
     }
   }, [])
-  const [artifactOpen, setArtifactOpen] = useState(false)
-  const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
-  const artifactRequest = artifactInspectorState.request
-  useEffect(() => {
-    if (artifactRequest === null) return
-    return () => {
-      dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
-    }
-  }, [artifactRequest, dispatch])
-  const narrowInspector = useMediaQuery(INSPECTOR_SHEET_MEDIA)
   const narrowNavigation = useMediaQuery('(max-width: 760px)')
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
@@ -672,7 +649,6 @@ export function ProductApp({
     staleTime: Number.POSITIVE_INFINITY,
     enabled: surface !== 'settings',
   })
-  const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
   const bootstrapFailure = bootstrap.error
     ? bootstrap.error instanceof ProductTransportError
       ? 'Daemon unreachable'
@@ -680,7 +656,6 @@ export function ProductApp({
         ? 'Unexpected daemon response'
         : 'Daemon unavailable'
     : null
-  const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
   const revalidateBootstrap = bootstrap.refetch
   const productImportApi = useMemo(
@@ -791,7 +766,6 @@ export function ProductApp({
     void sessionState.workspace
     if (document.activeElement === document.body) mainRef.current?.focus()
   }, [surface, sessionState.session, sessionState.workspace])
-  const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings
       .filter((binding) => productCommandAvailable(binding.commandId, context))
@@ -806,7 +780,6 @@ export function ProductApp({
         // field is editing.
         options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
         callback: (event) => {
-          if (artifactSheetOwnsFocus) return
           const searchFormOwnsTarget =
             surface === 'search' &&
             event.target instanceof HTMLElement &&
@@ -853,7 +826,6 @@ export function ProductApp({
       .map((binding) => ({
         sequence: binding.sequence,
         callback: (event) => {
-          if (artifactSheetOwnsFocus) return
           if (isEditableTarget(event.target)) return
           if (store.getState().app.overlay === null) {
             if (
@@ -876,45 +848,6 @@ export function ProductApp({
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
-
-  useEffect(() => {
-    const returnedToSidePane = artifactOpen && inspectorWasInSheet.current && !inspectorInSheet
-    if (artifactOpen && !inspectorInSheet && (!artifactSideWasOpen.current || returnedToSidePane)) {
-      artifactSideWasOpen.current = true
-      artifactDigestRef.current?.focus()
-    } else if (!artifactOpen) {
-      artifactSideWasOpen.current = false
-    }
-    inspectorWasInSheet.current = inspectorInSheet
-  }, [artifactOpen, inspectorInSheet])
-
-  const closeArtifactInspector = useCallback(() => {
-    artifactSideWasOpen.current = false
-    setArtifactOpen(false)
-    requestAnimationFrame(() => mainRef.current?.focus())
-  }, [])
-
-  useEffect(() => {
-    if (!artifactOpen || inspectorInSheet) return undefined
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || app.overlay !== null) return
-      const target = event.target
-      if (!(target instanceof Element) || !target.closest('.product-inspector')) return
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement ||
-        (target instanceof HTMLElement && target.isContentEditable)
-      ) {
-        return
-      }
-      event.preventDefault()
-      event.stopPropagation()
-      closeArtifactInspector()
-    }
-    window.addEventListener('keydown', closeOnEscape, true)
-    return () => window.removeEventListener('keydown', closeOnEscape, true)
-  }, [app.overlay, artifactOpen, closeArtifactInspector, inspectorInSheet])
 
   const title = productRoutes.find((route) => route.id === surface)?.label ?? surface
   const timelineCapability = bootstrap.isPending
@@ -1044,14 +977,10 @@ export function ProductApp({
     '--product-navigation-width': app.navigationCollapsed
       ? '56px'
       : `${app.paneSizes.navigation}px`,
-    '--product-inspector-width': `${app.paneSizes.inspector}px`,
   } as CSSProperties
 
   return (
-    <div
-      className={`product-shell layout-${app.layout} ${artifactOpen && !inspectorInSheet ? 'has-artifact-inspector' : ''}`}
-      style={shellStyle}
-    >
+    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} context={context} collapsed={app.navigationCollapsed} />
       </aside>
@@ -1118,18 +1047,6 @@ export function ProductApp({
         </header>
         <SurfaceHeaderTarget value={headerTarget}>{content}</SurfaceHeaderTarget>
       </main>
-      {artifactOpen && !inspectorInSheet && (
-        <aside className="product-inspector" aria-label="Inspector">
-          <ArtifactInspector
-            available={artifactAvailable}
-            commandContext={context}
-            digestInputRef={artifactDigestRef}
-            onClose={closeArtifactInspector}
-            state={artifactInspectorState}
-            onStateChange={setArtifactInspectorState}
-          />
-        </aside>
-      )}
       <OpenSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <CommandPalette
         context={context}
@@ -1175,41 +1092,6 @@ export function ProductApp({
               active={surface}
               context={context}
               onActivate={() => dispatch(actions.overlaySet(null))}
-            />
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-      <Dialog.Root
-        open={artifactOpen && inspectorInSheet && app.overlay === null}
-        onOpenChange={(open) => {
-          if (!open && app.overlay === null) closeArtifactInspector()
-        }}
-      >
-        <Dialog.Portal>
-          <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content
-            className="artifact-sheet"
-            aria-describedby="artifact-sheet-description"
-            onEscapeKeyDown={(event) => event.stopPropagation()}
-            onOpenAutoFocus={(event) => {
-              event.preventDefault()
-              artifactDigestRef.current?.focus()
-            }}
-            onCloseAutoFocus={(event) => {
-              event.preventDefault()
-            }}
-          >
-            <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
-            <Dialog.Description id="artifact-sheet-description" className="sr-only">
-              Look up a blob by digest.
-            </Dialog.Description>
-            <ArtifactInspector
-              available={artifactAvailable}
-              commandContext={context}
-              digestInputRef={artifactDigestRef}
-              onClose={closeArtifactInspector}
-              state={artifactInspectorState}
-              onStateChange={setArtifactInspectorState}
             />
           </Dialog.Content>
         </Dialog.Portal>
