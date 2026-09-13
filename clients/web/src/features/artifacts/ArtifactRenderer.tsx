@@ -81,6 +81,30 @@ export const selectBlobView = (
 interface RendererProps<T extends RenderableArtifact> {
   artifact: T
   commandContext: CommandContext
+  onInspect?: (opener: HTMLButtonElement) => void
+}
+
+function ImageVisual({
+  name,
+  onInspect,
+  children,
+}: {
+  name: string
+  onInspect?: (opener: HTMLButtonElement) => void
+  children: ReactNode
+}) {
+  return onInspect ? (
+    <button
+      type="button"
+      className="artifact-visual artifact-preview-control"
+      aria-label={`Open ${name} details`}
+      onClick={(event) => onInspect(event.currentTarget)}
+    >
+      {children}
+    </button>
+  ) : (
+    <div className="artifact-visual">{children}</div>
+  )
 }
 
 type ArtifactCommandId =
@@ -220,7 +244,11 @@ function BoundedFooter({
   )
 }
 
-function SignalboxImageBody({ artifact, commandContext }: RendererProps<SignalboxImageArtifact>) {
+function SignalboxImageBody({
+  artifact,
+  commandContext,
+  onInspect,
+}: RendererProps<SignalboxImageArtifact>) {
   const dispatch = useAppDispatch()
   const [failedAutomaticUrls, setFailedAutomaticUrls] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -294,7 +322,7 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
 
   return (
     <div className="artifact-image-layout">
-      <div className="artifact-visual">
+      <ImageVisual name={artifact.displayName} onInspect={onInspect}>
         {rendered && renderedUrl ? (
           <img
             src={renderedUrl}
@@ -322,7 +350,7 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
         ) : (
           <FileQuestion aria-label="No preview available" />
         )}
-      </div>
+      </ImageVisual>
       <ArtifactMetadata
         renderer={rendered ? enumLabel(rendered.kind) : 'Details only'}
         mediaType={descriptor.declared_media_type}
@@ -413,9 +441,10 @@ const isSignalboxImage = (
 function ImageBody({
   artifact,
   commandContext,
+  onInspect,
 }: RendererProps<SignalboxImageArtifact | RemoteImageArtifact>) {
   return isSignalboxImage(artifact) ? (
-    <SignalboxImageBody artifact={artifact} commandContext={commandContext} />
+    <SignalboxImageBody artifact={artifact} commandContext={commandContext} onInspect={onInspect} />
   ) : (
     <RemoteImageBody artifact={artifact} commandContext={commandContext} />
   )
@@ -582,9 +611,11 @@ export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistr
 function RendererBoundary({
   artifact,
   commandContext,
+  onInspect,
 }: {
   artifact: ArtifactItem
   commandContext: CommandContext
+  onInspect?: (opener: HTMLButtonElement) => void
 }) {
   if (artifact.kind === 'blocked') {
     return (
@@ -598,7 +629,14 @@ function RendererBoundary({
     )
   }
   const Renderer = rendererRegistry[artifact.kind] as ComponentType<RendererProps<typeof artifact>>
-  return <Renderer key={artifact.id} artifact={artifact} commandContext={commandContext} />
+  return (
+    <Renderer
+      key={artifact.id}
+      artifact={artifact}
+      commandContext={commandContext}
+      onInspect={onInspect}
+    />
+  )
 }
 
 const artifactIcon = (artifact: ArtifactItem) => {
@@ -651,7 +689,7 @@ export function ArtifactRenderer({
           </small>
         </div>
       </button>
-      <RendererBoundary artifact={artifact} commandContext={commandContext} />
+      <RendererBoundary artifact={artifact} commandContext={commandContext} onInspect={onInspect} />
     </article>
   )
 }
