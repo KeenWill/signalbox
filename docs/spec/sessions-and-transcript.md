@@ -575,13 +575,15 @@ observation refreshes retain visible text while rereading loaded windows, or
 refresh from latest when following the confirmed actual timeline tail. Following
 continues when a refresh replaces the entire retained window, even if the prior
 tail row is absent. User-driven backward navigation clears that tail intent;
-automatic scans through hidden tail records preserve it. Refreshes continue
-retaining current text through a failed reread. The session-scoped reader
-compares immutable detail facts, including identities, attachment references and
-excerpt byte totals and overlapping excerpt content, across initial reads. It
-retains facts for at most 24 recently read event addresses; changed excerpt
-lengths under different read budgets preserve compatible prefixes and retain the
-longest checked excerpt.
+automatic scans through hidden tail records preserve it. Refreshing from latest
+resets automatic scanning to the earlier direction with a fresh scan budget.
+Refreshes continue retaining current text through a failed reread. The
+session-scoped reader rejects detail kinds that contradict their timeline
+headers and compares immutable detail facts, including identities, attachment
+references and excerpt byte totals and overlapping excerpt content, across
+initial reads. It retains facts for at most 24 recently read event addresses;
+changed excerpt lengths under different read budgets preserve compatible
+prefixes and retain the longest checked excerpt.
 
 Windows advance past metadata-only detail records, including goal-only tool
 batches hidden by the selected conversation summary, in the requested direction

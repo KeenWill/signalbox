@@ -7,6 +7,51 @@ import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/
 import { expect, test } from './fontTest'
 import { detailItems, detailPage, resultCursor, toolResultItem } from './session-detail-fixture'
 
+test('rejects contradictory detail kinds and recovers after a corrected retry', async ({
+  page,
+}) => {
+  let conflict = true
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (conflict && url.pathname.endsWith('/timeline-detail'))
+      return route.fulfill({
+        json: {
+          session_id: transcriptSessionId,
+          projected_body_bytes: 128,
+          continuation: null,
+          items: [
+            {
+              address: { event_sequence: '1' },
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            },
+          ],
+        },
+      })
+    return route.fulfill({ json: transcriptFixture(url, 1) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+  await expect(surface.getByText('Message 1', { exact: true })).toHaveCount(0)
+  conflict = false
+  await surface.getByRole('button', { name: 'Retry transcript' }).click()
+  await expect(surface.getByText('Message 1', { exact: true })).toBeVisible()
+  await expect(surface.getByRole('alert')).toHaveCount(0)
+})
+
 test('scrolls a hundred thousand messages in both directions with bounded rows', async ({
   page,
 }, testInfo) => {
@@ -487,6 +532,112 @@ for (const mode of ['earlier', 'hidden', 'historical']) {
   )
 }
 
+test('scans backward after forward paging reaches a newly hidden live tail', async ({ page }) => {
+  let latest = 16
+  let release = () => {}
+  const growth = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const anchors: string[] = []
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow')) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            {
+              kind: 'snapshot',
+              snapshot: {
+                session_id: transcriptSessionId,
+                observed_through: '16',
+                active: null,
+                queued_turn_count: '0',
+                queued_turn_ids: [],
+                reconciliation: null,
+                runner: null,
+              },
+            },
+            {
+              kind: 'durable',
+              cursor: '48',
+              address: { event_sequence: '48' },
+              event_kind: 'turn_completed',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    const payload = transcriptFixture(url, latest)
+    if (url.pathname.endsWith('/timeline')) {
+      anchors.push(url.searchParams.get('anchor') ?? '')
+      const window = payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+      return route.fulfill({
+        json: {
+          ...window,
+          items: window.items.map((item) =>
+            Number(item.address.event_sequence) > 16 ? { ...item, kind: 'turn_completed' } : item,
+          ),
+        },
+      })
+    }
+    if (url.pathname.endsWith('/timeline-detail') && Number(url.searchParams.get('first')) > 16) {
+      const detail =
+        payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+      return route.fulfill({
+        json: {
+          ...detail,
+          projected_body_bytes: 128,
+          items: detail.items.map((item) => ({
+            ...item,
+            kind: 'turn_completed',
+            projected_body_bytes: 128,
+            body: {
+              type: 'turn_lifecycle',
+              turn_id: transcriptSessionId,
+              lifecycle: 'terminalized',
+              cause_code: 'completed',
+            },
+          })),
+        },
+      })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'First', exact: true }).click()
+  await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
+  })
+  await expect(transcript).toHaveAttribute('data-total-loaded', '16')
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
+  })
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  const beforeGrowth = anchors.length
+  latest = 48
+  release()
+  await expect.poll(() => anchors.slice(beforeGrowth)).toContain('latest')
+  await expect.poll(() => anchors.slice(beforeGrowth)).toContain('before')
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
+})
+
 test('keeps an empty detail continuation available without retrying it automatically', async ({
   page,
 }) => {
@@ -681,6 +832,22 @@ for (const [itemLimit, byteLimit, expectedReads] of [
               max_timeline_detail_items: itemLimit,
               max_timeline_detail_bytes: byteLimit,
             },
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline')) {
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        const kind = 'turn_completed'
+        return route.fulfill({
+          json: {
+            ...window,
+            items: window.items.map((item) => ({
+              ...item,
+              kind,
+              projected_structured_bytes: 64 + kind.length,
+            })),
+            projected_structured_bytes: window.items.length * (64 + kind.length),
           },
         })
       }
