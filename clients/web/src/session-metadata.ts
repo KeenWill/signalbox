@@ -54,7 +54,7 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
     }
     throw new Error('Rename was not acknowledged. Retry to confirm the same title.')
   } catch (failure) {
-    if (failure instanceof ProductRequestError && [400, 404, 409].includes(failure.status)) {
+    if (failure instanceof ProductRequestError && [400, 404, 409, 413].includes(failure.status)) {
       unresolvedRenames.delete(sessionId)
     }
     if (controller.signal.aborted) {

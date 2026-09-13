@@ -1128,7 +1128,7 @@ for (const leaveCatalog of [false, true]) {
   })
 }
 
-test('a definitive rename rejection permits a corrected title with a new identity', async ({
+test('a 413 rename rejection permits a corrected title with a new identity', async ({
   page,
 }) => {
   await useCatalogFixture(page)
@@ -1136,7 +1136,7 @@ test('a definitive rename rejection permits a corrected title with a new identit
   await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
     requests.push(route.request().postDataJSON())
     await route.fulfill({
-      status: 400,
+      status: 413,
       json: {
         error: {
           kind: 'application',
