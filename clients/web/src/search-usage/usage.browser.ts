@@ -48,10 +48,19 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
     'unpriced',
   )
   await expect(page.getByRole('region', { name: 'Recent turn costs' })).toContainText('partial')
-  await expect(page.getByRole('link')).toHaveCount(0)
+  await expect(page.getByRole('link')).toHaveCount(1)
   const attention = page.getByRole('region', { name: 'Attention row' })
   await expect(attention.getByRole('button', { name: /unpriced/ })).toBeVisible()
-  await expect(attention.getByRole('button', { name: 'Example session' })).toBeEnabled()
+  await expect(attention.getByRole('link', { name: 'Example session' })).toBeEnabled()
+  await expect(attention.getByRole('link', { name: 'Example session' })).toHaveAttribute(
+    'href',
+    `/sessions?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&workspace=true`,
+  )
+  await attention.getByRole('button', { name: 'Preview example session' }).click()
+  await expect(attention.getByRole('button', { name: 'Preview example session' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
 
   const session = page.getByRole('region', { name: 'Session cost', exact: true })
   const toggle = session.getByRole('button')
@@ -74,9 +83,7 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
   for (const width of [1280, 761, 390]) {
     await page.setViewportSize({ width, height: 844 })
-    const sessionBox = await attention
-      .getByRole('button', { name: 'Example session' })
-      .boundingBox()
+    const sessionBox = await attention.getByRole('link', { name: 'Example session' }).boundingBox()
     const costBox = await attention.getByRole('button', { name: /unpriced/ }).boundingBox()
     if (!sessionBox || !costBox)
       throw new Error('The session action and cost display must be visible')
@@ -127,4 +134,162 @@ test('retries the connection when a session cost refresh follows bootstrap failu
   unavailable = false
   await page.getByRole('button', { name: 'Refresh costs' }).click()
   await expect(session.getByRole('button')).toHaveText('$0')
+})
+
+test('does not show session totals as turn cost when no turn is selected', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SearchUsageScenarioSource, SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const source = new SearchUsageScenarioSource()
+  const summaryRequests: URL[] = []
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/calls')
+      return route.fulfill({ json: { calls: [], continuation: null } })
+    if (url.pathname === '/api/usage/summary') {
+      summaryRequests.push(url)
+      return route.fulfill({ json: await source.usageSummary({}) })
+    }
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto(
+    `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  )
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toContainText(
+    '$2.84',
+  )
+  const turn = page.getByRole('region', { name: 'Turn cost', exact: true })
+  await expect(turn).toHaveText('Cost not loaded')
+  await expect(turn.getByRole('button')).toHaveCount(0)
+  expect(summaryRequests).toHaveLength(1)
+  expect(summaryRequests[0]?.searchParams.get('session_id')).toBe(SEARCH_USAGE_SCENARIO_SESSION_ID)
+  expect(summaryRequests[0]?.searchParams.has('turn_id')).toBe(false)
+})
+
+test('keeps filters in the route across reload and history navigation', async ({ page }) => {
+  await page.goto('/src/search-usage/preview.html')
+  const model = page.getByLabel('Model', { exact: true })
+  const rows = page.getByRole('rowgroup', { name: 'Usage call rows' })
+  await expect(rows).toHaveAttribute('data-total-loaded', '100')
+  await model.selectOption('00000000-0000-0000-0000-000000001003')
+  await expect(page).toHaveURL(/model=00000000-0000-0000-0000-000000001003/)
+  await expect(rows).toHaveAttribute('data-total-loaded', '48')
+  await page.reload()
+  await expect(model).toHaveValue('00000000-0000-0000-0000-000000001003')
+  await expect(rows).toHaveAttribute('data-total-loaded', '48')
+  await page.getByLabel('From', { exact: true }).fill('2026-08-22T12:30')
+  await expect(page).toHaveURL(/from=/)
+  await page.goBack()
+  await expect(page.getByLabel('From', { exact: true })).toHaveValue('')
+  await page.goForward()
+  await expect(page.getByLabel('From', { exact: true })).toHaveValue('2026-08-22T12:30')
+  await page.goBack()
+  await model.selectOption('')
+  await expect(rows).toHaveAttribute('data-total-loaded', '100')
+  await page.goBack()
+  await expect(model).toHaveValue('00000000-0000-0000-0000-000000001003')
+  await expect(rows).toHaveAttribute('data-total-loaded', '48')
+})
+
+test('mounts loaded subtotals only while inspected at the six-page limit', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SearchUsageScenarioSource } = await import('./scenario')
+  const source = new SearchUsageScenarioSource()
+  const fixture = (await source.usageCalls({ filters: {}, order: 'newest', maxItems: 1 })).calls[0]
+  if (!fixture) throw new Error('Fixture must contain a call')
+  let nextPage = 0
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/summary')
+      return route.fulfill({ json: { groups: [], truncated: false } })
+    const calls = Array.from({ length: 100 }, (_, offset) => {
+      const index = nextPage * 100 + offset
+      const id = `00000000-0000-0000-0000-${String(10000 - index).padStart(12, '0')}`
+      return {
+        ...fixture,
+        call_id: id,
+        session_id: id,
+        turn_id: id,
+        recorded_at_micros: String(Number(fixture.recorded_at_micros) - index),
+      }
+    })
+    nextPage += 1
+    const last = calls.at(-1)
+    await route.fulfill({
+      json: {
+        calls,
+        continuation:
+          nextPage < 6 && last
+            ? { call_id: last.call_id, recorded_at_micros: last.recorded_at_micros }
+            : null,
+      },
+    })
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/src/search-usage/preview.html?http')
+  const rows = page.getByRole('rowgroup', { name: 'Usage call rows' })
+  for (let count = 100; count <= 600; count += 100) {
+    await expect(rows).toHaveAttribute('data-total-loaded', String(count))
+    if (count < 600) await page.getByRole('button', { name: 'Load more' }).click()
+  }
+  const subtotals = page.getByRole('region', { name: 'Loaded cost subtotals', includeHidden: true })
+  await expect(subtotals).toHaveCount(0)
+  expect(Number(await rows.getAttribute('data-mounted-rows'))).toBeLessThan(60)
+  const disclosure = page.getByText('Session and turn costs in loaded calls', { exact: true })
+  await disclosure.click()
+  await expect(subtotals.getByRole('button', { name: 'Show session usage' })).toHaveCount(600)
+  await expect(subtotals).toContainText('incomplete')
+  await disclosure.click()
+  await expect(subtotals).toHaveCount(0)
+})
+
+test('reports missing session context without a loading status or request', async ({ page }) => {
+  const requests: string[] = []
+  await page.route('**/api/**', async (route) => {
+    requests.push(route.request().url())
+    await route.fulfill({ status: 500, body: 'No request should run without a session' })
+  })
+  await page.goto(
+    '/src/search-usage/preview.html?preview=cost&turn=00000000-0000-0000-0000-000000000001',
+  )
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toHaveText(
+    'Cost not loaded',
+  )
+  await expect(page.getByRole('region', { name: 'Turn cost', exact: true })).toHaveText(
+    'Cost not loaded',
+  )
+  expect(requests).toEqual([])
+})
+
+test('never presents cached scenario usage as server usage during failed reads', async ({
+  page,
+}) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  let release: () => void = () => undefined
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let usageReads = 0
+  await page.route('**/api/**', async (route) => {
+    if (new URL(route.request().url()).pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    usageReads += 1
+    await pending
+    await route.fulfill({ status: 503, body: 'Usage unavailable' })
+  })
+  await page.goto('/src/search-usage/preview.html?workbench')
+  const rows = page.getByRole('rowgroup', { name: 'Usage call rows' })
+  await expect(rows).toHaveAttribute('data-total-loaded', '100')
+  await expect(rows).toContainText('unpriced')
+  await page.getByRole('button', { name: 'Load server usage' }).click()
+  await expect.poll(() => usageReads).toBe(2)
+  await expect(rows).toHaveAttribute('data-total-loaded', '0')
+  await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
+  release()
+  await expect(page.getByRole('alert')).toContainText('Usage could not load')
+  await expect(rows).toHaveAttribute('data-total-loaded', '0')
+  await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
 })

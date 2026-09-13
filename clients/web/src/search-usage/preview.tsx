@@ -1,8 +1,22 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  parseSearchWith,
+  RouterProvider,
+  stringifySearchWith,
+  useLocation,
+  useNavigate,
+} from '@tanstack/react-router'
 import { createRoot } from 'react-dom/client'
 import '../app.css'
+import '../catalog.css'
+import { useState } from 'react'
+import { readProductRouteState } from '../product'
+import { defaultSearchUsageRouteState, SearchUsageWorkbench } from '../SearchUsage'
 import { AttentionCost } from './AttentionCost'
-import { SearchUsageScenarioSource } from './scenario'
+import { SEARCH_USAGE_SCENARIO_SESSION_ID, SearchUsageScenarioSource } from './scenario'
 import {
   CostChip,
   SessionCostChip,
@@ -13,6 +27,7 @@ import {
 import { UsageContent, UsageSurface } from './UsageSurface'
 
 function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string }) {
+  const [previewOpen, setPreviewOpen] = useState(false)
   const turns = useTurnCosts(sessionId)
   const session = useSessionCost(sessionId)
   return (
@@ -20,12 +35,10 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
       <section aria-label="Attention row" className="attention-list" style={{ maxWidth: 520 }}>
         <ol>
           <li className="attention-cost-row">
-            <button
-              type="button"
+            <a
+              className="attention-session-link"
               aria-label="Example session"
-              onClick={() =>
-                window.location.assign(`/sessions?session=${sessionId}&workspace=true`)
-              }
+              href={`/sessions?session=${sessionId}&workspace=true`}
             >
               <span className="attention-rail" aria-hidden="true" />
               <span className="attention-identity">
@@ -35,11 +48,21 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
               <span className="attention-obligation">Needs approval</span>
               <time>Today, 12:30</time>
               <span aria-hidden="true">→</span>
+            </a>
+            <button
+              className="attention-preview"
+              type="button"
+              aria-label="Preview example session"
+              aria-pressed={previewOpen}
+              onClick={() => setPreviewOpen(!previewOpen)}
+            >
+              Preview
             </button>
             <AttentionCost sessionId={sessionId} />
           </li>
         </ol>
       </section>
+
       <button type="button" onClick={() => void session.refetch()}>
         Refresh costs
       </button>
@@ -58,21 +81,60 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
   )
 }
 
+const source = new SearchUsageScenarioSource()
+function Preview() {
+  const search = useLocation({ select: (location) => location.searchStr })
+  const navigate = useNavigate()
+  const query = new URLSearchParams(search)
+  if (query.get('preview') === 'cost')
+    return <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
+  if (query.has('http')) return <UsageSurface />
+  if (query.has('workbench'))
+    return (
+      <div className="usage-product">
+        <button
+          type="button"
+          onClick={() =>
+            void navigate({
+              to: '.',
+              search: (previous) => ({ ...previous, http: 'true' }),
+            })
+          }
+        >
+          Load server usage
+        </button>
+        <SearchUsageWorkbench
+          source={source}
+          currentSessionId={SEARCH_USAGE_SCENARIO_SESSION_ID}
+          route={{ ...defaultSearchUsageRouteState, view: 'usage', usageSession: 'all' }}
+          onRouteChange={() => undefined}
+          onReveal={async () => undefined}
+        />
+      </div>
+    )
+  return <UsageContent source={source} authority="scenario" />
+}
+const rootRoute = createRootRoute()
+const route = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/src/search-usage/preview.html',
+  validateSearch: readProductRouteState,
+  component: Preview,
+})
+const router = createRouter({
+  routeTree: rootRoute.addChildren([route]),
+  parseSearch: parseSearchWith((value) => value),
+  stringifySearch: stringifySearchWith(String),
+})
+
 if (import.meta.env.DEV) {
   const root = document.getElementById('root')
-  const query = new URLSearchParams(window.location.search)
   if (root)
     createRoot(root).render(
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
-        {query.get('preview') === 'cost' ? (
-          <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
-        ) : query.has('http') ? (
-          <UsageSurface />
-        ) : (
-          <UsageContent source={new SearchUsageScenarioSource()} />
-        )}
+        <RouterProvider router={router} />
       </QueryClientProvider>,
     )
 }
