@@ -175,6 +175,12 @@ const SessionMetadata = ({
               ref={titleInput}
               value={title}
               onChange={(event) => setTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Escape' || saving) return
+                event.preventDefault()
+                event.stopPropagation()
+                close()
+              }}
               disabled={saving}
               required
             />
