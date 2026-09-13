@@ -143,3 +143,17 @@ test('labels omitted scalar file contents and preserves them in Raw', async ({ p
   await output.getByRole('button', { name: 'Show all fetched text' }).click()
   await expect(output.locator('code')).toContainText('x'.repeat(4001))
 })
+
+test('labels an empty structured string and preserves it in Raw', async ({ page }) => {
+  await page.goto('/src/features/tools/scenario.html')
+  const tool = page
+    .getByRole('region', { name: 'Empty text file read scenario', exact: true })
+    .getByRole('article')
+  await expect(tool.getByRole('region', { name: 'File contents', exact: true })).toHaveText(
+    'Empty text',
+  )
+  await tool.getByRole('button', { name: 'Raw', exact: true }).click()
+  await expect(
+    tool.getByRole('region', { name: 'Output', exact: true }).locator('code'),
+  ).toHaveText('{"status":"structured","body":"","truncated":false,"cursor":null}')
+})

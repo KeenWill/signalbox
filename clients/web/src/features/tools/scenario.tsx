@@ -4,6 +4,7 @@ import { ToolApproval, ToolCall } from './ToolCall'
 import {
   argumentExamples,
   emptyStructuredRead,
+  emptyTextStructuredRead,
   jsonExamples,
   partialApproval,
   scalarStructuredRead,
@@ -28,6 +29,9 @@ if (root)
       )}
       <section aria-label="Scalar file read scenario">
         <ToolCall tool={scalarStructuredRead} />
+      </section>
+      <section aria-label="Empty text file read scenario">
+        <ToolCall tool={emptyTextStructuredRead} />
       </section>
       <ToolApproval approval={partialApproval} />
       {argumentExamples.map(({ name, tool }) => (

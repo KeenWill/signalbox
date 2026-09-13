@@ -11,6 +11,18 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('labels an empty structured string as empty text', () => {
+    const markup = render(
+      toolExample(
+        'file_read',
+        {},
+        { status: 'structured', body: '', truncated: false, cursor: null },
+      ),
+    )
+    expect(markup).toContain('Empty text')
+    expect(markup).not.toContain('Showing part of the text')
+  })
+
   it.each([4000, 4001])('labels scalar structured body omissions at %s characters', (length) => {
     const markup = render(
       toolExample(

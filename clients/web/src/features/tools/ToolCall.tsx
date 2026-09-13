@@ -304,7 +304,7 @@ function MediaRead({ arguments: args, result, resultExcerpt }: RendererProps) {
             )
           ) : (
             <>
-              <p>{bodyPreview.content}</p>
+              <p>{result.body === '' ? 'Empty text' : bodyPreview.content}</p>
               {bodyPreview.omittedCharacters > 0 && <small>Showing part of the text</small>}
             </>
           )}
