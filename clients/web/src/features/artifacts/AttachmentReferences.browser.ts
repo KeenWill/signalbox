@@ -296,13 +296,21 @@ test('restores focus to the image preview control after closing details', async 
   )
   await page.goto('/src/features/artifacts/scenario.html')
   const control = page
-    .getByRole('article', { name: 'Artifact Image', exact: true })
-    .getByRole('button', { name: 'Image Image', exact: true })
+    .getByRole('list', { name: 'Attachments', includeHidden: true })
+    .getByRole('article', { name: 'Artifact Image', exact: true, includeHidden: true })
+    .getByRole('button', { name: 'Image Image', exact: true, includeHidden: true })
+  await expect(control).toHaveAttribute('aria-haspopup', 'dialog')
+  await expect(control).toHaveAttribute('aria-expanded', 'false')
+  await expect(control).not.toHaveAttribute('aria-pressed')
   await control.focus()
   await page.keyboard.press('Enter')
   await expect(page.getByRole('dialog', { name: 'Attachment details' })).toBeVisible()
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await expect(control).toHaveAttribute('aria-expanded', 'true')
+  await expect(pane).toHaveAttribute('id', (await control.getAttribute('aria-controls')) ?? '')
   await page.keyboard.press('Escape')
   await expect(control).toBeFocused()
+  await expect(control).toHaveAttribute('aria-expanded', 'false')
 })
 
 test('labels uppercase image MIME types as images in previews and details', async ({ page }) => {
