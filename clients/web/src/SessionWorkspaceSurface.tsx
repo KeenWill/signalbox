@@ -62,6 +62,7 @@ function SessionActions({
   const [text, setText] = useState('')
   const [chosenRequest, setChosenRequest] = useState<string | null>(null)
   const [chosenTurn, setChosenTurn] = useState<string | null>(null)
+  const inFlight = useRef(false)
   const queryClient = useQueryClient()
   const pendingActions = useMutationState({
     filters: { mutationKey: ['session-action'] },
@@ -102,6 +103,7 @@ function SessionActions({
       void onAccepted()
     },
     onSettled: (_, error, action) => {
+      inFlight.current = false
       if (
         !error ||
         error instanceof ProductInputError ||
@@ -129,7 +131,7 @@ function SessionActions({
     mutation.reset()
   }
   const confirm = () => {
-    if (sending || capacityReached) return
+    if (inFlight.current || sending || capacityReached) return
     let action = retained
     if (!action) {
       const command_id = crypto.randomUUID()
@@ -146,15 +148,16 @@ function SessionActions({
       } else if (choice === 'cancel' && chosenTurn && text.trim()) {
         action = {
           kind: 'cancel',
-          input: { command_id, expected_active_turn_id: chosenTurn, message: text.trim() },
+          input: { command_id, expected_active_turn_id: chosenTurn, message: text },
         }
       } else if (choice === 'set-goal' && text.trim()) {
-        action = { kind: 'set-goal', input: { command_id, statement: text.trim() } }
+        action = { kind: 'set-goal', input: { command_id, statement: text } }
       } else if (choice === 'clear-goal') {
         action = { kind: 'clear-goal', input: { command_id } }
       }
     }
     if (!action) return
+    inFlight.current = true
     for (const previous of queryClient
       .getMutationCache()
       .findAll({ mutationKey: ['session-action', sessionId] })) {

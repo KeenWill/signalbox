@@ -2,6 +2,8 @@ import { expect, test } from './fontTest'
 import { openSession, sessionApi, sessionId, turnId } from './session-fixture'
 
 const requestId = '20000000-0000-4000-8000-000000000001'
+const goalStatement = '  Finish the review\n'
+const successorMessage = '  Focus on the parser\n'
 
 test('approving a pending request confirms once inline', async ({ page }, testInfo) => {
   const api = await sessionApi(page, true)
@@ -54,12 +56,13 @@ test('goal retry keeps its original command and statement', async ({ page }) => 
   })
   await openSession(page)
   await page.getByRole('button', { name: 'Set goal', exact: true }).click()
-  await page.getByRole('textbox', { name: 'Goal', exact: true }).fill('Finish the review')
+  await page.getByRole('textbox', { name: 'Goal', exact: true }).fill(goalStatement)
   await page.getByRole('button', { name: 'Confirm', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Goal', exact: true })).toBeDisabled()
   await page.getByRole('button', { name: 'Retry same action' }).click()
   await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
   expect(requests).toHaveLength(2)
+  expect(requests[0]).toEqual({ command_id: expect.any(String), statement: goalStatement })
   expect(requests[1]).toEqual(requests[0])
 })
 
@@ -74,7 +77,7 @@ test('cancel retains its successor and identity across navigation', async ({ pag
   await page.getByRole('button', { name: 'Cancel turn', exact: true }).click()
   expect(requests).toHaveLength(0)
   await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeDisabled()
-  await page.getByRole('textbox', { name: 'Message to continue with' }).fill('Focus on the parser')
+  await page.getByRole('textbox', { name: 'Message to continue with' }).fill(successorMessage)
   await page.screenshot({ path: testInfo.outputPath('cancel-confirmation.png'), fullPage: true })
   await page.getByRole('button', { name: 'Confirm', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Message to continue with' })).toBeDisabled()
@@ -83,7 +86,7 @@ test('cancel retains its successor and identity across navigation', async ({ pag
   await expect(page).toHaveURL(/\/settings$/)
   await page.goBack()
   await expect(page.getByRole('textbox', { name: 'Message to continue with' })).toHaveValue(
-    'Focus on the parser',
+    successorMessage,
   )
   await page.getByRole('button', { name: 'Retry same action' }).click()
   await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
@@ -91,7 +94,7 @@ test('cancel retains its successor and identity across navigation', async ({ pag
     {
       command_id: expect.any(String),
       expected_active_turn_id: turnId,
-      message: 'Focus on the parser',
+      message: successorMessage,
     },
     requests[0],
   ])
@@ -102,4 +105,25 @@ test('an idle session does not offer cancel', async ({ page }) => {
   await openSession(page)
   await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel turn', exact: true })).toHaveCount(0)
+})
+
+test('two synchronous confirmations send one command', async ({ page }) => {
+  await sessionApi(page, true)
+  const requests: unknown[] = []
+  await page.route(`**/api/sessions/${sessionId}/cancel`, (route) => {
+    requests.push(route.request().postDataJSON())
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page.getByRole('button', { name: 'Cancel turn', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message to continue with' }).fill(successorMessage)
+  await page.getByRole('button', { name: 'Confirm', exact: true }).evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) throw new Error('Confirm must be a button')
+    button.click()
+    button.click()
+  })
+  await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+  expect(requests).toEqual([
+    { command_id: expect.any(String), expected_active_turn_id: turnId, message: successorMessage },
+  ])
 })
