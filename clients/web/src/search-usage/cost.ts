@@ -1,5 +1,4 @@
 import type { WebUsageCost } from '../generated/web-contract.mjs'
-import { enumLabel } from '../labels'
 
 export interface CostTotal {
   amountUsd: string
@@ -25,7 +24,7 @@ export function totalCost(
   const rateRows = new Map<string, (typeof rows)[number][]>()
   for (const row of rows) {
     if (row.cost.status !== 'derived') continue
-    const key = `${enumLabel(row.provenance)} · ${enumLabel(row.cost.label)} · ${row.cost.rate_version}`
+    const key = `${row.provenance} · ${row.cost.label} · ${row.cost.rate_version}`
     const group = rateRows.get(key) ?? []
     group.push(row)
     rateRows.set(key, group)
