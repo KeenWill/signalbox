@@ -13,6 +13,7 @@ import type { CommandContext } from './commands'
 import type {
   WebSessionTimelineDetailBody,
   WebSessionTimelineDetailPage,
+  WebTimelineDetailContinuation,
   WebTimelineTextExcerpt,
   WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
@@ -29,6 +30,12 @@ import {
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
+
+type ContinuedEventState = {
+  cursor: WebTimelineDetailContinuation | null
+  previous: WebSessionTimelineDetailPage
+  current?: WebSessionTimelineDetailPage
+}
 
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
@@ -130,6 +137,8 @@ function TranscriptWindow({
   eventSequence,
   anchor,
 }: SessionTranscriptTextProps) {
+  const [continuedEvents, setContinuedEvents] = useState<Record<string, ContinuedEventState>>({})
+  const [focusedRow, setFocusedRow] = useState<string | null>(null)
   const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
   const initialAnchor = useMemo<TranscriptReadAnchor>(
     () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
@@ -259,6 +268,29 @@ function TranscriptWindow({
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
   useEffect(() => {
+    setContinuedEvents((current) =>
+      Object.keys(current).some((id) => !ids.includes(id))
+        ? Object.fromEntries(Object.entries(current).filter(([id]) => ids.includes(id)))
+        : current,
+    )
+  }, [ids])
+  const renderContinuation = (id: string, page: WebSessionTimelineDetailPage) => (
+    <ContinuedEvent
+      sessionId={sessionId}
+      page={page}
+      limits={limits}
+      state={continuedEvents[id]}
+      onChange={(state) =>
+        setContinuedEvents((current) => {
+          if (state) return { ...current, [id]: state }
+          const next = { ...current }
+          delete next[id]
+          return next
+        })
+      }
+    />
+  )
+  useEffect(() => {
     if (readerAtEnd.current && pages && !pages.at(-1)?.window.continuation_after)
       followLatest.current = true
   }, [pages])
@@ -336,9 +368,12 @@ function TranscriptWindow({
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
-        <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
-      )}
+      {!transcript.isPending &&
+        !transcript.isFetching &&
+        !transcript.isError &&
+        rows.length === 0 && (
+          <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
+        )}
       <VirtualTranscript
         scrollRef={scrollRef}
         ids={ids}
@@ -360,6 +395,7 @@ function TranscriptWindow({
           )
         }
         selectedId={selectedId}
+        pinnedId={focusedRow}
         onEdge={(direction) => {
           if (pageRead.current || transcript.isFetching || transcript.isError) return
           if (!(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage))
@@ -381,8 +417,12 @@ function TranscriptWindow({
                 style={style}
                 className="session-message-entry"
                 data-event-sequence={row.sequence}
+                onFocusCapture={() => setFocusedRow(row.id)}
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
+                }}
               >
-                <ContinuedEvent sessionId={sessionId} page={row.pending} limits={limits} />
+                {renderContinuation(row.id, row.pending)}
               </div>
             )
           const item = row.item
@@ -397,13 +437,17 @@ function TranscriptWindow({
               style={style}
               className="session-message-entry"
               data-event-sequence={item.address.event_sequence}
+              onFocusCapture={() => setFocusedRow(row.id)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
+              }}
             >
               {hasConversationContent(item, entries.slice(0, entries.indexOf(item))) && (
                 <BodyText body={item.body} />
               )}
-              {detailPage?.continuation && (
-                <ContinuedEvent sessionId={sessionId} page={detailPage} limits={limits} />
-              )}
+              {detailPage &&
+                (detailPage.continuation || continuedEvents[row.id]) &&
+                renderContinuation(row.id, detailPage)}
             </div>
           )
         }}
@@ -426,36 +470,69 @@ function ContinuedEvent({
   sessionId,
   page,
   limits,
+  state,
+  onChange,
 }: {
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
+  state?: ContinuedEventState
+  onChange: (state?: ContinuedEventState) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [cursor, setCursor] = useState(page.continuation ?? null)
-  const previous = useRef(page)
-  const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
-  const detail = useQuery({
-    queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
-    enabled: open,
-    queryFn: ({ signal }) =>
-      readSessionTranscript(
-        sessionId,
-        sequence,
-        sequence,
-        cursor,
-        limits,
-        signal,
-        previous.current,
-      ),
-    gcTime: 0,
-  })
-  if (!open)
+  const opener = useRef<HTMLButtonElement>(null)
+  if (!state)
     return (
-      <button type="button" onClick={() => setOpen(true)}>
+      <button
+        ref={opener}
+        type="button"
+        onClick={() => onChange({ cursor: page.continuation ?? null, previous: page })}
+      >
         Read more
       </button>
     )
+  return (
+    <ContinuedEventReader
+      sessionId={sessionId}
+      page={page}
+      limits={limits}
+      state={state}
+      onChange={onChange}
+      onClose={() => {
+        onChange(undefined)
+        requestAnimationFrame(() => opener.current?.focus())
+      }}
+    />
+  )
+}
+
+function ContinuedEventReader({
+  sessionId,
+  page,
+  limits,
+  state,
+  onChange,
+  onClose,
+}: {
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+  state: ContinuedEventState
+  onChange: (state: ContinuedEventState) => void
+  onClose: () => void
+}) {
+  const cursor = state.cursor
+  const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
+    queryFn: ({ signal }) =>
+      readSessionTranscript(sessionId, sequence, sequence, cursor, limits, signal, state.previous),
+    gcTime: 0,
+    initialData: state.current,
+    staleTime: state.current ? Number.POSITIVE_INFINITY : 0,
+  })
+  useEffect(() => {
+    if (detail.data && state.current !== detail.data) onChange({ ...state, current: detail.data })
+  }, [detail.data, state, onChange])
   return (
     <section aria-label="More message text">
       {detail.isPending && <p role="status">Loading details…</p>}
@@ -487,22 +564,14 @@ function ContinuedEvent({
           type="button"
           onClick={() => {
             if (detail.data) {
-              previous.current = detail.data
-              setCursor(detail.data.continuation ?? null)
+              onChange({ previous: detail.data, cursor: detail.data.continuation ?? null })
             }
           }}
         >
           Continue reading
         </button>
       )}
-      <button
-        type="button"
-        onClick={() => {
-          setOpen(false)
-          setCursor(page.continuation ?? null)
-          previous.current = page
-        }}
-      >
+      <button type="button" onClick={onClose}>
         Close details
       </button>
     </section>

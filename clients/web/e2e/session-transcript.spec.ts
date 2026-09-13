@@ -45,6 +45,7 @@ test('rejects contradictory detail kinds and recovers after a corrected retry', 
   await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
   const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
   await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+  await expect(surface.getByText('No messages', { exact: false })).toHaveCount(0)
   await expect(surface.getByText('Message 1', { exact: true })).toHaveCount(0)
   conflict = false
   await surface.getByRole('button', { name: 'Retry transcript' }).click()
@@ -357,6 +358,104 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
   expect(offsets).toEqual(['0', '1'])
   await continuation.getByRole('button', { name: 'Close details' }).click()
   await expect(continuation).toHaveCount(0)
+})
+
+test('retains the continued reader through virtual unmounts and keeps focused controls mounted', async ({
+  page,
+}) => {
+  const offsets: string[] = []
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    const payload = transcriptFixture(url, 24)
+    if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '24') {
+      const detail =
+        payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+      const offset = url.searchParams.get('cursor_offset') ?? '0'
+      offsets.push(offset)
+      const continuation =
+        offset === '3'
+          ? null
+          : {
+              address: { event_sequence: '24' },
+              field: 'input_text',
+              member_index: 0,
+              offset_bytes: String(Number(offset) + 1),
+            }
+      return route.fulfill({
+        json: {
+          ...detail,
+          projected_body_bytes: 129,
+          continuation: continuation ? { type: 'more_body', body: continuation } : null,
+          items: detail.items.map((item) => ({
+            ...item,
+            projected_body_bytes: 129,
+            body: {
+              ...item.body,
+              text: {
+                text: 'abcd'[Number(offset)],
+                offset_bytes: offset,
+                total_bytes: '4',
+                continuation,
+              },
+            },
+          })),
+        },
+      })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  await page.addStyleTag({ content: '.session-message-entry { min-height: 200px; }' })
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toBeVisible()
+  for (const loaded of [16, 24]) {
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    await transcript.evaluate((element) => {
+      element.scrollTop = 0
+      element.dispatchEvent(new WheelEvent('wheel', { deltaY: -900, bubbles: true }))
+    })
+    await expect(transcript).toHaveAttribute('data-total-loaded', String(loaded))
+  }
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  const row = transcript.locator('[data-event-sequence="24"]')
+  await row.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(row.getByText('b', { exact: true })).toBeVisible()
+  await row.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(row.getByText('c', { exact: true })).toBeVisible()
+  const advance = row.getByRole('button', { name: 'Continue reading', exact: true })
+  await advance.focus()
+  await transcript.evaluate((element) => {
+    element.scrollTop = 0
+  })
+  await expect(advance).toBeFocused()
+  await expect(row).toHaveCount(1)
+  await transcript.focus()
+  await expect(row).toHaveCount(0)
+  expect(Number(await transcript.getAttribute('data-mounted-rows'))).toBeLessThanOrEqual(24)
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(row.getByText('c', { exact: true })).toBeVisible()
+  expect(offsets).toEqual(['0', '1', '2'])
+  await advance.click()
+  await expect(row.getByText('d', { exact: true })).toBeVisible()
+  expect(offsets).toEqual(['0', '1', '2', '3'])
+  await row.getByRole('button', { name: 'Close details', exact: true }).click()
+  const opener = row.getByRole('button', { name: 'Read more', exact: true })
+  await expect(opener).toBeFocused()
+  await opener.click()
+  await expect(row.getByText('b', { exact: true })).toBeVisible()
+  expect(offsets).toEqual(['0', '1', '2', '3', '1'])
 })
 
 for (const mode of ['earlier', 'hidden', 'historical']) {
