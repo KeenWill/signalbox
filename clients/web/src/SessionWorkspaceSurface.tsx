@@ -467,7 +467,7 @@ export function SessionWorkspaceSurface({
         </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          <span>Session failed to load.</span>{' '}
+          <span>{session.isFetching ? 'Retrying session…' : 'Session failed to load.'}</span>{' '}
           <button
             type="button"
             disabled={session.isFetching}

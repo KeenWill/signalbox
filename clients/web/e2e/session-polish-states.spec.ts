@@ -1,5 +1,31 @@
 import { expect, test } from './fontTest'
-import { initialMessage, sessionApi, sessionId } from './session-fixture'
+import { initialMessage, openSession, sessionApi, sessionId } from './session-fixture'
+
+test('a failed refresh announces each retry and its outcome', async ({ page }) => {
+  await sessionApi(page)
+  await openSession(page)
+  let holdRetry = false
+  let releaseRetry = () => {}
+  const held = new Promise<void>((resolve) => {
+    releaseRetry = resolve
+  })
+  await page.route(`**/api/sessions/${sessionId}`, async (route) => {
+    if (holdRetry) await held
+    await route.fulfill({ status: 503, json: { error: 'Unavailable' } })
+  })
+  await page.getByRole('button', { name: 'Latest', exact: true }).click()
+  const alert = page.getByRole('alert')
+  await expect(alert).toContainText('Session failed to load.')
+  holdRetry = true
+  const retry = page.getByRole('button', { name: 'Retry session', exact: true })
+  await retry.press('Enter')
+  await expect(alert).toContainText('Retrying session…')
+  await expect(retry).toBeDisabled()
+  releaseRetry()
+  await expect(alert).toContainText('Session failed to load.')
+  await expect(retry).toBeEnabled()
+  await expect(page.getByRole('region', { name: 'Session workspace', exact: true })).toBeFocused()
+})
 
 for (const width of [1440, 390]) {
   test(`session load failure keeps a retry beside the message at ${width}`, async ({
