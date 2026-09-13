@@ -1,4 +1,4 @@
 //! Allocator for the daemon's concurrent, mixed-lifetime Rust allocations.
 
 #[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
