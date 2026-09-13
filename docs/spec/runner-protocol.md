@@ -211,7 +211,8 @@ execute concurrently on it. A combined-locus tool runs on the session's attached
 runner when that runner advertises it and otherwise runs on the daemon. An
 unpinned placement that the connected runner cannot satisfy, or a placement lost
 before its first pin, retains daemon fallback. Caller cancellation retains the
-global dispatch permit until the durable lease completes or becomes lost. A lost
+global dispatch permit until the durable lease completes or becomes lost.
+Closing the incarnation's database pool ends its local dispatch waiters. A lost
 lease releases the global dispatch permit; the tool loop accepts the recovery
 wait only after rereading the exact lost lease and its issuing turn attempt's
 durable yield.
