@@ -27,8 +27,9 @@ import {
   type SessionTranscriptLimits,
 } from './product'
 import { GoalEventDetail } from './SessionItemDetail'
-import { conversationEntryKey } from './session-timeline/conversation'
+import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
 import {
+  detailExcerptAt,
   initialDetailFacts,
   type SessionWindowAnchor,
   sameInitialDetailFacts,
@@ -506,9 +507,17 @@ function TranscriptWindow({
   const pending = useMemo(
     () =>
       pages?.flatMap((page) =>
-        page.details.filter((detail) => detail.items.length === 0 && detail.continuation),
+        page.details.filter((detail) => {
+          const last = detail.items.at(-1)
+          return (
+            detail.continuation &&
+            (!last ||
+              (last.body.type !== 'tool_batch' &&
+                !turns.some((turn) => isVisibleTurnEvent(turn, last))))
+          )
+        }),
       ) ?? [],
-    [pages],
+    [pages, turns],
   )
   const rows = useMemo(
     () =>
@@ -782,7 +791,7 @@ function TranscriptWindow({
         </p>
       )}
       {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
-        <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
+        <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
       )}
       {associations.retries.length > 0 && (
         <p role="alert">
@@ -1152,15 +1161,20 @@ function ToolSummary({
           {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
           {result && <ToolText label="Output" excerpt={result} />}
           {failure && <ToolText label="Failure" excerpt={failure} />}
-          {evidence?.failure_present && !evidence.failure && (
-            <p className="session-turn-outcome">
-              Failure · {enumLabel(evidence.cause ?? evidence.state)}
-            </p>
-          )}
+          {evidence &&
+            (evidence.state === 'known_failed' || evidence.failure_present) &&
+            !evidence.failure && (
+              <p className="session-turn-outcome">
+                Failure · {enumLabel(evidence.cause ?? evidence.state)}
+              </p>
+            )}
         </>
       )}
       {needsOutput && output.isPending && <small role="status">Loading output…</small>}
       {needsOutput && output.isError && <small role="alert">Output could not be loaded.</small>}
+      {[tool.arguments, result, failure].some(
+        (excerpt) => excerpt && (excerpt.offset_bytes !== '0' || excerpt.continuation != null),
+      ) && <small>Excerpt · more text available</small>}
     </section>
   )
 }
@@ -1476,11 +1490,20 @@ function ContinuedEventReader({
       ].map(({ key, items }) => (
         <div key={key}>
           {items.map((item) => {
+            const readCursor = JSON.parse(key) as WebTimelineDetailContinuation | null
+            const excerpt =
+              readCursor?.type === 'more_body' && !hasConversationContent(item)
+                ? detailExcerptAt(item.body, readCursor.body)
+                : null
             const showAttachments = !attachedMessages.has(item.address.event_sequence)
             attachedMessages.add(item.address.event_sequence)
             return (
               <div key={conversationEntryKey(item)}>
-                <BodyText body={item.body} showAttachments={showAttachments} />
+                {excerpt ? (
+                  <ToolText label="Details" excerpt={excerpt} />
+                ) : (
+                  <BodyText body={item.body} showAttachments={showAttachments} />
+                )}
               </div>
             )
           })}

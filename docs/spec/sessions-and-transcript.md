@@ -572,15 +572,16 @@ position even when that window reaches the actual tail; it does not
 automatically request the remaining history. Following live growth resumes when
 the reader scrolls to that tail. Session and anchor changes reset the view;
 observation refreshes retain visible text while rereading loaded windows, or
-refresh from latest when following the confirmed actual timeline tail.
-User-driven backward navigation clears that tail intent; automatic scans through
-hidden tail records preserve it. Refreshes continue retaining current text
-through a failed reread. The session-scoped reader compares immutable detail
-facts, including identities, attachment references and excerpt byte totals and
-overlapping excerpt content, across initial reads and expanded event rereads. It
-retains facts for at most 24 recently read event addresses; changed excerpt
-lengths under different read budgets preserve compatible prefixes and retain the
-longest checked excerpt.
+refresh from latest when following the confirmed actual timeline tail. Following
+continues when a refresh replaces the entire retained window, even if the prior
+tail row is absent. User-driven backward navigation clears that tail intent;
+automatic scans through hidden tail records preserve it. Refreshes continue
+retaining current text through a failed reread. The session-scoped reader
+compares immutable detail facts, including identities, attachment references and
+excerpt byte totals and overlapping excerpt content, across initial reads and
+expanded event rereads. It retains facts for at most 24 recently read event
+addresses; changed excerpt lengths under different read budgets preserve
+compatible prefixes and retain the longest checked excerpt.
 
 Windows advance past metadata-only detail records, including goal-only tool
 batches hidden by the selected conversation summary, in the requested direction
@@ -590,15 +591,18 @@ discarded records. The scan item budget is clamped to the advertised detail
 limit; each automatic read uses only the remaining scan allowance. Scanning
 stops at a visible item, a detail continuation, or an exhausted budget. Rapid
 edge events share one in-flight page read. Programmatic anchor and measurement
-adjustments do not start page reads. An empty detail page preserves its
-unreturned-item continuation. Scrolling again starts a fresh bounded scan using
-the timeline continuation. Turn segments retain window boundaries so prepending
-history preserves existing rows and their disclosures. Retained tool chips stay
-in their assigned window segment when earlier proposal evidence is loaded;
-evicted assignments are discarded. An open request-only tool keeps its
-disclosure and continued text when its first physical attempt arrives. Later
-physical attempts retain separate disclosure identities. Turn-wide
-classification uses all loaded events.
+adjustments do not start page reads. Prepending rows does not trigger selection
+scrolling when the selected row identity stays unchanged; a changed selection
+scrolls into view once its row is available. An empty detail page preserves its
+unreturned-item continuation. Hidden non-tool details with a body continuation
+retain an addressable reading row; opening it shows the requested excerpt.
+Scrolling again starts a fresh bounded scan using the timeline continuation.
+Turn segments retain window boundaries so prepending history preserves existing
+rows and their disclosures. Retained tool chips stay in their assigned window
+segment when earlier proposal evidence is loaded; evicted assignments are
+discarded. An open request-only tool keeps its disclosure and continued text
+when its first physical attempt arrives. Later physical attempts retain separate
+disclosure identities. Turn-wide classification uses all loaded events.
 
 The transcript groups contiguous events by turn while preserving interleaved
 chronology. Summary shows user messages, assistant text accompanying tool calls,
@@ -606,34 +610,35 @@ final assistant text and unsuccessful turn outcomes. Tool calls and their detail
 are hidden in Summary. A completed response remains visible as a non-final
 message when its completed-turn closure is not loaded. Distinct physical tool
 attempts remain independently inspectable in event order even when they share
-one request. Later batch members load on demand at the batch position as
-separate tool chips. A cursor advancing to another member is exposed outside the
-preceding tool disclosure; same-member argument, output and failure fields
-remain inside that disclosure. Goal-text cursors do not belong to tool
-disclosures, including cursors returned after reading tool text; nested reading
-controls stop before a goal field. Provider failures remain visible at their
-event position, including before a later successful retry. Tool output reads use
-the matching physical attempt in the retained detail pages, including later turn
-segments. Expanded tool evidence stays beside its originating chip before later
-messages. Repeated terminal outcomes for the same turn and cause appear once at
-their first chronological position. New browser profiles start in Summary;
-stored level choices are preserved. Applying a level command clears local turn
-overrides and opened continuation readers even when that level is already
-selected. Tools shows tool chips with argument and output summaries. All details
-exposes every loaded event, including bookkeeping, independently of the Events
-control. Tool-produced goal events show their status and bounded text alongside
-tools. Turn details use the bounded per-turn detail route. Explicit continuation
-reads retain earlier opened chunks until the detail view closes or leaves the
-retained transcript. The last bounded raw detail page remains available to
-validate each body continuation. Individual turns can expand independently of
-the persisted level. Escape collapses the focused expanded turn and restores a
-surviving heading control for that turn before a subsequent Escape closes the
-workspace. The scrolling transcript owns the conversation focus entry and
-command target; the enclosing section adds no focus stop. Invalid event-link
-addresses outside the unsigned 64-bit range are ignored. When a turn is opened,
-retained events without a turn identity are associated only by an exact per-turn
-route match with unchanged immutable facts; events skipped by that route remain
-outside the selected turn.
+one request. A failed attempt remains labeled as failed with its available cause
+even when it has no failure excerpt. Later batch members load on demand at the
+batch position as separate tool chips. A cursor advancing to another member is
+exposed outside the preceding tool disclosure; same-member argument, output and
+failure fields remain inside that disclosure. Goal-text cursors do not belong to
+tool disclosures, including cursors returned after reading tool text; nested
+reading controls stop before a goal field. Provider failures remain visible at
+their event position, including before a later successful retry. Tool output
+reads use the matching physical attempt in the retained detail pages, including
+later turn segments. Expanded tool evidence stays beside its originating chip
+before later messages. Repeated terminal outcomes for the same turn and cause
+appear once at their first chronological position. New browser profiles start in
+Summary; stored level choices are preserved. Applying a level command clears
+local turn overrides and opened continuation readers even when that level is
+already selected. Tools shows tool chips with argument and output summaries. All
+details exposes every loaded event, including bookkeeping, independently of the
+Events control. Tool-produced goal events show their status and bounded text
+alongside tools. Turn details use the bounded per-turn detail route. Explicit
+continuation reads retain earlier opened chunks until the detail view closes or
+leaves the retained transcript. The last bounded raw detail page remains
+available to validate each body continuation. Individual turns can expand
+independently of the persisted level. Escape collapses the focused expanded turn
+and restores a surviving heading control for that turn before a subsequent
+Escape closes the workspace. The scrolling transcript owns the conversation
+focus entry and command target; the enclosing section adds no focus stop.
+Invalid event-link addresses outside the unsigned 64-bit range are ignored. When
+a turn is opened, retained events without a turn identity are associated only by
+an exact per-turn route match with unchanged immutable facts; events skipped by
+that route remain outside the selected turn.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
