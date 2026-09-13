@@ -10,6 +10,7 @@ import {
 const requestId = '20000000-0000-4000-8000-000000000001'
 const goalStatement = '  Finish the review\n'
 const successorMessage = '  Focus on the parser\n'
+const nextTurnId = '00000000-0000-0000-0000-000000000993'
 
 test('approving a pending request confirms once inline', async ({ page }, testInfo) => {
   const api = await sessionApi(page, true)
@@ -394,6 +395,58 @@ test('rejected drafts share the four-action capacity and are recovered without e
   if (!fifth) throw new Error('Missing fifth session fixture')
   await openSessionFromCatalog(page, fifth)
   await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled()
+})
+
+for (const transition of ['changes', 'ends']) {
+  test(`a fresh cancellation stops submitting when its turn ${transition}`, async ({ page }) => {
+    const api = await sessionApi(page, true)
+    const requests: string[] = []
+    page.on('request', (request) => {
+      if (['POST', 'PUT', 'DELETE'].includes(request.method())) requests.push(request.url())
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: 'Cancel turn', exact: true }).click()
+    const field = page.getByRole('textbox', { name: 'Message to continue with' })
+    await field.fill(successorMessage)
+    const confirm = page.getByRole('button', { name: 'Confirm', exact: true })
+    await expect(confirm).toBeEnabled()
+    api.state.activeTurnId = nextTurnId
+    api.state.active = transition === 'changes'
+    api.advanceObservation()
+    await expect(confirm).toBeDisabled()
+    await confirm.evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) throw new Error('Confirm must be a button')
+      button.form?.requestSubmit()
+    })
+    expect(requests).toEqual([])
+    await expect(field).toHaveValue(successorMessage)
+  })
+}
+
+test('a retained cancellation replays its original turn when another turn awaits approval', async ({
+  page,
+}) => {
+  const api = await sessionApi(page, true)
+  const requests: unknown[] = []
+  await page.route(`**/api/sessions/${sessionId}/cancel`, (route) => {
+    requests.push(route.request().postDataJSON())
+    return requests.length === 1 ? route.abort('failed') : route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page.getByRole('button', { name: 'Cancel turn', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message to continue with' }).fill(successorMessage)
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Outcome unconfirmed')
+  api.state.activeTurnId = nextTurnId
+  api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+  api.advanceObservation()
+  await expect(page.getByRole('button', { name: 'Approve', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Retry same action' }).click()
+  await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+  expect(requests).toEqual([
+    { command_id: expect.any(String), expected_active_turn_id: turnId, message: successorMessage },
+    requests[0],
+  ])
 })
 
 for (const action of ['Cancel turn', 'Clear goal']) {

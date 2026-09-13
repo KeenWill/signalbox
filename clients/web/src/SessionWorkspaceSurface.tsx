@@ -150,6 +150,7 @@ function SessionActions({
   const freshActionUnavailable =
     retained === null &&
     ((pendingRequest !== null && (choice === 'cancel' || choice === 'clear-goal')) ||
+      (choice === 'cancel' && chosenTurn !== activeTurn) ||
       ((choice === 'approve' || choice === 'deny') && chosenRequest !== pendingRequest))
   const [notice, setNotice] = useState('')
   const mutation = useMutation({
