@@ -62,6 +62,15 @@ const scriptedFetch = (urls: string[]): typeof fetch =>
   }) as typeof fetch
 
 describe('HttpSearchUsageSource', () => {
+  it('calls fetch without binding it to the client instance', async () => {
+    const request = async function (this: unknown, input: RequestInfo | URL) {
+      expect(this).toBeUndefined()
+      return responseFor(String(input))
+    }
+    const source = await HttpSearchUsageSource.connect(request)
+    await source.usageSummary({})
+    await source.usageCalls({ filters: {}, order: 'newest', maxItems: 1 })
+  })
   it('uses lexical product parameters for a current-session search', async () => {
     const urls: string[] = []
     const source = await HttpSearchUsageSource.connect(scriptedFetch(urls))
