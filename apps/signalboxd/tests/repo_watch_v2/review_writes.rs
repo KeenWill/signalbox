@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 fn review_and_thread(
     repository: &RepositorySlug,
@@ -232,14 +233,14 @@ pub(super) async fn identity_attempt(
         clients: IdentityClient(client),
         store: store.clone(),
     };
-    let result = task.poll_outcome(EventProducer::Poll).await;
+    let result = task.poll_outcome(EventProducer::Webhook).await;
     assert_eq!(
         requests.load(Ordering::SeqCst),
         1,
         "identity lookup stays within the one-request attempt budget"
     );
     if login.is_some() {
-        assert!(matches!(result, Ok(PollOutcome::Partial)));
+        assert!(matches!(result, Ok(PollOutcome::Succeeded)));
         true
     } else {
         assert!(result.is_err());
@@ -367,6 +368,152 @@ async fn observer_identity_gates_evaluation_and_self_review_exclusion_survives_r
     assert!(
         quarantined,
         "identity filtering preserves ordinary event quarantine"
+    );
+    pool.close().await;
+    core.close().await;
+    Ok(())
+}
+
+fn observation_identity_client(requests: Arc<std::sync::Mutex<Vec<String>>>) -> IdentityClient {
+    use signalbox_module_repo_watch_v2::github::GitHubClient;
+    let pages = ConditionalPollFixture::new().pages;
+    IdentityClient(
+        GitHubClient::try_with_request_sender(
+            "observation-identity-fixture",
+            Arc::new(move |request, _| {
+                let request = request.build().expect("fixture request");
+                let path = request.url().path();
+                let key = match request.url().query() {
+                    Some(query) => format!("{path}?{query}"),
+                    None => path.to_owned(),
+                };
+                requests.lock().expect("request log").push(key.clone());
+                let body = if path == "/graphql" {
+                    let body: serde_json::Value = serde_json::from_slice(
+                        request.body().expect("GraphQL body").as_bytes().expect("request bytes"),
+                    ).expect("GraphQL request");
+                    if body["query"].as_str().expect("query").contains("RepositoryWatchActor") {
+                        serde_json::json!({"data":{"viewer":{"login":"daemon"}}})
+                    } else {
+                        serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}})
+                    }
+                } else {
+                    pages.get(&key).expect("fixture page").0.clone()
+                };
+                Box::pin(async move {
+                    Ok(http::Response::builder()
+                        .status(200)
+                        .header("x-ratelimit-remaining", "5000")
+                        .body(body.to_string())
+                        .expect("fixture response")
+                        .into())
+                })
+            }),
+        ).expect("fixture client"),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn initial_identity_lookup_continues_the_poll_without_waiting_for_its_interval()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::{
+        measurements::PollOutcome, provider::GitHubRepositoryTask,
+    };
+    let (_container, core, url) = postgres().await?;
+    migrate(&core).await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("example/project".to_owned())?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    store.prepare_observer_identity(&repository).await?;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut task = GitHubRepositoryTask {
+        repository,
+        signal_reviewers: Vec::new(),
+        subject_retention: MERGED_RETENTION,
+        poll_request_budget: std::num::NonZeroUsize::MIN,
+        clients: observation_identity_client(requests.clone()),
+        store,
+    };
+    assert_eq!(
+        task.poll_outcome(EventProducer::Poll)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        PollOutcome::Partial
+    );
+    assert_eq!(
+        *requests.lock().expect("request log"),
+        ["/graphql", "/rate_limit"],
+        "identity and the resumed poll each spend their one-request allowance"
+    );
+    pool.close().await;
+    core.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn identity_recovery_drains_the_triggering_webhook_wake() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::{
+        measurements::PollOutcome, provider::GitHubRepositoryTask,
+    };
+    let (_container, core, url) = postgres().await?;
+    migrate(&core).await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("example/project".to_owned())?;
+    store.prepare_observer_identity(&repository).await?;
+    assert!(!identity_attempt(&store, &repository, None).await);
+    let now = OffsetDateTime::now_utc();
+    let delivery = Uuid::now_v7();
+    store
+        .admit_webhook(WebhookDelivery {
+            repository: &repository,
+            hook_id: 1,
+            delivery_id: delivery,
+            event: "pull_request",
+            action: Some("labeled"),
+            body: br#"{"pull_request":{"number":1}}"#,
+            received_at: now,
+            expires_at: now + MERGED_RETENTION,
+        })
+        .await?;
+    store
+        .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+        .await?;
+    let mut task = GitHubRepositoryTask {
+        repository: repository.clone(),
+        signal_reviewers: Vec::new(),
+        subject_retention: MERGED_RETENTION,
+        poll_request_budget: std::num::NonZeroUsize::MIN,
+        clients: observation_identity_client(Arc::new(std::sync::Mutex::new(Vec::new()))),
+        store,
+    };
+    assert_eq!(
+        task.poll_outcome(EventProducer::Webhook)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        PollOutcome::Succeeded
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM webhook_pull_wake WHERE repository=$1")
+            .bind(repository.as_str())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        remaining, 0,
+        "the wake that resolved identity also observes its queued PR"
+    );
+    let webhook_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM gh_event WHERE repository=$1 AND producer='webhook'",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        webhook_events > 0,
+        "the observation preserves webhook provenance"
     );
     pool.close().await;
     core.close().await;
