@@ -9,7 +9,13 @@ const retainedCreationKey = 'signalbox.new-session'
 
 export function readRetainedCreation(): WebCreateSessionRequest | null {
   const value = sessionStorage.getItem(retainedCreationKey)
-  return value === null ? null : decodeWebCreateSessionRequest(JSON.parse(value))
+  if (value === null) return null
+  try {
+    return decodeWebCreateSessionRequest(JSON.parse(value))
+  } catch (error) {
+    sessionStorage.removeItem(retainedCreationKey)
+    throw error
+  }
 }
 
 export function retainCreation(request: WebCreateSessionRequest) {
