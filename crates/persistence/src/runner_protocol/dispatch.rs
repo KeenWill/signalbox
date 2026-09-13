@@ -20,10 +20,9 @@ impl RunnerProtocolStore {
         let registration = connected_registration(&mut transaction, &self.catalog).await?;
         let posture = registration.as_ref().and_then(|(_, registration)| {
             let request = stored.placement().request();
-            (registration.registration().satisfies(&request.selector)
-                && registration.registration().tool(tool).is_some()
-                && request.sandbox == RunnerSandboxProfile::Ambient)
-                .then(|| requested_posture(request, tool))
+            (runnable_registration(request, registration.registration())
+                && registration.registration().tool(tool).is_some())
+            .then(|| requested_posture(request, tool))
         });
         transaction.rollback().await?;
         Ok(posture)
@@ -79,14 +78,12 @@ impl RunnerProtocolStore {
         if registration.registration().tool(tool).is_none() {
             return Ok(None);
         }
-        placement
-            .request()
-            .validate_registration(registration.registration())
-            .map_err(RunnerProtocolStoreError::Domain)?;
-        if placement.request().sandbox != RunnerSandboxProfile::Ambient
-            || placement.request().workspace != WorkspaceRequirement::None
-        {
-            return Err(invalid());
+        if !runnable_registration(placement.request(), registration.registration()) {
+            return if placement.state() == &SessionRunnerPlacementState::Unpinned {
+                Ok(None)
+            } else {
+                Err(invalid())
+            };
         }
         if requested_posture(placement.request(), tool) == ToolApprovalPosture::Human
             && authority.request().approval_posture() != ToolApprovalPosture::Human
@@ -356,6 +353,19 @@ fn requested_posture(
         Some(RunnerToolPermissionOverride::Confirm) => ToolApprovalPosture::Human,
         Some(RunnerToolPermissionOverride::Auto) | None => ToolApprovalPosture::Auto,
     }
+}
+
+fn runnable_registration(
+    request: &SessionRunnerPlacementRequest,
+    registration: &ValidatedRunnerRegistration,
+) -> bool {
+    request.validate_registration(registration).is_ok()
+        && request.sandbox == RunnerSandboxProfile::Ambient
+        && request.workspace == WorkspaceRequirement::None
+        && (matches!(
+            request.working_directory,
+            WorkingDirectorySelection::Exact(_)
+        ) || registration.default_working_directory().is_some())
 }
 
 async fn connected_registration(

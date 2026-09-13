@@ -336,6 +336,14 @@ pub trait ToolExecutionTransaction {
         wait: CorrelatedDurableChildWait,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
+    /// Checks the exact lost lease and durable yielding of its issuing turn attempt.
+    fn reread_durable_runner_wait(
+        &mut self,
+        _correlation: ToolAttemptDispatchCorrelation,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+        async { Ok(false) }
+    }
+
     /// Classifies one prior-process live attempt without retrying it.
     fn classify_crash_loss<NextTurn>(
         &mut self,

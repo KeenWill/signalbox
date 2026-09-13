@@ -5,6 +5,12 @@ use signalbox_persistence::runner_protocol::{RunnerProtocolStore, RunnerProtocol
 use std::sync::Arc;
 use tokio::sync::{Semaphore, watch};
 
+pub(crate) enum RunnerDispatchOutcome {
+    Daemon,
+    Completed,
+    RecoveryWait,
+}
+
 /// Shared local dispatch permit and durable-state wakeups for the runner connection.
 #[derive(Clone, Debug)]
 pub struct RunnerDispatchService {
@@ -33,14 +39,14 @@ impl RunnerDispatchService {
     pub(crate) async fn execute(
         &self,
         authority: &ToolDispatchAuthority,
-    ) -> Result<bool, RunnerProtocolStoreError> {
+    ) -> Result<RunnerDispatchOutcome, RunnerProtocolStoreError> {
         if self
             .store
             .load_placement(authority.correlation().session())
             .await?
             .is_none()
         {
-            return Ok(false);
+            return Ok(RunnerDispatchOutcome::Daemon);
         }
         let _permit = self.permit.acquire().await.map_err(|_| {
             RunnerProtocolStoreError::Domain(signalbox_domain::RunnerDomainError::InvalidState)
@@ -51,7 +57,7 @@ impl RunnerDispatchService {
             .offer_tool_dispatch(authority, RunnerLeaseId::from_uuid(uuid::Uuid::now_v7()))
             .await;
         let mut lease = match offered {
-            Ok(None) => return Ok(false),
+            Ok(None) => return Ok(RunnerDispatchOutcome::Daemon),
             Ok(Some(lease)) => lease,
             Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => loop {
                 match self
@@ -71,7 +77,15 @@ impl RunnerDispatchService {
         self.changed();
         loop {
             if lease.state() == RunnerLeaseState::Completed {
-                return Ok(true);
+                return Ok(RunnerDispatchOutcome::Completed);
+            }
+            if matches!(
+                lease.state(),
+                RunnerLeaseState::LostUnclaimed
+                    | RunnerLeaseState::LostExecutionPossible
+                    | RunnerLeaseState::LostClaimed
+            ) {
+                return Ok(RunnerDispatchOutcome::RecoveryWait);
             }
             let _ = changes.changed().await;
             // The issued lease remains authority during a database outage; an

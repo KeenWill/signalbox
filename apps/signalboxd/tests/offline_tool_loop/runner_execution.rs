@@ -171,6 +171,160 @@ async fn placed_echo_completes_through_the_packaged_runner() -> Result<(), Box<d
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and the packaged runner"]
+async fn an_ineligible_connected_runner_preserves_daemon_echo_fallback()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let mut requested = placement(directory.path().to_owned());
+    requested.selector =
+        RunnerSelector::Identity(signalbox_domain::RunnerId::from_uuid(Uuid::now_v7()));
+    let fixture = ToolLoopFixture::with_creation_placement(
+        DangerousToolAutoApproval::Disabled,
+        None,
+        migrated_postgres().await?,
+        Some(requested),
+    )
+    .await?;
+    let host = RunnerHost::start(fixture.pool.clone()).await?;
+    let dispatch = host.service.dispatch_service();
+    let (catalog, executor) = offline_daemon_tools(
+        OfflineWebTransport::unused(),
+        UnusedSessionStatusWriter,
+        UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({"text": "daemon fallback"}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("echo", arguments.as_str())]),
+            completion_script("observed"),
+        ],
+        catalog,
+        executor.with_runner_dispatch(dispatch.clone()),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        execution
+            .with_runner_dispatch(dispatch)
+            .execute(Box::new(fixture.activated.clone())),
+    )
+    .await??;
+    let request = fixture.wait_for_requests(1).await?[0];
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "echo", &arguments),
+            expected_successful_tool_result(request, arguments)
+        ]
+    );
+    assert_eq!(
+        host.service
+            .recovery_store()
+            .load_placement(fixture.session)
+            .await?
+            .expect("requested placement")
+            .placement()
+            .state(),
+        &SessionRunnerPlacementState::Unpinned
+    );
+    host.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and the packaged runner"]
+async fn a_lost_claim_releases_the_live_tool_loop_into_durable_runner_recovery()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::RunnerConnectionTransition;
+    use signalboxd::runner_protocol_runtime::RunnerRegistrationService as _;
+    let directory = tempfile::tempdir()?;
+    let fixture = ToolLoopFixture::with_creation_placement(
+        DangerousToolAutoApproval::Disabled,
+        None,
+        migrated_postgres().await?,
+        Some(placement(directory.path().to_owned())),
+    )
+    .await?;
+    let mut host = RunnerHost::start(fixture.pool.clone()).await?;
+    let live = host
+        .service
+        .recovery_store()
+        .load_nonterminal_connection_heads()
+        .await?;
+    let live = &live[0];
+    let enrollment = live.enrollment();
+    let epoch = live.epoch();
+    let pid = rustix::process::Pid::from_raw(host.child.id().expect("runner PID") as i32)
+        .expect("positive PID");
+    rustix::process::kill_process(pid, rustix::process::Signal::STOP)?;
+    let dispatch = host.service.dispatch_service();
+    let (catalog, executor) = offline_daemon_tools(
+        OfflineWebTransport::unused(),
+        UnusedSessionStatusWriter,
+        UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({"text": "must await recovery"}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [tool_use_script(&[("echo", arguments.as_str())])],
+        catalog,
+        executor.with_runner_dispatch(dispatch.clone()),
+    );
+    let execution = execution.with_runner_dispatch(dispatch);
+    let lose = async {
+        let lease = loop {
+            if let Some(lease) = host
+                .service
+                .recovery_store()
+                .pending_tool_lease(enrollment, epoch)
+                .await?
+            {
+                break lease;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        host.service
+            .recovery_store()
+            .claim_tool_lease(enrollment, epoch, lease.correlation())
+            .await?;
+        host.service
+            .transition_connection(
+                signalbox_runner_wire::CanonicalUuid::from_uuid(enrollment.into_uuid()),
+                signalbox_runner_wire::PositiveU64::try_new(epoch.get())?,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        let (executed, lost) =
+            tokio::join!(execution.execute(Box::new(fixture.activated.clone())), lose);
+        lost?;
+        executed?;
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .await;
+    host.child.kill().await?;
+    host.shutdown.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(60), host.server).await???;
+    outcome??;
+    assert!(
+        host.service
+            .recovery_store()
+            .load_runner_recovery_wait(fixture.session)
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        runtime.received_operations().len(),
+        1,
+        "loss cannot request model continuation"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and the packaged runner"]
 async fn named_profile_echo_creates_a_grant_without_resolving_its_credential()
 -> Result<(), Box<dyn Error>> {
     check_placed_echo(true, false).await

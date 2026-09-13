@@ -684,6 +684,7 @@ impl PostgresRunnerRegistrationService {
                         error,
                     )
                 })?;
+            self.dispatch.changed();
             self.store
                 .resume_runner_replacements()
                 .await

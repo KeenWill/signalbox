@@ -437,7 +437,8 @@ where
             }
             Ok(
                 ToolExecutorDisposition::DurableCompletion(_)
-                | ToolExecutorDisposition::DurableChildWait(_),
+                | ToolExecutorDisposition::DurableChildWait(_)
+                | ToolExecutorDisposition::DurableRunnerWait(_),
             )
             | Err(_) => None,
         });

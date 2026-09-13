@@ -370,17 +370,26 @@ where
     ) -> Result<ToolExecutorDisposition, Self::Error> {
         if invocation.request().name().as_str() == ECHO_NAME
             && let Some(dispatch) = &self.runner_dispatch
-            && dispatch
+        {
+            match dispatch
                 .execute(invocation.dispatch_authority())
                 .await
                 .map_err(|error| {
                     tracing::error!(failure = ?error, "runner dispatch admission failed");
                     DaemonToolExecutorError::pre_dispatch()
-                })?
-        {
-            return Ok(ToolExecutorDisposition::DurableCompletion(
-                invocation.durable_completion(),
-            ));
+                })? {
+                crate::runner_dispatch::RunnerDispatchOutcome::Daemon => {}
+                crate::runner_dispatch::RunnerDispatchOutcome::RecoveryWait => {
+                    return Ok(ToolExecutorDisposition::DurableRunnerWait(
+                        invocation.correlation(),
+                    ));
+                }
+                crate::runner_dispatch::RunnerDispatchOutcome::Completed => {
+                    return Ok(ToolExecutorDisposition::DurableCompletion(
+                        invocation.durable_completion(),
+                    ));
+                }
+            }
         }
         if SESSION_DELEGATION_TOOL_NAMES.contains(&invocation.request().name().as_str()) {
             return match self

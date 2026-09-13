@@ -94,6 +94,71 @@ fn success(text: &str) -> ToolAttemptObservation {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn runner_wait_reread_requires_the_exact_lost_dispatch_and_yielded_turn()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::ToolExecutionTransaction as _;
+    use signalbox_persistence::tool_loop::PostgresToolLoopRepository;
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, enrollment, _, pin, epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let correlation = pin.lease.correlation();
+    let mut repository = PostgresToolLoopRepository::new(pool.clone());
+    assert!(
+        !repository
+            .reread_durable_runner_wait(correlation.dispatch)
+            .await?
+    );
+    store
+        .claim_tool_lease(enrollment.enrollment(), epoch, correlation.clone())
+        .await?;
+    assert!(
+        !repository
+            .reread_durable_runner_wait(correlation.dispatch)
+            .await?
+    );
+    store
+        .transition_connection(
+            enrollment.enrollment(),
+            epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    assert!(
+        !repository
+            .reread_durable_runner_wait(correlation.dispatch)
+            .await?,
+        "connection loss alone does not prove the turn yielded"
+    );
+    let loss = store
+        .load_current_connection_loss(enrollment.enrollment())
+        .await?
+        .expect("durable loss");
+    store
+        .propagate_connection_loss_session(loss, correlation.dispatch.session())
+        .await?;
+    assert!(
+        repository
+            .reread_durable_runner_wait(correlation.dispatch)
+            .await?
+    );
+    for other in mismatches(&correlation)
+        .into_iter()
+        .filter(|other| other.dispatch != correlation.dispatch)
+    {
+        assert!(
+            !matches!(
+                repository.reread_durable_runner_wait(other.dispatch).await,
+                Ok(true)
+            ),
+            "cross-wired runner wait: {other:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn live_claim_and_result_require_every_fence_and_record_one_terminal_attempt()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
