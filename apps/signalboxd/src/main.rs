@@ -2998,9 +2998,12 @@ async fn run_hub_incarnation(
                 let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
                 runtime_tasks.spawn(async move {
                     let capacity_shutdown = invocation_shutdown.clone();
-                    tokio::join!(invocation_processes.run(invocation_shutdown), async {
-                        capacity_refresh.run(capacity_shutdown).await;
-                    },);
+                    tokio::join!(
+                        invocation_processes.run(invocation_shutdown, configuration_reload),
+                        async {
+                            capacity_refresh.run(capacity_shutdown).await;
+                        },
+                    );
                     RuntimeTaskExit::CredentialInvocations
                 });
                 runtime_tasks.spawn(async move {
