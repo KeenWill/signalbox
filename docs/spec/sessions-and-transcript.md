@@ -617,16 +617,17 @@ physical attempts retain separate disclosure identities. Turn-wide
 classification uses all loaded events.
 
 The transcript groups contiguous events by turn while preserving interleaved
-chronology. Summary shows user messages, assistant text accompanying tool calls,
-final assistant text and unsuccessful turn outcomes. Tool calls and their detail
-are hidden in Summary. A completed response remains visible as a non-final
-message when its completed-turn closure is not loaded. Distinct physical tool
-attempts remain independently inspectable in event order even when they share
-one request. Physical-attempt chips include their current state in the visible
-and accessible label. A failed attempt remains labeled as failed with its
-available cause even when it has no failure excerpt. Physical attempts without a
-result or failure excerpt show their current state. Each batch retains its
-initial window page and the latest three on-demand pages; evicted members
+chronology. Summary shows user messages, final assistant responses and
+unsuccessful turn outcomes. Intermediate messages, including assistant text
+accompanying tool calls, appear in Tools and All details. Tool calls and their
+detail are hidden in Summary. A completed response without its completed-turn
+closure remains a non-final message in Tools and All details. Distinct physical
+tool attempts remain independently inspectable in event order even when they
+share one request. Physical-attempt chips include their current state in the
+visible and accessible label. A failed attempt remains labeled as failed with
+its available cause even when it has no failure excerpt. Physical attempts
+without a result or failure excerpt show their current state. Each batch retains
+its initial window page and the latest three on-demand pages; evicted members
 release their saved readers. Later batch members load on demand at the batch
 position as separate tool chips. A cursor advancing to another member is exposed
 outside the preceding tool disclosure; same-member argument, output and failure

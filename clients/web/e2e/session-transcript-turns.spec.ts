@@ -16,12 +16,16 @@ import {
   toolResultItem,
 } from './session-detail-fixture'
 
-test('shows a completed assistant response before its turn closure is loaded', async ({
+test('keeps a response without turn closure in Tools until it becomes final', async ({
   page,
 }, testInfo) => {
   await turnApi(page, undefined, detailItems.slice(0, 4))
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.locator('.session-message-text')).toHaveText([
+    'Inspect the release status and retain the result.',
+  ])
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await expect(transcript.locator('.session-message-text')).toHaveText([
     'Inspect the release status and retain the result.',
     'The release checks passed. Publishing remains unapproved.',
@@ -855,9 +859,7 @@ for (const level of ['All details', 'Summary', 'Tools']) {
   })
 }
 
-test('preserves assistant text before its tool without treating it as the final response', async ({
-  page,
-}) => {
+test('keeps intermediate tool-producing responses in Tools and All details', async ({ page }) => {
   const input = detailItems[0]
   const tool = detailItems[1]
   const response = detailItems[3]
@@ -880,16 +882,24 @@ test('preserves assistant text before its tool without treating it as the final 
   ])
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await expect(transcript.locator('.session-message-text')).toHaveText([
+  const summaryText = [
     'Inspect the release status and retain the result.',
-    'I will inspect the release status now.',
     'The release checks passed. Publishing remains unapproved.',
-  ])
-  await expect(transcript.locator('.session-message-text, .session-tool-chips')).toHaveText([
-    'Inspect the release status and retain the result.',
-    'I will inspect the release status now.',
-    'The release checks passed. Publishing remains unapproved.',
-  ])
+  ]
+  await expect(transcript.locator('.session-message-text')).toHaveText(summaryText)
+  await expect(transcript.locator('[data-event-sequence="2"]')).toHaveCount(0)
+  for (const level of ['Tools', 'All details']) {
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    await expect(transcript.locator('.session-message-text')).toHaveText([
+      summaryText[0]!,
+      text.text,
+      summaryText[1]!,
+    ])
+    await expect(transcript.locator('[data-event-sequence="2"]')).toBeVisible()
+  }
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  await expect(transcript.locator('.session-message-text')).toHaveText(summaryText)
+  await expect(transcript.locator('[data-event-sequence="2"]')).toHaveCount(0)
 })
 
 for (const recovered of [false, true]) {

@@ -546,7 +546,7 @@ function TranscriptWindow({
           turnModes[turn.turnId ?? turn.id] === 'full' ||
           (requestedTurn === turn.turnId && !turnModes[turn.turnId ?? turn.id]) ||
           turn.events.some((event) => event.address.event_sequence === eventSequence) ||
-          turn.messages.length > 0 ||
+          turn.messages.some((item) => detail === 'condensed' || item.body.type === 'user_input') ||
           turn.result ||
           (detail === 'condensed' && turn.tools.length > 0) ||
           turn.warnings.length > 0 ||
@@ -569,7 +569,7 @@ function TranscriptWindow({
           detail.continuation &&
           (!last ||
             (last.body.type !== 'tool_batch' &&
-              !turns.some((turn) =>
+              !allTurns.some((turn) =>
                 turn.events.some(
                   (event) =>
                     event.address.event_sequence === last.address.event_sequence &&
@@ -578,7 +578,7 @@ function TranscriptWindow({
               )))
         )
       }),
-    [detailPages, turns],
+    [detailPages, allTurns],
   )
   const rows = useMemo(
     () =>
@@ -799,7 +799,7 @@ function TranscriptWindow({
                   (detail === 'full' ||
                     turnModes[turn.turnId ?? turn.id] === 'full' ||
                     item.address.event_sequence === eventSequence)) ||
-                (isVisibleTurnEvent(turn, item) &&
+                (isVisibleTurnEvent(turn, item, detail === 'condensed') &&
                   (item.body.type !== 'tool_batch' || detail === 'condensed')),
             ),
           ),
@@ -962,7 +962,7 @@ function TranscriptWindow({
                       (turn) =>
                         (turn.events.includes(item) &&
                           (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
-                        (isVisibleTurnEvent(turn, item) &&
+                        (isVisibleTurnEvent(turn, item, detail === 'condensed') &&
                           (item.body.type !== 'tool_batch' || detail === 'condensed')),
                     ),
                   ),
@@ -1179,7 +1179,7 @@ function TurnContent({
       {turnSummaryParts(turn)
         .filter((part) => detail === 'condensed' || part.kind === 'message')
         .map((part) =>
-          part.kind === 'message' ? (
+          part.kind !== 'tools' ? (
             <div
               key={conversationEntryKey(part.item)}
               data-event-sequence={part.item.address.event_sequence}
