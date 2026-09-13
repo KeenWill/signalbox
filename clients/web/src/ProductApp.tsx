@@ -168,6 +168,7 @@ export function ProductNavigation({
       </div>
       <nav aria-label="Product">
         {productRoutes.map((route) => {
+          if (route.id === 'attention') return null
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
           const Icon = productNavigationIcons[route.id]
           return (

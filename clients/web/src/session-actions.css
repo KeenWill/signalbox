@@ -60,3 +60,31 @@
   display: block;
   overflow-wrap: anywhere;
 }
+
+.catalog-surface .attention-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.catalog-surface .attention-judge {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--product-space);
+  margin: 0;
+  padding: 0 var(--product-space) var(--product-space);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.catalog-surface > .catalog-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--product-space);
+  font-size: 0.75rem;
+}
+
+.catalog-surface .attention-list li > p {
+  margin: 0;
+  padding: 0 var(--product-space) var(--product-space);
+  overflow-wrap: anywhere;
+}

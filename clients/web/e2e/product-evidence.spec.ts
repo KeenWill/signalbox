@@ -15,7 +15,6 @@ const sessionEvidenceFixture = {
   itemCount: '1000000',
 } as const
 
-const attentionEvidence = { path: '/attention', title: 'Attention', snapshot: 'attention' } as const
 const sessionsEvidence = { path: '/sessions', title: 'Sessions', snapshot: 'sessions' } as const
 const searchEvidence = { path: '/search', title: 'Search', snapshot: 'search' } as const
 const runnersEvidence = { path: '/runners', title: 'Runners', snapshot: 'runners' } as const
@@ -152,11 +151,6 @@ const captureSessionEvidence = async (page: Page) => {
   await expect.soft(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 }
-
-test('captures Attention route evidence', async ({ page }, testInfo) => {
-  skipUnlessLinuxChromium(testInfo)
-  await captureRouteEvidence(page, attentionEvidence)
-})
 
 test('captures Sessions route evidence', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)

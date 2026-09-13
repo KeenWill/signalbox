@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { ArrowRight, Radio, RefreshCw, X } from 'lucide-react'
+import { Link, Navigate } from '@tanstack/react-router'
+import { ArrowRight, Radio, RefreshCw } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
@@ -8,8 +8,7 @@ import { enumLabel, productLabels } from './labels'
 import { ProductRequestError, productTransport } from './product'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
-
-type AttentionSummary = WebAttentionSnapshot['summaries'][number]
+import './session-actions.css'
 
 const phaseCopy: Record<AttentionSyncPhase, string> = {
   idle: productLabels.snapshot,
@@ -35,22 +34,22 @@ export const activityTime = (unixMilliseconds: string) => {
 const queryKey = (after: string | null) => ['production', 'attention', after] as const
 
 export function AttentionSurface({
-  registerEscapeHandler,
+  registerEscapeHandler: _registerEscapeHandler,
 }: {
   registerEscapeHandler: (handler: (() => boolean) | null) => void
 }) {
+  return <Navigate to="/$surface" params={{ surface: 'sessions' }} replace />
+}
+
+export function AttentionSessions() {
   const dispatch = useAppDispatch()
   const phase = useAppSelector(selectApp).attentionSync
   const queryClient = useQueryClient()
   const [after, setAfter] = useState<string | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [monitorGeneration, setMonitorGeneration] = useState(0)
-  const returnFocus = useRef<HTMLButtonElement>(null)
-  const closeFocus = useRef<HTMLButtonElement>(null)
   const errorFocus = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const focusReplacement = useRef(false)
-  const focusRevealedList = useRef(false)
   const liveProjection = useRef<WebAttentionSnapshot | undefined>(undefined)
   const pageCursorFloor = useRef<string | null>(null)
   const attention = useQuery({
@@ -79,8 +78,8 @@ export function AttentionSurface({
     },
     gcTime: 0,
   })
-  const selected = attention.data?.summaries.find((summary) => summary.session_id === selectedId)
-  const workbenchClass = selected ? 'attention-workbench inspector-open' : 'attention-workbench'
+  const needingAttention =
+    attention.data?.summaries.filter((summary) => summary.action !== null) ?? []
 
   useEffect(() => {
     void monitorGeneration
@@ -119,25 +118,6 @@ export function AttentionSurface({
   }, [after, dispatch, monitorGeneration, queryClient])
 
   useEffect(() => {
-    const target = selectedId ? closeFocus : focusRevealedList.current ? pageHeading : returnFocus
-    focusRevealedList.current = false
-    const frame = requestAnimationFrame(() => target.current?.focus())
-    return () => cancelAnimationFrame(frame)
-  }, [selectedId])
-
-  useEffect(() => {
-    if (!selectedId) {
-      registerEscapeHandler(null)
-      return
-    }
-    registerEscapeHandler(() => {
-      setSelectedId(null)
-      return true
-    })
-    return () => registerEscapeHandler(null)
-  }, [registerEscapeHandler, selectedId])
-
-  useEffect(() => {
     if (!focusReplacement.current) return
     const target = attention.data ? pageHeading : attention.isError ? errorFocus : null
     if (!target) return
@@ -146,31 +126,17 @@ export function AttentionSurface({
     return () => cancelAnimationFrame(frame)
   }, [attention.data, attention.isError])
 
-  useEffect(() => {
-    if (!selectedId || !attention.data || selected) return
-    returnFocus.current = null
-    focusRevealedList.current = true
-    setSelectedId(null)
-  }, [attention.data, selected, selectedId])
-
-  const open = (summary: AttentionSummary, button: HTMLButtonElement) => {
-    returnFocus.current = button
-    setSelectedId(summary.session_id)
-  }
-  const close = () => setSelectedId(null)
   const nextPage = () => {
     const currentPage = attention.data
     const continuation = currentPage?.continuation_after_session_id
     if (!continuation || !currentPage) return
     pageCursorFloor.current = currentPage.cursor
     focusReplacement.current = true
-    setSelectedId(null)
     setAfter(continuation)
   }
   const returnToLivePage = () => {
     pageCursorFloor.current = null
     focusReplacement.current = true
-    setSelectedId(null)
     setAfter(null)
   }
   const restartMonitor = () => {
@@ -226,21 +192,22 @@ export function AttentionSurface({
       )}
 
       {attention.data && (
-        <div className={workbenchClass}>
+        <div className="attention-workbench">
           <section className="attention-list" aria-labelledby="attention-heading">
             <header>
               <div>
                 <h2 id="attention-heading" ref={pageHeading} tabIndex={-1}>
-                  {attention.data.summaries.length}{' '}
-                  {attention.data.summaries.length === 1 ? 'session' : 'sessions'}
+                  {needingAttention.length}{' '}
+                  {needingAttention.length === 1 ? 'session needs' : 'sessions need'} attention on
+                  this page
                 </h2>
               </div>
             </header>
-            {attention.data.summaries.length === 0 ? (
-              <p className="attention-notice">No sessions</p>
+            {needingAttention.length === 0 ? (
+              <p className="attention-notice">No sessions need attention on this page</p>
             ) : (
               <ol>
-                {attention.data.summaries.map((summary) => (
+                {needingAttention.map((summary) => (
                   <li key={summary.session_id} className={`attention-${summary.state}`}>
                     <Link
                       className="attention-session-link"
@@ -259,15 +226,21 @@ export function AttentionSurface({
                       <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
                       <ArrowRight aria-hidden="true" />
                     </Link>
-                    <button
-                      className="attention-preview"
-                      type="button"
-                      aria-label={`${productLabels.preview} ${enumLabel(summary.state)} ${summary.session_id}`}
-                      aria-pressed={selectedId === summary.session_id}
-                      onClick={(event) => open(summary, event.currentTarget)}
-                    >
-                      {productLabels.preview}
-                    </button>
+                    <section className="attention-judge" aria-label="Approval outcomes">
+                      <span>
+                        Needs decision <strong>{summary.judge.actionable}</strong>
+                      </span>
+                      <span>
+                        Completed <strong>{summary.judge.completed}</strong>
+                      </span>
+                      <span>
+                        Escalated <strong>{summary.judge.escalated}</strong>
+                      </span>
+                      <span>
+                        Failed <strong>{summary.judge.failed}</strong>
+                      </span>
+                    </section>
+                    {summary.goal_block && <p>{summary.goal_block.need_summary}</p>}
                   </li>
                 ))}
               </ol>
@@ -285,78 +258,6 @@ export function AttentionSurface({
               )}
             </div>
           </section>
-
-          {selected && (
-            <aside className="attention-inspector" aria-labelledby="attention-inspector-heading">
-              <header>
-                <div>
-                  <h2 id="attention-inspector-heading">{enumLabel(selected.state)}</h2>
-                </div>
-                <button
-                  ref={closeFocus}
-                  type="button"
-                  aria-label="Close attention inspector"
-                  onClick={close}
-                >
-                  <X aria-hidden="true" />
-                </button>
-              </header>
-              <Link
-                to="/$surface"
-                params={{ surface: 'sessions' }}
-                search={{ session: selected.session_id, workspace: true }}
-              >
-                {productLabels.openSession} <ArrowRight aria-hidden="true" />
-              </Link>
-              <dl>
-                <div>
-                  <dt>Session</dt>
-                  <dd>
-                    <code>{selected.session_id}</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Required action</dt>
-                  <dd>{selected.action ? enumLabel(selected.action) : 'None'}</dd>
-                </div>
-                <div>
-                  <dt>Current turn</dt>
-                  <dd>{selected.current_turn_id ?? 'None'}</dd>
-                </div>
-                <div>
-                  <dt>Last activity</dt>
-                  <dd>{enumLabel(selected.last_activity.kind)}</dd>
-                </div>
-              </dl>
-              {selected.goal_block && (
-                <section className="attention-goal-block">
-                  <span className="eyebrow">
-                    Blocked goal · Generation {selected.goal_block.generation}
-                  </span>
-                  <strong>{enumLabel(selected.goal_block.reason)}</strong>
-                  <p>{selected.goal_block.need_summary}</p>
-                </section>
-              )}
-              <section className="attention-judge" aria-label="Approval outcomes">
-                <div>
-                  <span>Needs decision</span>
-                  <strong>{selected.judge.actionable}</strong>
-                </div>
-                <div>
-                  <span>Completed</span>
-                  <strong>{selected.judge.completed}</strong>
-                </div>
-                <div>
-                  <span>Escalated</span>
-                  <strong>{selected.judge.escalated}</strong>
-                </div>
-                <div>
-                  <span>Failed</span>
-                  <strong>{selected.judge.failed}</strong>
-                </div>
-              </section>
-            </aside>
-          )}
         </div>
       )}
     </div>

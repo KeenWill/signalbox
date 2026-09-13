@@ -554,13 +554,25 @@ test('returns from the scenario studio through the command palette', async ({ pa
     }),
   )
   await page.route('**/api/attention', (route) => route.fulfill({ json: attentionSnapshot }))
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: {
+        cursor: '0',
+        total: '0',
+        summaries: [],
+        continuation: null,
+        sort: 'last_activity_descending',
+      },
+    }),
+  )
+  await page.route('**/api/sessions/rates**', (route) => route.fulfill({ json: { sessions: [] } }))
   await page.goto('/scenario/streaming')
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('button', { name: /Go to Attention/ }).click()
 
-  await expect(page).toHaveURL(/\/attention$/)
-  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

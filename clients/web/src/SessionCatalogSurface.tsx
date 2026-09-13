@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { AttentionSessions } from './AttentionSurface'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
@@ -108,6 +109,7 @@ export function SessionCatalogSurface({
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
   const navigate = useNavigate()
+  const [needsAttention, setNeedsAttention] = useState(false)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -145,6 +147,7 @@ export function SessionCatalogSurface({
         signal,
       ),
     gcTime: 0,
+    enabled: !needsAttention,
   })
   const titleDetailsAvailable =
     bootstrap.data?.capabilities.bounded_session_timeline_detail === true
@@ -255,8 +258,27 @@ export function SessionCatalogSurface({
     )
   }
 
+  const attentionFilter = (
+    <label className="catalog-checkbox">
+      <input
+        type="checkbox"
+        checked={needsAttention}
+        onChange={(event) => setNeedsAttention(event.target.checked)}
+      />
+      Needs attention
+    </label>
+  )
+  if (needsAttention)
+    return (
+      <div className="surface-body catalog-surface">
+        {attentionFilter}
+        <AttentionSessions />
+      </div>
+    )
+
   return (
     <div className="surface-body catalog-surface">
+      {attentionFilter}
       <form
         className="catalog-toolbar"
         onSubmit={submit}

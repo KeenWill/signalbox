@@ -4,7 +4,7 @@ import { expect, type Page, type Route, type TestInfo, test } from './fontTest'
 const approvalSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c61'
 const blockedSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c62'
 const lostRunnerSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c63'
-const idleSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c90'
+const laterSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c90'
 const approvalTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c71'
 const blockedTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c72'
 
@@ -54,14 +54,14 @@ const nextAttentionFixture = {
   cursor: '42',
   summaries: [
     {
-      action: null,
-      current_turn_id: null,
+      action: 'decide_approval',
+      current_turn_id: approvalTurnId,
       goal_block: null,
       judge: { actionable: '0', completed: '2', escalated: '0', failed: '0' },
       last_activity: { kind: 'session', unix_milliseconds: '1787340600000' },
-      lifecycle_state: 'terminal',
-      session_id: idleSessionId,
-      state: 'idle',
+      lifecycle_state: 'waiting',
+      session_id: laterSessionId,
+      state: 'awaiting_approval',
     },
   ],
 } as const
@@ -114,23 +114,6 @@ const installAttentionPagingScenario = async (page: Page) => {
       return route.fulfill({ json: nextAttentionFixture })
     }
     return route.fulfill({ json: continuedAttentionFixture })
-  })
-}
-
-const installAttentionReplacementScenario = async (page: Page) => {
-  let snapshotRequests = 0
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
-  await page.route('**/api/attention/follow', (route) =>
-    route.fulfill({
-      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
-      contentType: 'application/x-ndjson',
-    }),
-  )
-  await page.route('**/api/attention', (route) => {
-    snapshotRequests += 1
-    return route.fulfill({
-      json: snapshotRequests === 1 ? attentionFixture : { ...nextAttentionFixture, cursor: '43' },
-    })
   })
 }
 
@@ -322,25 +305,19 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-test('opens and closes the attention inspector without a mouse and restores focus', async ({
-  page,
-}) => {
-  const problems = watchBrowser(page)
-  await installAttentionScenario(page)
-  await page.goto('/attention')
-
-  const approval = page.getByRole('button', {
-    name: new RegExp(`Approval required.*${approvalSessionId}`),
-  })
-  await approval.focus()
-  await approval.press('Enter')
-  const close = page.getByRole('button', { name: 'Close attention inspector' })
-  await expect(close).toBeFocused()
-  await expect(page.getByRole('heading', { name: 'Approval required', level: 2 })).toBeVisible()
-  await close.press('Escape')
-  await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
-  await expect(approval).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: {
+        cursor: '42',
+        total: '0',
+        summaries: [],
+        continuation: null,
+        sort: 'last_activity_descending',
+      },
+    }),
+  )
+  await page.route('**/api/sessions/rates**', (route) => route.fulfill({ json: { sessions: [] } }))
 })
 
 test('replaces the current bounded page instead of accumulating attention history', async ({
@@ -348,17 +325,18 @@ test('replaces the current bounded page instead of accumulating attention histor
 }) => {
   const problems = watchBrowser(page)
   await installAttentionPagingScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await expect(page.getByRole('listitem')).toHaveCount(continuedAttentionFixture.summaries.length)
   await page.getByRole('button', { name: /Next/ }).click()
   await expect(page.getByRole('listitem')).toHaveCount(nextAttentionFixture.summaries.length)
-  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await expect(page.getByText(laterSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
   await expect(page.getByRole('button', { name: 'First page' })).toBeVisible()
   await expect(
     page.getByRole('heading', {
-      name: `${nextAttentionFixture.summaries.length} ${nextAttentionFixture.summaries.length === 1 ? 'session' : 'sessions'}`,
+      name: '1 session needs attention on this page',
       level: 2,
     }),
   ).toBeFocused()
@@ -367,7 +345,8 @@ test('replaces the current bounded page instead of accumulating attention histor
 
 test('returns to the live page after a paged read fails', async ({ page }) => {
   await installFailedAttentionPageScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await page.getByRole('button', { name: /Next/ }).click()
   await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
@@ -380,7 +359,8 @@ test('returns to the live page after a paged read fails', async ({ page }) => {
 
 test('rejects a paged Attention response with a regressing cursor', async ({ page }) => {
   await installRegressingAttentionPageScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await page.getByRole('button', { name: /Next/ }).click()
 
@@ -390,56 +370,22 @@ test('rejects a paged Attention response with a regressing cursor', async ({ pag
 
 test('advances the paged cursor floor after a successful read', async ({ page }) => {
   const pagedRequests = await installAdvancingAttentionPageScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await page.getByRole('button', { name: /Next/ }).click()
-  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await expect(page.getByText(laterSessionId)).toBeVisible()
   await page.getByRole('button', { name: 'Refresh' }).click()
 
   await expect.poll(pagedRequests).toBe(2)
-  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await expect(page.getByText(laterSessionId)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
-})
-
-test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {
-  await installAttentionScenario(page)
-  await page.goto('/attention')
-
-  const approval = page.getByRole('button', {
-    name: new RegExp(`Approval required.*${approvalSessionId}`),
-  })
-  await approval.click()
-  await page.getByRole('button', { name: 'Reconnect' }).focus()
-  await page.keyboard.press('Escape')
-
-  await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
-  await expect(approval).toBeFocused()
-})
-
-test('moves focus to the page heading when refreshed data removes the selection', async ({
-  page,
-}) => {
-  await installAttentionReplacementScenario(page)
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/attention')
-
-  await page
-    .getByRole('button', { name: new RegExp(`Approval required.*${approvalSessionId}`) })
-    .click()
-  await page.getByRole('button', { name: 'Reconnect' }).click()
-
-  await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
-  await expect(
-    page.getByRole('heading', {
-      name: `${nextAttentionFixture.summaries.length} ${nextAttentionFixture.summaries.length === 1 ? 'session' : 'sessions'}`,
-      level: 2,
-    }),
-  ).toBeFocused()
 })
 
 test('restarts a failed Attention monitor in place', async ({ page }) => {
   const followRequests = await installRecoveringMonitorScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await expect(page.getByText('Disconnected')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
@@ -450,7 +396,8 @@ test('restarts a failed Attention monitor in place', async ({ page }) => {
 
 test('restarts a stale Attention monitor in place', async ({ page }) => {
   const followRequests = await installStaleMonitorScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await expect(page.getByText('Paused')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
@@ -460,7 +407,8 @@ test('restarts a stale Attention monitor in place', async ({ page }) => {
 
 test('restarts the Attention monitor while the snapshot read is pending', async ({ page }) => {
   const scenario = await installHeldSnapshotReadMonitorScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await expect(page.getByText('Paused')).toBeVisible()
   await page.getByRole('button', { name: 'Reconnect' }).click()
@@ -471,9 +419,10 @@ test('restarts the Attention monitor while the snapshot read is pending', async 
 
 test('keeps a newer HTTP snapshot than an in-flight follower snapshot', async ({ page }) => {
   await installNewerHttpSnapshotScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
-  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await expect(page.getByText(laterSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
 })
 
@@ -481,7 +430,8 @@ test('rejects a divergent equal-cursor HTTP snapshot after the follower starts',
   page,
 }) => {
   await installDivergentEqualCursorHttpScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   await expect(page.getByRole('heading', { name: 'Attention failed to load' })).toBeVisible()
   await expect(page.getByText('Unexpected daemon response.')).toBeVisible()
@@ -489,7 +439,8 @@ test('rejects a divergent equal-cursor HTTP snapshot after the follower starts',
 
 test('keeps the live projection when a refresh snapshot regresses', async ({ page }) => {
   const snapshotRequests = await installRegressingAttentionRefetchScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
   await expect(page.getByText(approvalSessionId)).toBeVisible()
 
   await page.getByRole('button', { name: 'Reconnect' }).click()
@@ -497,49 +448,48 @@ test('keeps the live projection when a refresh snapshot regresses', async ({ pag
   await expect.poll(snapshotRequests).toBe(2)
   await expect(page.getByText(approvalSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeVisible()
-  await expect(page.getByText(idleSessionId)).toBeHidden()
+  await expect(page.getByText(laterSessionId)).toBeHidden()
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await installAttentionScenario(page)
-  await page.goto('/attention')
-  await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeVisible()
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
+  await expect(
+    page.getByRole('heading', { name: '2 sessions need attention on this page', level: 2 }),
+  ).toBeVisible()
   await expect.soft(page).toHaveScreenshot('attention-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('captures the light attention workbench inspector', async ({ page }, testInfo) => {
+test('captures the light attention filter', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await installAttentionScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await page.getByRole('button', { name: new RegExp(`Blocked.*${blockedSessionId}`) }).click()
-  await expect(page.getByRole('heading', { name: 'Blocked', level: 2 })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('attention-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('captures the focused phone inspector', async ({ page }, testInfo) => {
+test('captures the phone attention filter', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await installAttentionScenario(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/attention')
-  await page
-    .getByRole('button', { name: new RegExp(`Runner lost.*${lostRunnerSessionId}`) })
-    .click()
-  await expect(page.getByRole('heading', { name: 'Runner lost', level: 2 })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeHidden()
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
   await expect.soft(page).toHaveScreenshot('attention-mobile-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('applies the density preference to Attention rows', async ({ page }) => {
   await installAttentionScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
 
   const row = page.getByRole('listitem').first().getByRole('link')
   await expect(row).toHaveCSS('min-height', '62px')
@@ -550,7 +500,8 @@ test('applies the density preference to Attention rows', async ({ page }) => {
 
 test('uses the available Attention width and keeps arrows inside their rows', async ({ page }) => {
   await installAttentionScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
   for (const width of [1440, 1024, 390]) {
     await page.setViewportSize({ width, height: 900 })
     const row = page.getByRole('listitem').first().getByRole('link')
@@ -568,33 +519,18 @@ test('uses the available Attention width and keeps arrows inside their rows', as
       )
     }
     await checkArrow()
-    await page
-      .getByRole('button', { name: new RegExp(`Preview.*${approvalSessionId}`) })
-      .first()
-      .click()
-    const close = page.getByRole('button', { name: 'Close attention inspector' })
-    await expect(close).toBeVisible()
-    if (width > 760) await checkArrow()
-    await close.click()
     await expect(row).toBeVisible()
   }
 })
 
-test('opens the session from the row and exposes the same destination in Preview', async ({
-  page,
-}) => {
+test('opens the session from its attention row', async ({ page }) => {
   await installAttentionScenario(page)
-  await page.goto('/attention')
+  await page.goto('/sessions')
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
   const row = page.getByRole('link', {
     name: new RegExp(`Approval required.*${approvalSessionId}`),
   })
   await expect(row).toHaveAttribute('href', new RegExp(`session=${approvalSessionId}`))
-  await page.getByRole('button', { name: new RegExp(`Preview.*${approvalSessionId}`) }).click()
-  await expect(page.getByRole('link', { name: 'Open session' })).toHaveAttribute(
-    'href',
-    (await row.getAttribute('href')) ?? '',
-  )
-  await page.keyboard.press('Escape')
   await row.focus()
   await row.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${approvalSessionId}`))
