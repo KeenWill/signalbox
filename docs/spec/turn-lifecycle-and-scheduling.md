@@ -518,16 +518,11 @@ cancellation.
 
 ## Planned
 
-- Daemon allocation reclamation; design in
-  [daemon memory allocation](../design/daemon-memory-allocation.md).
-
 - Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
