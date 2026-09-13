@@ -989,6 +989,11 @@ export type WebSubmitInputRequest = {
   readonly message: string;
 };
 
+export type WebSessionTitleRequest = {
+  readonly command_id: string;
+  readonly title: string;
+};
+
 export type WebContractExample = {
   readonly message: string;
   readonly request_id: string;
@@ -1240,6 +1245,7 @@ export type WebUsageCallPage = {
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebSubmitInputRequest(value: unknown): WebSubmitInputRequest;
+export function decodeWebSessionTitleRequest(value: unknown): WebSessionTitleRequest;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;

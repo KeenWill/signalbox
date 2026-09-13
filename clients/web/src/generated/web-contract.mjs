@@ -6936,6 +6936,29 @@ const schemas = {
     "title": "WebSessionTimelineWindow",
     "type": "object"
   },
+  "WebSessionTitleRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Human title replacement preserving the other loaded metadata fields.",
+    "properties": {
+      "command_id": {
+        "description": "Durable identity retained when retrying the title edit.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "title": {
+        "description": "Exact nonempty human-facing title.",
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "title"
+    ],
+    "title": "WebSessionTitleRequest",
+    "type": "object"
+  },
   "WebSubmitInputRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -9894,6 +9917,11 @@ export function decodeWebContractBootstrap(value) {
 
 export function decodeWebSubmitInputRequest(value) {
   assertSchema(schemas.WebSubmitInputRequest, schemas.WebSubmitInputRequest, value, "websubmitinputrequest");
+  return value;
+}
+
+export function decodeWebSessionTitleRequest(value) {
+  assertSchema(schemas.WebSessionTitleRequest, schemas.WebSessionTitleRequest, value, "websessiontitlerequest");
   return value;
 }
 
