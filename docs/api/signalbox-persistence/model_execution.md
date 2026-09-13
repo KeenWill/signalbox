@@ -349,6 +349,12 @@ impl model_execution::PostgresModelCallRepository {
         signalbox_application::ModelCallCredentialReference,
         model_execution::ModelCallRepositoryError,
     >;
+    pub async fn turn_tool_request_count(
+        &self,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+    ) -> result::Result<u64, model_execution::ModelCallRepositoryError>;
+    pub fn session_repository(&self) -> session::SessionRepository;
     pub fn tool_loop_repository(&self) -> tool_loop::PostgresToolLoopRepository;
     pub fn approval_judge_repository(&self) -> approval_judge::PostgresApprovalJudgeRepository;
     pub async fn preview_activation_operation(

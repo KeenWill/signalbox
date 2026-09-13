@@ -313,6 +313,17 @@ impl PostgresToolLoopRepository {
         result
     }
 
+    /// Loads one request's approval with checked decision provenance.
+    pub async fn load_approval(
+        &self,
+        request: ToolRequestId,
+    ) -> Result<Option<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        Ok(load_approvals_by_request(&mut connection, &[request])
+            .await?
+            .remove(&request))
+    }
+
     /// Arms a durable human-wait deadline and denies an expired wait atomically.
     /// `None` records an unbounded wait. Repeated passes retain the first deadline.
     pub async fn expire_human_approval_wait(

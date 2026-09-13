@@ -806,7 +806,8 @@ pub(super) fn session_metadata_internal_diagnostic(
         SessionMetadataRepositoryError::DifferentCommandKind { .. } => {
             InternalDiagnostic::SessionMetadataCommandKindMismatch
         }
-        SessionMetadataRepositoryError::Corruption(_) => {
+        SessionMetadataRepositoryError::InvalidTitleMerge(_)
+        | SessionMetadataRepositoryError::Corruption(_) => {
             InternalDiagnostic::SessionMetadataCorruption
         }
     }
