@@ -118,7 +118,7 @@ test('defers descriptor reads for an attachment below the viewport', async ({ pa
   expect(requests.every((url) => url.includes(fileAttachment.digest))).toBe(true)
 })
 
-test('releases the original image state when its detail pane closes', async ({ page }) => {
+test('releases original state and cached bytes when its detail pane closes', async ({ page }) => {
   const original = readFileSync(new URL('../../../e2e/fixtures/original.jpg', import.meta.url))
   const thumbnail = readFileSync(new URL('../../../e2e/fixtures/thumbnail.png', import.meta.url))
   await page.route('**/api/bootstrap', (route) =>
@@ -138,8 +138,10 @@ test('releases the original image state when its detail pane closes', async ({ p
   const pane = page.getByRole('dialog', { name: 'Attachment details' })
   await pane.getByRole('button', { name: 'Load original', exact: true }).click()
   await expect(pane.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await expect(page.getByLabel('Cached original bytes')).toHaveText(String(original.length))
   await page.keyboard.press('Escape')
   await expect(page.getByLabel('Original image states')).toHaveText('0')
+  await expect(page.getByLabel('Cached original bytes')).toHaveText('0')
 })
 
 test('restores focus to the attachment after a successful retry', async ({ page }) => {
