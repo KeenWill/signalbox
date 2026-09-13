@@ -43,6 +43,7 @@ import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
   detailTurnId,
   groupTranscriptTurns,
+  isToolBodyContinuation,
   isVisibleTurnEvent,
   type TranscriptTurn,
   toolContinuations,
@@ -924,6 +925,7 @@ function TurnContent({
         const item = candidate.items.at(-1)
         return (
           cursor?.type === 'more_body' &&
+          isToolBodyContinuation(cursor.body) &&
           !advancesToolMember(candidate) &&
           ((item?.body.type === 'tool_batch' &&
             item.body.tools.some((entry) => disclosureKey(entry) === disclosureKey(tool))) ||
