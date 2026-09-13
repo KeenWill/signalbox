@@ -136,7 +136,9 @@ media type, presentation kind, and byte length when the result is media.
 Presentation preserves the retained image or document kind. Blob bytes use the
 existing content route for images and the descriptor's download route for
 documents; earlier transition snapshots carry no later result reference. Each
-detail page loads completed media references in one batch.
+detail page loads completed media references in one batch. Media read failures
+return `session_projection_failed` and log the underlying failure
+classification.
 
 `POST /api/sessions` creates a pathless interactive session from a named
 template through `CreateSession`, with an open start gate and unmonitored

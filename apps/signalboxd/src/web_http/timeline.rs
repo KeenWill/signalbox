@@ -268,11 +268,8 @@ pub(super) async fn session_timeline_item_detail(
     {
         Ok(Some(page)) => match detail_page_dto(page) {
             Ok(mut page) => {
-                if populate_tool_media(&mut page, state.pool.as_ref())
-                    .await
-                    .is_err()
-                {
-                    return session_projection_unavailable();
+                if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
+                    return error.into_response();
                 }
                 Json(page).into_response()
             }
@@ -319,11 +316,8 @@ pub(super) async fn session_timeline_turn_detail(
     {
         Ok(Some(page)) => match detail_page_dto(page) {
             Ok(mut page) => {
-                if populate_tool_media(&mut page, state.pool.as_ref())
-                    .await
-                    .is_err()
-                {
-                    return session_projection_unavailable();
+                if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
+                    return error.into_response();
                 }
                 Json(page).into_response()
             }
@@ -378,11 +372,8 @@ pub(super) async fn session_timeline_region_detail(
     {
         Ok(Some(page)) => match detail_page_dto(page) {
             Ok(mut page) => {
-                if populate_tool_media(&mut page, state.pool.as_ref())
-                    .await
-                    .is_err()
-                {
-                    return session_projection_unavailable();
+                if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
+                    return error.into_response();
                 }
                 Json(page).into_response()
             }
@@ -489,6 +480,23 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
         failure_class,
         cause = %error,
         "session timeline projection read failed"
+    );
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_projection_failed",
+        "the durable session projection could not be read",
+    )
+}
+
+fn tool_media_projection_error(
+    error: signalbox_persistence::tool_loop::ToolLoopRepositoryError,
+) -> Response {
+    use signalbox_application::ClassifyOperatorFailure as _;
+
+    tracing::error!(
+        failure_class = ?error.operator_failure_class(),
+        cause = %error,
+        "session timeline media projection read failed"
     );
     application_error(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -621,10 +629,29 @@ fn window_dto(
     })
 }
 
+#[derive(Debug)]
+enum ToolMediaProjectionError {
+    Unavailable,
+    Repository(signalbox_persistence::tool_loop::ToolLoopRepositoryError),
+    InvalidAttempt,
+}
+
+impl ToolMediaProjectionError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Unavailable => session_projection_unavailable(),
+            Self::Repository(error) => tool_media_projection_error(error),
+            Self::InvalidAttempt => {
+                SessionTimelineRequestError::InvalidProjectedToolAttempt.into_response()
+            }
+        }
+    }
+}
+
 async fn populate_tool_media(
     page: &mut WebSessionTimelineDetailPage,
     pool: Option<&sqlx::PgPool>,
-) -> Result<(), ()> {
+) -> Result<(), ToolMediaProjectionError> {
     let mut targets = Vec::new();
     for item in &mut page.items {
         let WebSessionTimelineDetailBody::ToolBatch { tools, .. } = &mut item.body else {
@@ -640,7 +667,10 @@ async fn populate_tool_media(
                 continue;
             };
             let request = signalbox_domain::ToolRequestId::from_uuid(
-                tool.request_id.as_str().parse().map_err(|_| ())?,
+                tool.request_id
+                    .as_str()
+                    .parse()
+                    .map_err(|_| ToolMediaProjectionError::InvalidAttempt)?,
             );
             targets.push((request, result_media_reference));
         }
@@ -648,8 +678,9 @@ async fn populate_tool_media(
     if targets.is_empty() {
         return Ok(());
     }
-    let repository =
-        signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.ok_or(())?.clone());
+    let repository = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(
+        pool.ok_or(ToolMediaProjectionError::Unavailable)?.clone(),
+    );
     let requests = targets
         .iter()
         .map(|(request, _)| *request)
@@ -657,13 +688,14 @@ async fn populate_tool_media(
     let references = repository
         .load_media_references(&requests)
         .await
-        .map_err(|_| ())?;
+        .map_err(ToolMediaProjectionError::Repository)?;
     for (request, target) in targets {
         *target = references
             .get(&request)
             .cloned()
             .map(tool_media_reference_dto)
-            .transpose()?;
+            .transpose()
+            .map_err(|_| ToolMediaProjectionError::InvalidAttempt)?;
     }
     Ok(())
 }
@@ -1947,7 +1979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn earlier_attempt_snapshots_do_not_load_later_media() {
+    async fn media_reads_only_completed_snapshots_and_preserves_read_failure_responses() {
         for state in [
             TimelineToolState::Prepared,
             TimelineToolState::InFlight,
@@ -1997,9 +2029,96 @@ mod tests {
                 projected_body_bytes: signalbox_application::timeline_detail_envelope_bytes(),
                 continuation: None,
             };
-            assert_eq!(
-                populate_tool_media(&mut page, None).await.is_err(),
-                completed
+            let missing_pool = populate_tool_media(&mut page, None).await;
+            if completed {
+                assert_eq!(
+                    missing_pool
+                        .expect_err("completed media needs a pool")
+                        .into_response()
+                        .status(),
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            } else {
+                assert!(missing_pool.is_ok());
+            }
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+            pool.close().await;
+            let read = populate_tool_media(&mut page, Some(&pool)).await;
+            if completed {
+                let error = read.expect_err("closed pool is a read failure");
+                assert!(matches!(
+                    &error,
+                    ToolMediaProjectionError::Repository(
+                        signalbox_persistence::tool_loop::ToolLoopRepositoryError::Database {
+                            source: sqlx::Error::PoolClosed,
+                            ..
+                        }
+                    )
+                ));
+                let response = error.into_response();
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                let body = axum::body::to_bytes(
+                    response.into_body(),
+                    signalbox_web_contract::MAX_JSON_BODY_BYTES,
+                )
+                .await
+                .expect("projection error body");
+                let error: signalbox_web_contract::WebApiErrorResponse =
+                    serde_json::from_slice(&body).expect("projection error");
+                assert_eq!(error.error.code, "session_projection_failed");
+            } else {
+                assert!(read.is_ok(), "earlier snapshots make no media query");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn media_read_failures_log_their_class_and_return_projection_failed() {
+        use signalbox_persistence::tool_loop::{ToolLoopCorruption, ToolLoopRepositoryError};
+
+        const CORRUPTION_DETAIL: &str = "retained media fixture corruption";
+        for (error, expected_class) in [
+            (
+                ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Inconsistent(
+                    CORRUPTION_DETAIL,
+                )),
+                "FailClosedCorruption",
+            ),
+            (
+                ToolLoopRepositoryError::from(sqlx::Error::PoolClosed),
+                "Infrastructure",
+            ),
+        ] {
+            let expected_cause = error.to_string();
+            let output = tempfile::NamedTempFile::new().expect("capture media read failure");
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::ERROR)
+                .with_writer(output.reopen().expect("capture writer"))
+                .finish();
+            let response = tracing::subscriber::with_default(subscriber, || {
+                tool_media_projection_error(error)
+            });
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(
+                response.into_body(),
+                signalbox_web_contract::MAX_JSON_BODY_BYTES,
+            )
+            .await
+            .expect("projection error body");
+            let error: signalbox_web_contract::WebApiErrorResponse =
+                serde_json::from_slice(&body).expect("projection error");
+            assert_eq!(error.error.code, "session_projection_failed");
+            let log = std::fs::read_to_string(output.path()).expect("captured diagnostic");
+            assert!(
+                log.contains(expected_class),
+                "diagnostic retains failure class: {log}"
+            );
+            assert!(
+                log.contains(&expected_cause),
+                "diagnostic retains failure cause: {log}"
             );
         }
     }
