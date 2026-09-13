@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { fileEvidence, longEvidence, rawFileEvidence } from './toolScenario'
+import { fileEvidence, jsonExamples, longEvidence, rawFileEvidence } from './toolScenario'
 
 test('tool summaries expose raw evidence by keyboard', async ({ page }, testInfo) => {
   const errors: string[] = []
@@ -55,3 +55,33 @@ test('raw excerpts expose the complete fetched text on demand', async ({ page })
   await tool.getByRole('button', { name: 'Show less' }).click()
   await expect(code).not.toContainText('Last fetched line')
 })
+
+for (const example of jsonExamples) {
+  test(`keeps ${example.name} structured evidence behind Raw`, async ({ page }, testInfo) => {
+    await page.goto('/src/features/tools/scenario.html')
+    const tool = page.getByRole('article', { name: `Tool ${example.name}`, exact: true })
+    await expect(tool.locator('pre')).toHaveCount(0)
+    expect((await tool.textContent())?.length).toBeLessThan(6000)
+    expect(await tool.locator('dt').count()).toBeLessThanOrEqual(32)
+    const raw = tool.getByRole('button', { name: 'Raw', exact: true })
+    await raw.focus()
+    await page.keyboard.press('Enter')
+    const region = tool.getByRole('region', {
+      name: example.name === 'json_failure' ? 'Failure' : example.label,
+      exact: true,
+    })
+    const expand = region.getByRole('button', { name: 'Show all fetched text' })
+    if (await expand.count()) await expand.click()
+    expect(await region.locator('code').textContent()).toBe(example.raw)
+    await raw.click()
+    await expect(tool.locator('pre')).toHaveCount(0)
+    if (example.name === 'json_nested') {
+      await page.setViewportSize({ width: 390, height: 844 })
+      await tool.scrollIntoViewIfNeeded()
+      await tool.screenshot({ path: testInfo.outputPath('structured-tool-phone.png') })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      )
+    }
+  })
+}

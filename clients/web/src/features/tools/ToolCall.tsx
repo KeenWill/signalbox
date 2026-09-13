@@ -5,6 +5,7 @@ import type {
   WebTimelineToolAttempt,
 } from '../../generated/web-contract.mjs'
 import { enumLabel } from '../../labels'
+import { ARTIFACT_PREVIEW_CHARACTERS, ARTIFACT_PREVIEW_LINES } from '../artifacts/artifactTypes'
 import { ToolResultMedia } from './ToolResultMedia'
 import {
   excerptFields,
@@ -87,7 +88,11 @@ function Excerpt({
   if (!excerpt) return null
   return (
     <>
-      <TextPreview text={excerpt.text} label={label} expandable={expandable} />
+      {expandable ? (
+        <TextPreview text={excerpt.text} label={label} expandable />
+      ) : (
+        <PresentedExcerpt excerpt={excerpt} label={label} />
+      )}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation != null) && (
         <small>Showing part of {label.toLowerCase()}</small>
       )}
@@ -95,21 +100,95 @@ function Excerpt({
   )
 }
 
+function valueSummary(value: unknown): string {
+  if (value === null) return 'None'
+  if (Array.isArray(value)) {
+    const entries = value
+      .slice(0, ARTIFACT_PREVIEW_LINES)
+      .map((item) =>
+        item === null
+          ? 'None'
+          : Array.isArray(item)
+            ? `List · ${item.length} items`
+            : typeof item === 'object'
+              ? `Object · ${Object.keys(item).length} fields`
+              : previewText(textField(item)).content,
+      )
+    return `${value.length} items${entries.length ? `: ${entries.join(', ')}` : ''}${value.length > entries.length ? ' · More in Raw' : ''}`
+  }
+  if (typeof value === 'object') return `Object · ${Object.keys(value).length} fields`
+  return textField(value)
+}
+
 function FieldList({ value }: { value: Fields }) {
-  const preview = previewText(JSON.stringify(value))
-  // A large payload stays in the bounded text view instead of mounting every field.
-  if (preview.omittedCharacters > 0)
-    return <TextPreview text={JSON.stringify(value)} label="Details" />
+  const entries = Object.entries(value)
+  let remaining = ARTIFACT_PREVIEW_CHARACTERS
+  const rows: { key: string; label: string; text: string }[] = []
+  let trimmed = false
+  for (const [key, item] of entries) {
+    if (rows.length === ARTIFACT_PREVIEW_LINES || remaining === 0) {
+      trimmed = true
+      break
+    }
+    const label = Array.from(fieldLabel(key)).slice(0, remaining).join('')
+    remaining -= Array.from(label).length
+    const summary = valueSummary(item)
+    const preview = previewText(summary)
+    const text = Array.from(preview.content).slice(0, remaining).join('')
+    remaining -= Array.from(text).length
+    trimmed ||= label !== fieldLabel(key) || text !== summary
+    rows.push({ key, label, text: summary === '' ? 'Empty text' : text })
+  }
   return (
-    <dl className="tool-fields">
-      {Object.entries(value).map(([key, item]) => (
-        <div key={key}>
-          <dt>{fieldLabel(key)}</dt>
-          <dd>{textField(item) || (item === null ? 'None' : JSON.stringify(item))}</dd>
-        </div>
-      ))}
-    </dl>
+    <>
+      {entries.length === 0 ? (
+        <p>No fields</p>
+      ) : (
+        <dl className="tool-fields">
+          {rows.map(({ key, label, text }) => (
+            <div key={key}>
+              <dt>{label}</dt>
+              <dd>{text}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {trimmed && <small>Showing part of the details · Open Raw for all fetched text</small>}
+    </>
   )
+}
+
+function PresentedExcerpt({ excerpt, label }: { excerpt: WebTimelineTextExcerpt; label: string }) {
+  const value = excerptFields(excerpt)
+  if (Object.keys(value).length > 0)
+    return (
+      <section aria-label={label}>
+        <FieldList value={value} />
+      </section>
+    )
+  if (excerpt.offset_bytes !== '0' || excerpt.continuation != null)
+    return <p>{label} excerpt available in Raw</p>
+  try {
+    const parsed: unknown = JSON.parse(excerpt.text)
+    return (
+      <section aria-label={label}>
+        <p>
+          {typeof parsed === 'string'
+            ? `Text · ${Array.from(parsed).length} characters`
+            : typeof parsed === 'number'
+              ? 'Number available in Raw'
+              : previewText(valueSummary(parsed)).content}
+        </p>
+        <small>Open Raw for the original text</small>
+      </section>
+    )
+  } catch {
+    return /^\s*[[{"]/u.test(excerpt.text) ? (
+      <p>{label} details available in Raw</p>
+    ) : (
+      <TextPreview text={excerpt.text} label={label} />
+    )
+  }
 }
 
 function Result({ result, resultExcerpt }: Pick<RendererProps, 'result' | 'resultExcerpt'>) {
@@ -204,7 +283,15 @@ function MediaRead({ arguments: args, result, resultExcerpt }: RendererProps) {
           <TextPreview text={result.body} label="File contents" />
         )
       ) : result.status === 'structured' ? (
-        <TextPreview text={JSON.stringify(result.body) ?? ''} label="File contents" />
+        <section aria-label="File contents">
+          {result.body !== null &&
+          typeof result.body === 'object' &&
+          !Array.isArray(result.body) ? (
+            <FieldList value={fields(result.body)} />
+          ) : (
+            <p>{previewText(valueSummary(result.body)).content}</p>
+          )}
+        </section>
       ) : typeof result.status === 'string' ? (
         <p>{fieldLabel(result.status)}</p>
       ) : null}

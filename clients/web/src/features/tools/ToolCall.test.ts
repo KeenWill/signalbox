@@ -24,7 +24,8 @@ describe('tool presentation', () => {
     const markup = renderToStaticMarkup(
       createElement(ToolCall, { tool: { ...tool, evidence: { ...tool.evidence, result } } }),
     )
-    expect(markup).toContain(text)
+    expect(markup).toContain('Output excerpt available in Raw')
+    expect(markup).not.toContain(text)
     expect(markup).toContain('Showing part of output')
   })
 
@@ -115,7 +116,7 @@ describe('tool presentation', () => {
         { ...resultTool, evidence: { ...resultTool.evidence, result: toolExcerpt(text) } },
       ]) {
         const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
-        expect(markup).toContain(number)
+        expect(markup).not.toContain(number)
         expect(markup).not.toContain('9007199254740992')
       }
       expect(excerptFields(toolExcerpt(text))).toEqual({})
@@ -590,7 +591,7 @@ describe('tool presentation', () => {
       toolExample('read_file', { path: 'large.txt' }, { content: 'x'.repeat(1_000_000) }),
     )
     expect(markup.length).toBeLessThan(6_000)
-    expect(markup).toContain('Showing part of the text')
+    expect(markup).toContain('Open Raw for the original text')
   })
 
   it('links the normalized GitHub result destination', () => {

@@ -94,3 +94,89 @@ export const toolExamples = [
   ),
   toolExample('custom_tool', { greeting: 'Hello' }, { answer: 'World' }),
 ]
+
+const jsonCase = (
+  name: string,
+  args: unknown,
+  result: unknown,
+  label: 'Arguments' | 'Output' = 'Output',
+) => {
+  const [request, output] = toolExample(name, args, result)
+  return {
+    name,
+    tool: { ...output, arguments: request.arguments },
+    label,
+    raw: JSON.stringify(label === 'Arguments' ? args : result),
+  }
+}
+export const jsonExamples = [
+  jsonCase(
+    'json_oversized',
+    { description: 'detail '.repeat(1000), last_field: 'end' },
+    {},
+    'Arguments',
+  ),
+  jsonCase(
+    'json_many_fields',
+    {},
+    Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`field_${index}`, index])),
+  ),
+  jsonCase('json_nested', {}, { nested: { subject: 'nested evidence' }, rows: [{ value: 1 }] }),
+  jsonCase('json_fallback', {}, ['first', { second: true }]),
+  jsonCase('json_empty', {}, {}),
+  jsonCase('json_number', {}, { nonce: 9007199254740991 }),
+  jsonCase('json_failure', {}, {}),
+  jsonCase('json_partial_arguments', {}, {}, 'Arguments'),
+  jsonCase('file_read', { view: 'text' }, {}),
+]
+const failureCase = jsonExamples.find((entry) => entry.name === 'json_failure')
+if (failureCase?.tool.evidence.type === 'physical_attempt') {
+  const failure = JSON.stringify({
+    message: 'Cannot read attachment',
+    detail: { reason: 'missing' },
+  })
+  failureCase.tool = {
+    ...failureCase.tool,
+    evidence: {
+      ...failureCase.tool.evidence,
+      state: 'known_failed',
+      failure_present: true,
+      failure: toolExcerpt(failure),
+    },
+  }
+  failureCase.raw = failure
+}
+for (const entry of jsonExamples) {
+  if (entry.name === 'json_number' && entry.tool.evidence.type === 'physical_attempt') {
+    entry.raw = '{"nonce":9007199254740993}'
+    entry.tool = {
+      ...entry.tool,
+      evidence: { ...entry.tool.evidence, result: toolExcerpt(entry.raw) },
+    }
+  }
+  if (entry.name === 'json_partial_arguments') {
+    entry.raw = '{"query":"partial'
+    entry.tool = {
+      ...entry.tool,
+      arguments: {
+        ...toolExcerpt(entry.raw),
+        offset_bytes: '10',
+        total_bytes: String(entry.raw.length + 10),
+      },
+    }
+  }
+  if (entry.name === 'file_read' && entry.tool.evidence.type === 'physical_attempt') {
+    entry.raw = 'remaining body","truncated":true}'
+    entry.tool = {
+      ...entry.tool,
+      evidence: {
+        ...entry.tool.evidence,
+        result: {
+          ...toolExcerpt(entry.raw),
+          offset_bytes: '128',
+          total_bytes: String(entry.raw.length + 128),
+        },
+      },
+    }
+  }
+}
