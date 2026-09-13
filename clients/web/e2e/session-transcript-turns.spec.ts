@@ -2044,7 +2044,7 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   expect(problems).toEqual([])
 })
 
-test('identifies a failed physical attempt without detail text after a successful retry', async ({
+test('identifies payload-free physical attempt states after a successful retry', async ({
   page,
 }, testInfo) => {
   const problems: string[] = []
@@ -2055,8 +2055,20 @@ test('identifies a failed physical attempt without detail text after a successfu
   const items = retriedToolItems().map((item) => {
     if (item.body.type !== 'tool_batch') return item
     const tool = item.body.tools[0]
-    if (tool?.evidence.type !== 'physical_attempt' || tool.evidence.state !== 'known_failed')
-      return item
+    if (tool?.evidence.type !== 'physical_attempt') return item
+    const evidence =
+      tool.evidence.state === 'known_failed'
+        ? {
+            ...tool.evidence,
+            cause: 'crash_lost' as const,
+            failure_present: false,
+            failure: null,
+          }
+        : {
+            ...tool.evidence,
+            result_present: false,
+            result: null,
+          }
     return {
       ...item,
       projected_body_bytes: 128 + Number(tool.arguments?.total_bytes ?? '0'),
@@ -2065,12 +2077,7 @@ test('identifies a failed physical attempt without detail text after a successfu
         tools: [
           {
             ...tool,
-            evidence: {
-              ...tool.evidence,
-              cause: 'crash_lost' as const,
-              failure_present: false,
-              failure: null,
-            },
+            evidence,
           },
         ],
       },
@@ -2128,14 +2135,8 @@ test('identifies a failed physical attempt without detail text after a successfu
     'Failure · Attempt lost on restart',
   )
   await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
-  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
-  await expect(
-    slots
-      .last()
-      .getByRole('region', { name: 'More message text', exact: true })
-      .getByRole('region', { name: 'Output', exact: true }),
-  ).toContainText('passed')
-  await expect(slots.last().locator('.session-turn-outcome')).toHaveCount(0)
+  await expect(slots.last().locator('.session-turn-outcome')).toHaveText('Completed')
+  await expect(slots.last().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
   await slots.first().locator('.session-turn-outcome').scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
   expect(problems).toEqual([])
@@ -2182,3 +2183,59 @@ test('Escape closes the focused tool reader and restores Read more', async ({ pa
   await expect(transcript.getByRole('region', { name: 'exec_command details' })).toBeVisible()
   await expect(page).toHaveURL(/workspace=true/)
 })
+for (const [state, label] of [
+  ['ambiguous', 'Outcome unknown'],
+  ['awaiting_child', 'Waiting for child session'],
+] as const) {
+  test(`shows the ${state} physical attempt state without payload text`, async ({
+    page,
+  }, testInfo) => {
+    const item = toolResultItem()
+    const input = detailItems[0]
+    if (item.body.type !== 'tool_batch' || !input) throw new Error('Tool fixture missing')
+    const tool = item.body.tools[0]
+    if (tool?.evidence.type !== 'physical_attempt') throw new Error('Physical attempt missing')
+    const args = detailExcerpt('{"cmd":"check status"}')
+    const physical: WebSessionTimelineDetail = {
+      ...item,
+      projected_body_bytes: 128 + Number(args.total_bytes),
+      body: {
+        ...item.body,
+        tools: [
+          {
+            ...tool,
+            arguments: args,
+            evidence: {
+              ...tool.evidence,
+              state,
+              effect_posture: 'external_effect',
+              cause: null,
+              result: null,
+              result_present: false,
+              failure: null,
+              failure_present: false,
+            },
+          },
+        ],
+      },
+    }
+    await turnApi(page, undefined, [input, physical])
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      return url.searchParams.get('first') === physical.address.event_sequence
+        ? route.fulfill({ json: detailPage([physical]) })
+        : route.fallback()
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+    const details = transcript.getByRole('region', { name: 'exec_command details', exact: true })
+    await expect(details.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
+      'check status',
+    )
+    await expect(details.getByText(label, { exact: true })).toBeVisible()
+    await expect(details.getByRole('region', { name: 'Failure', exact: true })).toHaveCount(0)
+    await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath(`${state}-tool-state.png`) })
+  })
+}

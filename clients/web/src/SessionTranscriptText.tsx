@@ -300,6 +300,7 @@ function TranscriptWindow({
   const scanDirection = useRef<'before' | 'after'>(
     initialAnchor.kind === 'first' || initialAnchor.kind === 'after' ? 'after' : 'before',
   )
+  const emptyScanned = useRef({ headers: 0, items: 0, bytes: 0, first: '' })
   const readPage = useCallback(
     (direction: 'before' | 'after') => {
       if (pageRead.current) return
@@ -321,7 +322,10 @@ function TranscriptWindow({
   useEffect(() => {
     if (previousObservation.current !== observed) {
       previousObservation.current = observed
-      if (readerAtEnd.current && followLatest.current)
+      if (readerAtEnd.current && followLatest.current) {
+        scanDirection.current = 'before'
+        emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
+        automaticLimits.current = undefined
         queries.setQueryData<typeof transcript.data>(queryKey, (data) =>
           data
             ? {
@@ -333,6 +337,7 @@ function TranscriptWindow({
               }
             : data,
         )
+      }
       void transcript.refetch()
     }
   }, [observed, transcript.refetch, queries, queryKey])
@@ -682,7 +687,6 @@ function TranscriptWindow({
     turns.find((turn) =>
       turn.events.some((event) => event.address.event_sequence === selectedSequence),
     )?.id ?? rows.find((row) => row.sequence === selectedSequence)?.id
-  const emptyScanned = useRef({ headers: 0, items: 0, bytes: 0, first: '' })
   useEffect(() => {
     const direction = scanDirection.current
     const boundary = direction === 'before' ? pages?.[0] : pages?.at(-1)
@@ -1161,13 +1165,13 @@ function ToolSummary({
           {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
           {result && <ToolText label="Output" excerpt={result} />}
           {failure && <ToolText label="Failure" excerpt={failure} />}
-          {evidence &&
-            (evidence.state === 'known_failed' || evidence.failure_present) &&
-            !evidence.failure && (
-              <p className="session-turn-outcome">
-                Failure · {enumLabel(evidence.cause ?? evidence.state)}
-              </p>
-            )}
+          {evidence && !evidence.result && !evidence.failure && (
+            <p className="session-turn-outcome">
+              {evidence.state === 'known_failed' || evidence.failure_present
+                ? `Failure · ${enumLabel(evidence.cause ?? evidence.state)}`
+                : enumLabel(evidence.state)}
+            </p>
+          )}
         </>
       )}
       {needsOutput && output.isPending && <small role="status">Loading output…</small>}
