@@ -81,6 +81,16 @@ pub struct WebSubmitInputRequest {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebSessionTitleRequest
+
+```rust
+pub struct WebSessionTitleRequest {
+    pub command_id: string::String,
+    pub title: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebContractExample
 
 ```rust
@@ -1984,16 +1994,6 @@ pub enum WebUsageCallKind {
     ModelCall,
     ApprovalJudge,
     ContextCompaction,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageProvenance
-
-```rust
-pub enum WebUsageProvenance {
-    Reported,
-    Estimated,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

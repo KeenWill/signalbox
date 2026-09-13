@@ -138,6 +138,14 @@ existing content route for images and the descriptor's download route for
 documents; earlier transition snapshots carry no later result reference. Each
 detail page loads completed media references in one batch.
 
+`PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
+title, rejects other fields, and replaces metadata through the user command
+service while carrying forward the loaded tags, attributes, and archive flag. A
+204 response acknowledges the committed replacement; equal replay returns the
+recorded result without reinstalling it. Title-only intent is retained with the
+receipt; reusing a full-replacement command ID for a title request, or the
+reverse, is conflicting reuse.
+
 ## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from

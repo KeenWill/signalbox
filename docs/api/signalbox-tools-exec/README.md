@@ -5,4 +5,4 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | diagnostics | 16 | 0 | 0 | [diagnostics](diagnostics.md) |
-| process | 29 | 1 | 0 | [process](process.md) |
+| process | 30 | 1 | 0 | [process](process.md) |

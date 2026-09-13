@@ -89,6 +89,13 @@ impl tool_loop::PostgresToolLoopRepository {
         option::Option<signalbox_domain::ToolBatch>,
         tool_loop::ToolLoopRepositoryError,
     >;
+    pub async fn load_approval(
+        &self,
+        request: signalbox_domain::ToolRequestId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ToolApprovalResolution>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
     pub async fn expire_human_approval_wait(
         &self,
         session: signalbox_domain::SessionId,

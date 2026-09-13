@@ -55,6 +55,7 @@ pub use diagnostics::{
     InvalidCargoDiagnosticsArguments,
 };
 pub use process::SandboxReadOnlyMount;
+pub use process::SandboxedExecArguments;
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, ExecutionDiagnostic,
