@@ -60,3 +60,21 @@
   display: block;
   overflow-wrap: anywhere;
 }
+
+.session-action-buttons {
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-action-buttons button {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.session-actions > .session-action-confirmation,
+.session-actions > p {
+  margin: 0 12px;
+}

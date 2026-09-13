@@ -8,6 +8,7 @@ import {
 import { ChevronDown, ChevronRight, SkipBack, SkipForward } from 'lucide-react'
 import {
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
   useCallback,
   useEffect,
@@ -50,11 +51,13 @@ function SessionActions({
   pendingRequest,
   activeTurn,
   onAccepted,
+  renderHeader,
 }: {
   sessionId: string
   pendingRequest: string | null
   activeTurn: string | null
   onAccepted: () => Promise<unknown>
+  renderHeader: (controls: ReactNode) => ReactNode
 }) {
   const [draftChoice, setChoice] = useState<
     'approve' | 'deny' | 'cancel' | 'set-goal' | 'clear-goal' | null
@@ -167,50 +170,52 @@ function SessionActions({
   }
   return (
     <section className="session-actions" aria-label="Session actions">
-      <div className="session-action-buttons">
-        {pendingRequest && (
-          <>
-            <span>Approval needed</span>
+      {renderHeader(
+        <div className="session-action-buttons">
+          {pendingRequest && (
+            <>
+              <span className="sr-only">Approval needed</span>
+              <button
+                type="button"
+                disabled={retained !== null || capacityReached}
+                onClick={() => choose('approve')}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                disabled={retained !== null || capacityReached}
+                onClick={() => choose('deny')}
+              >
+                Deny
+              </button>
+            </>
+          )}
+          {activeTurn && (
             <button
               type="button"
               disabled={retained !== null || capacityReached}
-              onClick={() => choose('approve')}
+              onClick={() => choose('cancel')}
             >
-              Approve
+              Cancel turn
             </button>
-            <button
-              type="button"
-              disabled={retained !== null || capacityReached}
-              onClick={() => choose('deny')}
-            >
-              Deny
-            </button>
-          </>
-        )}
-        {activeTurn && (
+          )}
           <button
             type="button"
             disabled={retained !== null || capacityReached}
-            onClick={() => choose('cancel')}
+            onClick={() => choose('set-goal')}
           >
-            Cancel turn
+            Set goal
           </button>
-        )}
-        <button
-          type="button"
-          disabled={retained !== null || capacityReached}
-          onClick={() => choose('set-goal')}
-        >
-          Set goal
-        </button>
-        <button
-          type="button"
-          disabled={retained !== null || capacityReached}
-          onClick={() => choose('clear-goal')}
-        >
-          Clear goal
-        </button>
-      </div>
+          <button
+            type="button"
+            disabled={retained !== null || capacityReached}
+            onClick={() => choose('clear-goal')}
+          >
+            Clear goal
+          </button>
+        </div>,
+      )}
       {choice && (
         <form
           className="session-action-confirmation"
@@ -717,186 +722,195 @@ export function SessionWorkspaceSurface({
           <p className="sr-only" role="status">
             Session {sessionId} loaded.
           </p>
-          <header className="session-compact-header">
-            <div className="session-header-line">
-              <h2 id="session-workspace-heading">Session</h2>
-              <p className="session-header-state">
-                {displayedSession.descriptor.supervision?.pending
-                  ? 'Recovery required'
-                  : displayedSession.active
-                    ? 'Active'
-                    : 'Inactive'}
-              </p>
-              <div
-                className="session-header-actions"
-                role="toolbar"
-                aria-label="Timeline shortcuts"
-              >
-                <button
-                  type="button"
-                  title="First (gg)"
-                  aria-label="First"
-                  onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
-                >
-                  <SkipBack aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  title="Latest (G)"
-                  aria-label="Latest"
-                  onClick={(event) => invokeBoundaryCommand('selection.last', event.currentTarget)}
-                >
-                  <SkipForward aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-            <SessionActions
-              key={sessionId}
-              sessionId={sessionId ?? ''}
-              pendingRequest={
-                live?.active?.state.kind === 'awaiting_tool_approval'
-                  ? live.active.state.tool_request_id
-                  : null
-              }
-              activeTurn={live?.active?.turn_id ?? null}
-              onAccepted={refetchSession}
-            />
-            <div className="session-header-line session-header-secondary">
-              <span role="status">
-                {followFailed
-                  ? 'Live updates unavailable.'
-                  : synchronization.phase === 'resyncing'
-                    ? 'Reconnecting…'
-                    : live
-                      ? 'Live'
-                      : 'Connecting…'}
-              </span>
-              <details ref={detailsRef} className="session-header-details">
-                <summary>Session details</summary>
-                <div className="session-header-detail-content">
-                  <p>Session {sessionId}</p>
-                  <dl className="session-telemetry">
-                    <div>
-                      <dt>Items</dt>
-                      <dd>{displayedSession.descriptor.sizes.item_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Active</dt>
-                      <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Queued</dt>
-                      <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
-                    </div>
-                    <div>
-                      <dt>Up to date as of</dt>
-                      <dd>{displayedSession.descriptor.observed_through}</dd>
-                    </div>
-                  </dl>
-                  {displayedSession.descriptor.supervision && (
-                    <section className="session-provenance" aria-label="Session supervision">
-                      <p>
-                        {displayedSession.descriptor.supervision.pending
-                          ? 'Recovery required'
-                          : 'Recovery recorded'}
-                      </p>
-                      <p>
-                        {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
-                        <code>{displayedSession.descriptor.supervision.cause_code}</code>
-                      </p>
-                    </section>
-                  )}
-                  {displayedSession.descriptor.repository_watch && (
-                    <section className="session-provenance" aria-label="Repository watch">
-                      Repository watch · {displayedSession.descriptor.repository_watch.repository}
-                      {displayedSession.descriptor.repository_watch.pull_request !== null &&
-                        ` #${displayedSession.descriptor.repository_watch.pull_request}`}
-                      {' · Rule '}
-                      {displayedSession.descriptor.repository_watch.rule_id}
-                      {' v'}
-                      {displayedSession.descriptor.repository_watch.rule_revision}
-                      {' · '}
-                      {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
-                      <details>
-                        <summary>Trigger details</summary>
-                        <p>
-                          Trigger {displayedSession.descriptor.repository_watch.dispatch_id}
-                          {' · Action '}
-                          {displayedSession.descriptor.repository_watch.action_ordinal}
-                        </p>
-                        <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
-                      </details>
-                    </section>
-                  )}
-                  <div className="session-window-controls" role="toolbar" aria-label="Timeline">
+          <SessionActions
+            key={sessionId}
+            sessionId={sessionId ?? ''}
+            pendingRequest={
+              live?.active?.state.kind === 'awaiting_tool_approval'
+                ? live.active.state.tool_request_id
+                : null
+            }
+            activeTurn={live?.active?.turn_id ?? null}
+            onAccepted={refetchSession}
+            renderHeader={(controls) => (
+              <header className="session-compact-header">
+                <div className="session-header-line">
+                  <h2 id="session-workspace-heading">Session</h2>
+                  <p className="session-header-state">
+                    {displayedSession.descriptor.supervision?.pending
+                      ? 'Recovery required'
+                      : displayedSession.active
+                        ? 'Active'
+                        : 'Inactive'}
+                  </p>
+                  <div
+                    className="session-header-actions"
+                    role="toolbar"
+                    aria-label="Timeline shortcuts"
+                  >
                     <button
                       type="button"
-                      disabled={!displayedSession.window.continuation_before}
-                      onClick={() => {
-                        const address = displayedSession.window.continuation_before?.event_sequence
-                        if (address) {
-                          manualAnchorRef.current = { kind: 'before', eventSequence: address }
-                          requestedSelection.current = undefined
-                          onAroundConsumed()
-                          void refetchSession()
-                        }
-                      }}
+                      title="First (gg)"
+                      aria-label="First"
+                      onClick={(event) =>
+                        invokeBoundaryCommand('selection.first', event.currentTarget)
+                      }
                     >
-                      Previous
+                      <SkipBack aria-hidden="true" />
                     </button>
                     <button
                       type="button"
-                      disabled={!displayedSession.window.continuation_after}
-                      onClick={() => {
-                        const address = displayedSession.window.continuation_after?.event_sequence
-                        if (address) {
-                          manualAnchorRef.current = { kind: 'after', eventSequence: address }
-                          requestedSelection.current = undefined
-                          onAroundConsumed()
-                          void refetchSession()
-                        }
-                      }}
+                      title="Latest (G)"
+                      aria-label="Latest"
+                      onClick={(event) =>
+                        invokeBoundaryCommand('selection.last', event.currentTarget)
+                      }
                     >
-                      Next
+                      <SkipForward aria-hidden="true" />
                     </button>
-                    <span hidden={!showEvents}>
-                      {displayedSession.window.items.length} events ·{' '}
-                      {displayedSession.window.projected_structured_bytes} B
-                    </span>
                   </div>
-                  {followFailed && (
-                    <button
-                      type="button"
-                      onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
-                    >
-                      Reconnect live updates
-                    </button>
-                  )}
-                  {live?.active?.state.kind === 'awaiting_credential_availability' && (
-                    <p role="status" className="availability-tag">
-                      Waiting for credentials · {enumLabel(live.active.state.cause)}
-                    </p>
-                  )}
-                  {(live?.reconciliation || live?.runner) && (
-                    <div className="session-live-facts">
-                      {live.reconciliation && (
-                        <span className="availability-tag">
-                          Recovery needed · {enumLabel(live.reconciliation.kind)}
-                        </span>
+
+                  <span role="status">
+                    {followFailed
+                      ? 'Live updates unavailable.'
+                      : synchronization.phase === 'resyncing'
+                        ? 'Reconnecting…'
+                        : live
+                          ? 'Live'
+                          : 'Connecting…'}
+                  </span>
+                  <details ref={detailsRef} className="session-header-details">
+                    <summary>Session details</summary>
+                    <div className="session-header-detail-content">
+                      <p>Session {sessionId}</p>
+                      <dl className="session-telemetry">
+                        <div>
+                          <dt>Items</dt>
+                          <dd>{displayedSession.descriptor.sizes.item_count}</dd>
+                        </div>
+                        <div>
+                          <dt>Active</dt>
+                          <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
+                        </div>
+                        <div>
+                          <dt>Queued</dt>
+                          <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
+                        </div>
+                        <div>
+                          <dt>Up to date as of</dt>
+                          <dd>{displayedSession.descriptor.observed_through}</dd>
+                        </div>
+                      </dl>
+                      {displayedSession.descriptor.supervision && (
+                        <section className="session-provenance" aria-label="Session supervision">
+                          <p>
+                            {displayedSession.descriptor.supervision.pending
+                              ? 'Recovery required'
+                              : 'Recovery recorded'}
+                          </p>
+                          <p>
+                            {enumLabel(displayedSession.descriptor.supervision.class)} ·{' '}
+                            <code>{displayedSession.descriptor.supervision.cause_code}</code>
+                          </p>
+                        </section>
                       )}
-                      {live.runner && (
-                        <span className="availability-tag">
-                          Runner: {enumLabel(live.runner.state)}
-                          {live.runner.state === 'pinned' &&
-                            `, ${enumLabel(live.runner.connection_health)}`}
+                      {displayedSession.descriptor.repository_watch && (
+                        <section className="session-provenance" aria-label="Repository watch">
+                          Repository watch ·{' '}
+                          {displayedSession.descriptor.repository_watch.repository}
+                          {displayedSession.descriptor.repository_watch.pull_request !== null &&
+                            ` #${displayedSession.descriptor.repository_watch.pull_request}`}
+                          {' · Rule '}
+                          {displayedSession.descriptor.repository_watch.rule_id}
+                          {' v'}
+                          {displayedSession.descriptor.repository_watch.rule_revision}
+                          {' · '}
+                          {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
+                          <details>
+                            <summary>Trigger details</summary>
+                            <p>
+                              Trigger {displayedSession.descriptor.repository_watch.dispatch_id}
+                              {' · Action '}
+                              {displayedSession.descriptor.repository_watch.action_ordinal}
+                            </p>
+                            <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
+                          </details>
+                        </section>
+                      )}
+                      <div className="session-window-controls" role="toolbar" aria-label="Timeline">
+                        <button
+                          type="button"
+                          disabled={!displayedSession.window.continuation_before}
+                          onClick={() => {
+                            const address =
+                              displayedSession.window.continuation_before?.event_sequence
+                            if (address) {
+                              manualAnchorRef.current = { kind: 'before', eventSequence: address }
+                              requestedSelection.current = undefined
+                              onAroundConsumed()
+                              void refetchSession()
+                            }
+                          }}
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!displayedSession.window.continuation_after}
+                          onClick={() => {
+                            const address =
+                              displayedSession.window.continuation_after?.event_sequence
+                            if (address) {
+                              manualAnchorRef.current = { kind: 'after', eventSequence: address }
+                              requestedSelection.current = undefined
+                              onAroundConsumed()
+                              void refetchSession()
+                            }
+                          }}
+                        >
+                          Next
+                        </button>
+                        <span hidden={!showEvents}>
+                          {displayedSession.window.items.length} events ·{' '}
+                          {displayedSession.window.projected_structured_bytes} B
                         </span>
+                      </div>
+                      {followFailed && (
+                        <button
+                          type="button"
+                          onClick={() => dispatch(actions.sessionFollowReconnectRequested())}
+                        >
+                          Reconnect live updates
+                        </button>
+                      )}
+                      {live?.active?.state.kind === 'awaiting_credential_availability' && (
+                        <p role="status" className="availability-tag">
+                          Waiting for credentials · {enumLabel(live.active.state.cause)}
+                        </p>
+                      )}
+                      {(live?.reconciliation || live?.runner) && (
+                        <div className="session-live-facts">
+                          {live.reconciliation && (
+                            <span className="availability-tag">
+                              Recovery needed · {enumLabel(live.reconciliation.kind)}
+                            </span>
+                          )}
+                          {live.runner && (
+                            <span className="availability-tag">
+                              Runner: {enumLabel(live.runner.state)}
+                              {live.runner.state === 'pinned' &&
+                                `, ${enumLabel(live.runner.connection_health)}`}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
+                  </details>
                 </div>
-              </details>
-            </div>
-          </header>
+                <div className="session-header-line">{controls}</div>
+              </header>
+            )}
+          />
           <section
             ref={showEvents ? undefined : timelineRef}
             tabIndex={showEvents ? -1 : 0}
