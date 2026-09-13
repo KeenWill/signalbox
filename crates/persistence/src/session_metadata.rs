@@ -140,7 +140,8 @@ impl SessionMetadataRepository {
         }
     }
 
-    /// Retains title-only request intent atomically with the replacement receipt.
+    /// Merges title-only intent with current metadata under the session lock.
+    /// The complete replacement is retained atomically with its receipt.
     /// Replay compares session, actor, and title, independently of preserved fields.
     pub const fn for_title_update(pool: PgPool) -> Self {
         Self {
@@ -211,6 +212,41 @@ impl SessionMetadataRepository {
                 .fetch_optional(&mut *transaction)
                 .await?
                 .is_some();
+
+        let command = if session_exists && self.request_shape == MetadataRequestShape::TitleOnly {
+            let current = load_current_snapshot(&mut transaction, command.session())
+                .await?
+                .ok_or(SessionMetadataCorruption::Missing("locked session"))?;
+            let replacement = SessionMetadataContent::try_new(
+                command.replacement().title().map(str::to_owned),
+                current.content().tags().map(str::to_owned).collect(),
+                current
+                    .content()
+                    .attributes()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect(),
+                current.content().archived(),
+            )
+            .map_err(SessionMetadataCorruption::InvalidContent)?;
+            match command.actor() {
+                Actor::User => ReplaceSessionMetadata::new(
+                    command.command_id(),
+                    command.session(),
+                    replacement,
+                ),
+                Actor::Tool { request } => ReplaceSessionMetadata::new_for_tool(
+                    command.command_id(),
+                    command.session(),
+                    request,
+                    replacement,
+                ),
+                Actor::Core | Actor::Model { .. } | Actor::Recovery | Actor::Program { .. } => {
+                    return Err(SessionMetadataCorruption::Inconsistent("command actor").into());
+                }
+            }
+        } else {
+            command
+        };
 
         let updated_at = if session_exists {
             Some(replacement_statement_timestamp(&mut transaction).await?)
@@ -292,56 +328,7 @@ impl SessionMetadataRepository {
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
             .await?;
-        let row = sqlx::query(
-            "SELECT
-                session_row.session_id,
-                metadata.session_id AS metadata_session_id,
-                metadata.title,
-                metadata.archived,
-                floor(
-                    extract(epoch FROM metadata.updated_at) * 1000000
-                )::numeric(20, 0) AS updated_at_unix_micros,
-                metadata.actor_kind,
-                metadata.actor_turn_id,
-                metadata.actor_tool_request_id,
-                COALESCE(
-                    ARRAY(
-                        SELECT tag.tag
-                          FROM session_metadata_tag AS tag
-                         WHERE tag.session_id = session_row.session_id
-                         ORDER BY tag.tag
-                    ),
-                    ARRAY[]::text[]
-                ) AS tags,
-                COALESCE(
-                    ARRAY(
-                        SELECT attribute.attribute_key
-                          FROM session_metadata_attribute AS attribute
-                         WHERE attribute.session_id = session_row.session_id
-                         ORDER BY attribute.attribute_key
-                    ),
-                    ARRAY[]::text[]
-                ) AS attribute_keys,
-                COALESCE(
-                    ARRAY(
-                        SELECT attribute.attribute_value
-                          FROM session_metadata_attribute AS attribute
-                         WHERE attribute.session_id = session_row.session_id
-                         ORDER BY attribute.attribute_key
-                    ),
-                    ARRAY[]::text[]
-                ) AS attribute_values
-               FROM session AS session_row
-               LEFT JOIN session_metadata AS metadata
-                 ON metadata.session_id = session_row.session_id
-              WHERE session_row.session_id = $1",
-        )
-        .bind(session_id_to_uuid(session))
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let snapshot = row
-            .map(|row| decode_current_snapshot(&row, session))
-            .transpose()?;
+        let snapshot = load_current_snapshot(&mut transaction, session).await?;
         transaction.commit().await?;
         Ok(snapshot)
     }
@@ -687,6 +674,61 @@ async fn load_request_shape(
     } else {
         MetadataRequestShape::FullReplacement
     })
+}
+
+async fn load_current_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<SessionMetadataSnapshot>, SessionMetadataRepositoryError> {
+    let row = sqlx::query(
+        "SELECT
+            session_row.session_id,
+            metadata.session_id AS metadata_session_id,
+            metadata.title,
+            metadata.archived,
+            floor(
+                extract(epoch FROM metadata.updated_at) * 1000000
+            )::numeric(20, 0) AS updated_at_unix_micros,
+            metadata.actor_kind,
+            metadata.actor_turn_id,
+            metadata.actor_tool_request_id,
+            COALESCE(
+                ARRAY(
+                    SELECT tag.tag
+                      FROM session_metadata_tag AS tag
+                     WHERE tag.session_id = session_row.session_id
+                     ORDER BY tag.tag
+                ),
+                ARRAY[]::text[]
+            ) AS tags,
+            COALESCE(
+                ARRAY(
+                    SELECT attribute.attribute_key
+                      FROM session_metadata_attribute AS attribute
+                     WHERE attribute.session_id = session_row.session_id
+                     ORDER BY attribute.attribute_key
+                ),
+                ARRAY[]::text[]
+            ) AS attribute_keys,
+            COALESCE(
+                ARRAY(
+                    SELECT attribute.attribute_value
+                      FROM session_metadata_attribute AS attribute
+                     WHERE attribute.session_id = session_row.session_id
+                     ORDER BY attribute.attribute_key
+                ),
+                ARRAY[]::text[]
+            ) AS attribute_values
+           FROM session AS session_row
+           LEFT JOIN session_metadata AS metadata
+             ON metadata.session_id = session_row.session_id
+          WHERE session_row.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(connection)
+    .await?;
+    row.map(|row| decode_current_snapshot(&row, session))
+        .transpose()
 }
 
 async fn replacement_statement_timestamp(

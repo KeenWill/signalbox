@@ -42,7 +42,7 @@ pub(super) async fn replace_title(
     else {
         return invalid_title();
     };
-    let Ok(mut replacement) =
+    let Ok(replacement) =
         SessionMetadataContent::try_new(Some(request.title.clone()), Vec::new(), Vec::new(), false)
     else {
         return invalid_title();
@@ -66,25 +66,6 @@ pub(super) async fn replace_title(
         Err(SessionMetadataRepositoryError::DifferentCommandKind { .. }) => {
             return web_input_conflict();
         }
-        Err(_) => return title_unconfirmed(),
-    }
-    match repository.load_session_metadata(session).await {
-        Ok(Some(current)) => {
-            let content = current.content();
-            replacement = match SessionMetadataContent::try_new(
-                Some(request.title),
-                content.tags().map(str::to_owned).collect(),
-                content
-                    .attributes()
-                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                    .collect(),
-                content.archived(),
-            ) {
-                Ok(replacement) => replacement,
-                Err(_) => return invalid_title(),
-            };
-        }
-        Ok(None) => {}
         Err(_) => return title_unconfirmed(),
     }
     let Ok(request) = ReplaceSessionMetadataRequest::try_new(command, session, replacement) else {
