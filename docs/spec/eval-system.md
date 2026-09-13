@@ -49,6 +49,9 @@ thread. The harness projects these fields before creating the judgment session;
 labels are not projected. The caller supplies the historical snapshot; the
 helper does not fetch or infer comment history.
 
+The harness copies a case's optional `sibling_context_source` into its result
+for caller-side scoring of retained and current-state context separately.
+
 ## Overview
 
 The evaluation system defines, on top of the [workflows](workflows.md) layer,

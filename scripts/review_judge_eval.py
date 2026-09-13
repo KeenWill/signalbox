@@ -268,6 +268,7 @@ class Trial:
                     "turn_id": submitted["turn_id"], "frontier_id": state["terminal_frontier_id"],
                     "wall_seconds": time.time() - started, "write_witnesses": witnesses,
                     "assistant_witness": assistant_witness,
+                    "sibling_context_source": self.case.get("sibling_context_source"),
                     "usage": usage, "usage_totals": sum_usage(usage)}
         atomic_json(result_path, evidence)
         return evidence
