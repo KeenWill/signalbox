@@ -22,8 +22,9 @@ the credential-profile names and repository entries its strict configuration
 carries, and no capability class, tool, workspace capability, or sandbox
 profile; the daemon catalog that would admit such claims is empty, and the
 runner derives its empty reconnect inventory from a versioned, fsynced,
-atomically published private journal and executes nothing. Leases, dispatch,
-runner workspace execution, and sandboxes are listed under Planned.
+atomically published private journal and executes nothing. An existing state
+root without that journal fails startup. Leases, dispatch, runner workspace
+execution, and sandboxes are listed under Planned.
 
 The domain lives in `crates/domain/src/runner/` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,

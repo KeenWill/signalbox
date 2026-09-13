@@ -36,26 +36,24 @@ struct JournalDocument {
 }
 
 impl Journal {
+    pub(crate) fn initialize(directory: &File) -> Result<Self, RunnerStateError> {
+        let document = JournalDocument {
+            version: JOURNAL_VERSION,
+            journal: Self::default(),
+        };
+        let encoded = serde_json::to_vec(&document).map_err(|_| RunnerStateError::CorruptState)?;
+        write_document(directory, DocumentKind::Journal, &encoded)?;
+        Ok(document.journal)
+    }
+
     pub(crate) fn open(directory: &File) -> Result<Self, RunnerStateError> {
-        let descriptor = match openat(
+        let descriptor = openat(
             directory,
             DocumentKind::Journal.file_name(),
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
-        ) {
-            Ok(descriptor) => descriptor,
-            Err(rustix::io::Errno::NOENT) => {
-                let document = JournalDocument {
-                    version: JOURNAL_VERSION,
-                    journal: Self::default(),
-                };
-                let encoded =
-                    serde_json::to_vec(&document).map_err(|_| RunnerStateError::CorruptState)?;
-                write_document(directory, DocumentKind::Journal, &encoded)?;
-                return Ok(document.journal);
-            }
-            Err(error) => return Err(journal_io(StateOperation::Open, error.into())),
-        };
+        )
+        .map_err(|error| journal_io(StateOperation::Open, error.into()))?;
         let mut file = File::from(descriptor);
         let metadata = file
             .metadata()
@@ -124,6 +122,25 @@ mod tests {
         drop(state);
         let reopened = RunnerStateRoot::open(&path).expect("replay the journal");
         assert_eq!(reopened.reconnect_inventory(), inventory);
+    }
+
+    #[test]
+    fn missing_journal_in_an_initialized_root_prevents_reconnect() {
+        let parent = TempDir::new().expect("temporary parent");
+        let path = parent.path().join("runner");
+        drop(RunnerStateRoot::open(&path).expect("initialize the journal"));
+        fs::remove_file(path.join(DocumentKind::Journal.file_name())).expect("remove journal");
+
+        let error = RunnerStateRoot::open(&path).expect_err("missing history prevents startup");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::Io {
+                resource: StateResource::Journal,
+                ..
+            }
+        ));
+        assert!(!path.join(DocumentKind::Journal.file_name()).exists());
     }
 
     #[test]
