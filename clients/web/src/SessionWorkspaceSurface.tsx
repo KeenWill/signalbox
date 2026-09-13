@@ -13,6 +13,7 @@ import { invokeCommand } from './commands'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
+import './session-polish.css'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
@@ -520,6 +521,14 @@ export function SessionWorkspaceSurface({
                       ? 'Live'
                       : 'Connecting…'}
               </span>
+              <label className="session-events-toggle">
+                <input
+                  type="checkbox"
+                  checked={showEvents}
+                  onChange={(event) => setShowEvents(event.target.checked)}
+                />
+                Events
+              </label>
               <details ref={detailsRef} className="session-header-details">
                 <summary>Session details</summary>
                 <div className="session-header-detail-content">
@@ -577,42 +586,6 @@ export function SessionWorkspaceSurface({
                       </details>
                     </section>
                   )}
-                  <div className="session-window-controls" role="toolbar" aria-label="Timeline">
-                    <button
-                      type="button"
-                      disabled={!displayedSession.window.continuation_before}
-                      onClick={() => {
-                        const address = displayedSession.window.continuation_before?.event_sequence
-                        if (address) {
-                          manualAnchorRef.current = { kind: 'before', eventSequence: address }
-                          requestedSelection.current = undefined
-                          onAroundConsumed()
-                          void refetchSession()
-                        }
-                      }}
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      disabled={!displayedSession.window.continuation_after}
-                      onClick={() => {
-                        const address = displayedSession.window.continuation_after?.event_sequence
-                        if (address) {
-                          manualAnchorRef.current = { kind: 'after', eventSequence: address }
-                          requestedSelection.current = undefined
-                          onAroundConsumed()
-                          void refetchSession()
-                        }
-                      }}
-                    >
-                      Next
-                    </button>
-                    <span hidden={!showEvents}>
-                      {displayedSession.window.items.length} events ·{' '}
-                      {displayedSession.window.projected_structured_bytes} B
-                    </span>
-                  </div>
                   {followFailed && (
                     <button
                       type="button"
@@ -650,6 +623,7 @@ export function SessionWorkspaceSurface({
             ref={showEvents ? undefined : timelineRef}
             tabIndex={showEvents ? -1 : 0}
             aria-label="Conversation"
+            className="session-conversation"
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
@@ -677,14 +651,6 @@ export function SessionWorkspaceSurface({
               ))}
             </section>
           )}
-          <label className="session-events-toggle">
-            <input
-              type="checkbox"
-              checked={showEvents}
-              onChange={(event) => setShowEvents(event.target.checked)}
-            />
-            Events
-          </label>
           {/* biome-ignore lint/a11y/useSemanticElements: The bounded timeline uses a scrollable ARIA grid. */}
           <div
             hidden={!showEvents}
