@@ -75,6 +75,16 @@ async fn real_runner_resumes_enrollment_after_graceful_shutdown() -> Result<(), 
         receipt.registration_revision().get(),
         registration.revision().get()
     );
+    assert_eq!(
+        durable.reconnect_inventory(),
+        signalbox_runner_wire::ReconnectInventory::default()
+    );
+    assert!(
+        processes
+            .runner_root
+            .join("operation-journal.json")
+            .is_file()
+    );
     drop(durable);
 
     let mut resumed_runner = processes.spawn_runner()?;
@@ -107,6 +117,10 @@ async fn real_runner_resumes_enrollment_after_graceful_shutdown() -> Result<(), 
         reopened.state().receipt(),
         Some(&receipt),
         "restart must retain the exact durable enrollment receipt"
+    );
+    assert_eq!(
+        reopened.reconnect_inventory(),
+        signalbox_runner_wire::ReconnectInventory::default()
     );
     drop(reopened);
     processes.shutdown().await?;

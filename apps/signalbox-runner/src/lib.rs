@@ -1,6 +1,7 @@
 //! Enrollment, registration, and liveness runtime for `signalbox-runner`.
 
 mod configuration;
+mod journal;
 mod protocol;
 mod state;
 
