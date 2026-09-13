@@ -19,6 +19,7 @@ fn review_and_thread(
         NonZeroU64::new(review).expect("fixture review"),
     )));
     let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_failure: None,
         context: pull.context().clone(),
         lifecycle: pull.lifecycle(),
         mergeable_state: pull.mergeable_state(),
@@ -394,6 +395,9 @@ fn observation_identity_client(requests: Arc<std::sync::Mutex<Vec<String>>>) -> 
                     ).expect("GraphQL request");
                     if body["query"].as_str().expect("query").contains("RepositoryWatchActor") {
                         serde_json::json!({"data":{"viewer":{"login":"daemon"}}})
+                    } else if body["query"].as_str().expect("query").contains("RequiredChecks") {
+                        let head = &pages["/repos/example/project/pulls/1"].0["head"]["sha"];
+                        serde_json::json!({"data":{"repository":{"pullRequest":{"headRefOid":head,"commits":{"nodes":[{"commit":{"oid":head,"statusCheckRollup":null}}]}}}}})
                     } else {
                         serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}})
                     }

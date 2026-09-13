@@ -146,6 +146,7 @@ fn pull_request_payload(state: &RepoWatchPullRequestState) -> Value {
                 "outcome": checks_outcome_storage(suite.outcome()),
             }))
             .collect::<Vec<_>>(),
+        "required_check_failure": state.required_check_failure(),
         "completed_check_runs": state
             .completed_check_runs()
             .iter()

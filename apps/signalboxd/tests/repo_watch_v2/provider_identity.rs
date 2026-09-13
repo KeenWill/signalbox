@@ -42,6 +42,7 @@ async fn provider_facts_returning_on_the_same_head_after_presentation_edits_are_
     ] {
         let branch = BranchName::try_new(String::from("main"))?;
         let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            required_check_failure: None,
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number: PullRequestNumber::new(NonZeroU64::MIN),
                 head_sha: observed_head.clone(),

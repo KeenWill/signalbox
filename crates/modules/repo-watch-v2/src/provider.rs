@@ -62,6 +62,7 @@ pub enum ObservationError {
     Cache(StoreError),
     Transport(GitHubClientError),
     InvalidResponse,
+    HeadChanged,
     InvalidState {
         repository: RepositorySlug,
         pull_request: Option<PullRequestNumber>,
@@ -128,6 +129,7 @@ impl fmt::Display for ObservationError {
                 f,
                 "repository-watch observation request budget exhausted after {limit} requests"
             ),
+            Self::HeadChanged => f.write_str("pull-request head changed during observation"),
             Self::InvalidResponse => {
                 f.write_str("repository-watch provider observation is invalid")
             }
@@ -143,6 +145,7 @@ impl Error for ObservationError {
             Self::InvalidState { source, .. } => Some(source),
             Self::Request { source, .. } => Some(source),
             Self::InvalidResponse
+            | Self::HeadChanged
             | Self::RestBudgetUnavailable { .. }
             | Self::RequestBudgetExceeded { .. }
             | Self::CheckSuiteLimitExceeded { .. }
@@ -199,6 +202,10 @@ pub trait GitHubObservationRead: Send + Sync {
         &self,
         request: Value,
     ) -> impl Future<Output = Result<Value, ObservationError>> + Send;
+    fn required_checks(
+        &self,
+        request: Value,
+    ) -> impl Future<Output = Result<crate::required_checks::RequiredCheckPage, ObservationError>> + Send;
 }
 
 impl GitHubObservationRead for GitHubClient {
@@ -220,6 +227,13 @@ impl GitHubObservationRead for GitHubClient {
             .await
             .map_err(ObservationError::Transport)?;
         serde_json::from_slice(&body).map_err(|_| ObservationError::InvalidResponse.at("/graphql"))
+    }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+        let value = GitHubObservationRead::threads(self, request).await?;
+        crate::required_checks::decode_response(&value).ok_or(ObservationError::InvalidResponse)
     }
 }
 
@@ -254,6 +268,13 @@ impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadBudget<'
     async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
         self.reserve("/graphql")?;
         self.io.threads(request).await
+    }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+        self.reserve("/graphql")?;
+        self.io.required_checks(request).await
     }
 }
 
@@ -853,6 +874,11 @@ async fn fetch_pull(
             ((Vec::new(), Vec::new()), Vec::new(), Vec::new(), Vec::new())
         };
     let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_failure: if lifecycle == RepoWatchPullRequestLifecycle::Open {
+            Some(crate::required_checks::fetch(io, repository, number, context.head_sha()).await?)
+        } else {
+            previous.and_then(RepoWatchPullRequestState::required_check_failure)
+        },
         context,
         lifecycle,
         mergeable_state,
@@ -1357,6 +1383,29 @@ mod tests {
         async fn threads(&self, _: Value) -> Result<Value, ObservationError> {
             Ok(self.threads.clone())
         }
+        async fn required_checks(
+            &self,
+            request: Value,
+        ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+            let number = request["variables"]["number"]
+                .as_u64()
+                .ok_or(ObservationError::InvalidResponse)?;
+            let (pull, _) = self
+                .pages
+                .get(&format!("/repos/example/project/pulls/{number}"))
+                .ok_or(ObservationError::InvalidResponse)?;
+            Ok(crate::required_checks::RequiredCheckPage {
+                head: CommitSha::try_new(
+                    pull["head"]["sha"]
+                        .as_str()
+                        .ok_or(ObservationError::InvalidResponse)?
+                        .to_owned(),
+                )
+                .map_err(|_| ObservationError::InvalidResponse)?,
+                failed: false,
+                after: None,
+            })
+        }
     }
 
     fn fixture() -> Fixture {
@@ -1592,6 +1641,12 @@ mod tests {
             }
             async fn threads(&self, _: Value) -> Result<Value, ObservationError> {
                 panic!("branch pagination never reaches GraphQL")
+            }
+            async fn required_checks(
+                &self,
+                _: Value,
+            ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+                panic!("branch pagination never reaches required checks")
             }
         }
         let io = Endless {

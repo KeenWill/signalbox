@@ -1308,6 +1308,7 @@ template = "watch"
             RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
                 pull_requests: vec![ComparisonPullRequestState::try_new(
                     RepoWatchPullRequestStateInput {
+                        required_check_failure: None,
                         context: PullRequestEventContext::new(PullRequestEventContextInput {
                             number: PullRequestNumber::new(
                                 NonZeroU64::new(1).expect("positive PR number"),

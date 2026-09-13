@@ -3,8 +3,8 @@ use crate::{DispatchAdmission, PlannedCommand, RepoWatchStore, StoreError};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_session_ownership::{
-    CheckConclusion, ChecksOutcome, LifecycleEventSource, MergeableState, OffsetDateTime,
-    RepoWatchEvent, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchPullRequestLifecycle,
+    ChecksOutcome, LifecycleEventSource, MergeableState, OffsetDateTime, RepoWatchEvent,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchRule, RepoWatchThreadState, RepositorySlug, SessionId,
 };
 use sqlx::{Postgres, Transaction};
@@ -246,14 +246,7 @@ pub(crate) fn reevaluation_event(
     if current.lifecycle() != RepoWatchPullRequestLifecycle::Open {
         return None;
     }
-    let failing = current
-        .completed_check_suites()
-        .iter()
-        .any(|c| c.outcome() == ChecksOutcome::Failure)
-        || current
-            .completed_check_runs()
-            .iter()
-            .any(|c| failing_conclusion(c.conclusion()));
+    let failing = current.required_check_failure() == Some(true);
     let unresolved = current
         .threads()
         .iter()
@@ -338,25 +331,13 @@ pub(crate) fn reevaluation_event(
     matches.then_some(event)
 }
 
-fn failing_conclusion(conclusion: CheckConclusion) -> bool {
-    matches!(
-        conclusion,
-        CheckConclusion::Failure
-            | CheckConclusion::Cancelled
-            | CheckConclusion::TimedOut
-            | CheckConclusion::ActionRequired
-            | CheckConclusion::Stale
-            | CheckConclusion::StartupFailure
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use signalbox_session_ownership::{
-        BranchName, CommitSha, LabelName, PullRequestBody, PullRequestEventContext,
-        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
-        RepoWatchEventId, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+        BranchName, CheckConclusion, CommitSha, LabelName, PullRequestBody,
+        PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+        RepoWatchAuthorLogin, RepoWatchEventId, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
         RepoWatchPullRequestStateInput, RepoWatchRuleActionV1, RepoWatchRuleId,
         RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchThreadObservation, ReviewThreadId,
         SessionTemplateName,
@@ -386,6 +367,7 @@ mod tests {
 
     fn input() -> RepoWatchPullRequestStateInput {
         RepoWatchPullRequestStateInput {
+            required_check_failure: None,
             context: context(vec![]),
             lifecycle: RepoWatchPullRequestLifecycle::Open,
             mergeable_state: MergeableState::Mergeable,
@@ -535,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn failing_checks_keep_a_resolved_conflict_dispatch_eligible() {
+    fn required_check_failures_keep_a_resolved_conflict_dispatch_eligible() {
         use signalbox_session_ownership::{
             GitHubObjectId, RepoWatchCheckCompletionGeneration, RepoWatchCheckSuiteObservation,
         };
@@ -543,6 +525,7 @@ mod tests {
             current: MergeableState::Conflicting,
         });
         let mut current = input();
+        current.required_check_failure = Some(true);
         current.mergeable_state = MergeableState::Mergeable;
         current.completed_check_suites = vec![RepoWatchCheckSuiteObservation::new(
             GitHubObjectId::new(NonZeroU64::MIN),
@@ -582,6 +565,7 @@ mod tests {
         )
         .expect("conflict-only rule");
         let mut current = input();
+        current.required_check_failure = Some(true);
         current.completed_check_suites = vec![RepoWatchCheckSuiteObservation::new(
             GitHubObjectId::new(NonZeroU64::MIN),
             RepoWatchCheckCompletionGeneration::try_new("unchanged-failure".to_owned())
@@ -762,32 +746,29 @@ mod tests {
     }
 
     #[test]
-    fn passing_checks_stop_the_checks_retry() {
+    fn a_report_only_failure_does_not_retry_an_unchanged_pull_request() {
         use signalbox_session_ownership::{
-            GitHubObjectId, RepoWatchCheckCompletionGeneration, RepoWatchCheckSuiteObservation,
+            CheckRunName, GitHubObjectId, RepoWatchCheckCompletionGeneration,
+            RepoWatchCheckRunObservation,
         };
         let (rule, event) = origin(RepoWatchEventKindV1::ChecksCompleted {
             outcome: ChecksOutcome::Failure,
         });
-        for (outcome, eligible) in [
-            (ChecksOutcome::Failure, true),
-            (ChecksOutcome::Success, false),
-        ] {
-            let mut current = input();
-            current.completed_check_suites = vec![RepoWatchCheckSuiteObservation::new(
-                GitHubObjectId::new(NonZeroU64::MIN),
-                RepoWatchCheckCompletionGeneration::try_new("suite".to_owned())
-                    .expect("generation"),
-                outcome,
-            )];
-            assert_eq!(
-                retry_event(
-                    &rule,
-                    &event,
-                    &[RepoWatchPullRequestState::try_new(current).expect("pull")]
-                )
-                .is_some(),
-                eligible
+        let mut current = input();
+        current.required_check_failure = Some(false);
+        current.completed_check_runs = vec![RepoWatchCheckRunObservation::new(
+            GitHubObjectId::new(NonZeroU64::MIN),
+            RepoWatchCheckCompletionGeneration::try_new("report-only-completion".to_owned())
+                .expect("generation"),
+            CheckRunName::try_new("Tool live smokes (report only)".to_owned()).expect("check name"),
+            CheckConclusion::Failure,
+        )];
+        let observed = RepoWatchPullRequestState::try_new(current).expect("pull");
+        for source in [MatchSource::ProviderEvent, MatchSource::Activation] {
+            assert!(
+                reevaluation_event(&rule, &event, std::slice::from_ref(&observed), source)
+                    .is_none(),
+                "non-required failures neither retry nor activate unfinished work"
             );
         }
     }
