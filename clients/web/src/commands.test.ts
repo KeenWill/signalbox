@@ -480,9 +480,9 @@ describe('command registry', () => {
     expect(opened).toBe(1)
   })
 
-  it('keeps the artifact inspector reachable from product surfaces', () => {
+  it('omits the unbound artifact inspector from product commands', () => {
     const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
 
-    expect(productCommandIds).toContain('artifact.open')
+    expect(productCommandIds).not.toContain('artifact.open')
   })
 })

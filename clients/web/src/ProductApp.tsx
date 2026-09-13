@@ -9,7 +9,6 @@ import {
   ChartNoAxesCombined,
   Command,
   Download,
-  FileSearch,
   GitPullRequest,
   Home,
   Menu,
@@ -224,7 +223,6 @@ function CommandPalette({
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   const focusSearchAfterClose = useRef(false)
-  const openArtifactAfterClose = useRef(false)
   return (
     <Dialog.Root
       open={open}
@@ -239,12 +237,6 @@ function CommandPalette({
           aria-describedby="product-palette-description"
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
-            if (openArtifactAfterClose.current) {
-              event.preventDefault()
-              openArtifactAfterClose.current = false
-              invokeProductCommand('artifact.open', context)
-              return
-            }
             if (focusSearchAfterClose.current) {
               event.preventDefault()
               focusSearchAfterClose.current = false
@@ -292,14 +284,13 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
-                    openArtifactAfterClose.current = command.id === 'artifact.open'
                     focusSearchAfterClose.current = command.id === 'search.focus'
                     focusTimelineAfterClose.current =
                       command.id.startsWith('selection.') &&
                       productCommandAvailable(command.id, context)
                     if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
                     invokeProductCommand('surface.escape', context)
-                    if (!openArtifactAfterClose.current) invokeProductCommand(command.id, context)
+                    invokeProductCommand(command.id, context)
                   }}
                 >
                   <span>
@@ -493,13 +484,9 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
 }
 
 function ProductToolbar({
-  artifactAvailable,
-  artifactButtonRef,
   context,
   onOpenPalette,
 }: {
-  artifactAvailable: boolean
-  artifactButtonRef: RefObject<HTMLButtonElement | null>
   context: ProductCommandContext
   onOpenPalette: (opener: HTMLElement) => void
 }) {
@@ -513,16 +500,6 @@ function ProductToolbar({
         onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
-      </button>
-      <button
-        ref={artifactButtonRef}
-        className="icon-button"
-        type="button"
-        aria-label="Open artifact inspector"
-        disabled={!artifactAvailable}
-        onClick={() => invokeProductCommand('artifact.open', context)}
-      >
-        <FileSearch />
       </button>
       <button
         className="layout-button"
@@ -595,7 +572,6 @@ export function ProductApp({
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
   const helpOpenerRef = useRef<HTMLElement | null>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
-  const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
   const catalogSessionOpenedHere = useLocation({
@@ -756,7 +732,6 @@ export function ProductApp({
         }
         return false
       },
-      openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow:
         sessionState.workspace || sessionState.session
           ? (anchor) =>
@@ -798,7 +773,6 @@ export function ProductApp({
   }, [
     app.layout,
     narrowNavigation,
-    artifactAvailable,
     bootstrap.data,
     bootstrap.isSuccess,
     dispatch,
@@ -917,7 +891,7 @@ export function ProductApp({
   const closeArtifactInspector = useCallback(() => {
     artifactSideWasOpen.current = false
     setArtifactOpen(false)
-    requestAnimationFrame(() => artifactButtonRef.current?.focus())
+    requestAnimationFrame(() => mainRef.current?.focus())
   }, [])
 
   useEffect(() => {
@@ -1135,8 +1109,6 @@ export function ProductApp({
               </div>
             )}
             <ProductToolbar
-              artifactAvailable={artifactAvailable}
-              artifactButtonRef={artifactButtonRef}
               context={context}
               onOpenPalette={(opener) => {
                 paletteOpenerRef.current = opener

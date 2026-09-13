@@ -1449,10 +1449,9 @@ test('stacks Imports from the available product pane width', async ({ page }) =>
       }),
     )
   })
-  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.setViewportSize({ width: 900, height: 844 })
   await page.goto(importsProductFixture.path)
 
-  await page.getByRole('button', { name: 'Open artifact inspector', exact: true }).click()
   const workspace = page.locator('.imports-workspace-product')
   const inspectorBody = page.locator('.import-inspector-body')
   await expect(workspace).toBeVisible()
@@ -1602,31 +1601,19 @@ test('does not run product view hotkeys while a modal owns focus', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('does not run product view hotkeys while the artifact sheet owns focus', async ({ page }) => {
+test('omits the unbound artifact inspector from the toolbar and palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
-  await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
-  const presentationBefore = await page.evaluate(() => ({
-    theme: document.documentElement.dataset.theme,
-    density: document.documentElement.dataset.density,
-  }))
-
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
-  await expect(sheet).toBeVisible()
-  await sheet.getByRole('button', { name: 'Close attachment details' }).focus()
-  await page.keyboard.press('Shift+T')
-  await page.keyboard.press('Shift+D')
-  await page.keyboard.press('Shift+W')
-
-  expect(
-    await page.evaluate(() => ({
-      theme: document.documentElement.dataset.theme,
-      density: document.documentElement.dataset.density,
-    })),
-  ).toEqual(presentationBefore)
-  await expect(sheet).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Open artifact inspector', exact: true }),
+  ).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette', exact: true })
+  await expect(palette).toBeVisible()
+  await expect(
+    palette.getByRole('button', { name: 'Open artifact inspector', exact: true }),
+  ).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
