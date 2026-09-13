@@ -2,6 +2,27 @@
 
 # root: types-2
 
+## WebUsageProvenance
+
+```rust
+pub enum WebUsageProvenance {
+    Reported,
+    Estimated,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageInputSemantics
+
+```rust
+pub enum WebUsageInputSemantics {
+    Unknown,
+    CacheExclusive,
+    CacheInclusive,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebNullableU64
 
 ```rust

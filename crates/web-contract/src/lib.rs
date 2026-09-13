@@ -180,6 +180,29 @@ pub struct WebSubmitInputRequest {
     pub message: String,
 }
 
+/// Creates an interactive session using the named template's defaults.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebCreateSessionRequest {
+    /// Durable identity for creation, retained when retrying.
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    /// Configured session template name.
+    pub template_name: String,
+    /// Separately idempotent input submitted after creation commits.
+    pub first_input: Option<WebSubmitInputRequest>,
+}
+
+/// Committed creation identity and a current catalog projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebCreateSessionResponse {
+    pub session_id: WebSessionId,
+    pub summary: WebSessionCatalogSummary,
+}
+
 /// Human title replacement preserving the other loaded metadata fields.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2951,6 +2974,12 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         &mut session_catalog_schema,
         "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
     )?;
+    let mut create_session_response_schema =
+        canonical_schema(schemars::schema_for!(WebCreateSessionResponse).to_value());
+    make_pointer_nullable(
+        &mut create_session_response_schema,
+        "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
+    )?;
 
     let mut live_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebSessionLiveSnapshot).to_value());
@@ -3011,6 +3040,16 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSubmitInputRequest",
             decoder: "decodeWebSubmitInputRequest",
             schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebCreateSessionRequest",
+            decoder: "decodeWebCreateSessionRequest",
+            schema: canonical_schema(schemars::schema_for!(WebCreateSessionRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebCreateSessionResponse",
+            decoder: "decodeWebCreateSessionResponse",
+            schema: create_session_response_schema,
         },
         ContractSchema {
             name: "WebSessionTitleRequest",
