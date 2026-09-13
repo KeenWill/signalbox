@@ -28,7 +28,7 @@ pub struct CredentialInvocationProcesses {
 
 enum ObservedInvocation {
     Process(u32, String),
-    UnsentTitle,
+    AbandonedTitle,
 }
 
 impl CredentialInvocationProcesses {
@@ -62,16 +62,16 @@ impl CredentialInvocationProcesses {
     }
 
     pub async fn recover(&self) -> Result<(), ModelCallRepositoryError> {
-        let unsent_titles = self
+        let abandoned_titles = self
             .observed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter_map(|(call, observation)| {
-                matches!(observation, ObservedInvocation::UnsentTitle).then_some(*call)
+                matches!(observation, ObservedInvocation::AbandonedTitle).then_some(*call)
             })
             .collect::<Vec<_>>();
-        for call in unsent_titles {
+        for call in abandoned_titles {
             self.finish_registered_title(call).await?;
         }
         credential_invocations::release_unregistered_terminal_calls(&self.pool).await?;
@@ -85,27 +85,18 @@ impl CredentialInvocationProcesses {
         self.nudge_eligible_waits().await
     }
 
-    pub(crate) async fn finish_unsent_title(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
+    pub(crate) async fn abandon_title(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
         self.observed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(call, ObservedInvocation::UnsentTitle);
+            .insert(call, ObservedInvocation::AbandonedTitle);
         self.finish_registered_title(call).await
     }
 
     async fn finish_registered_title(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
         let result =
             signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone())
-                .finish(
-                    call,
-                    None,
-                    signalbox_application::UsageTokenAxes {
-                        input: None,
-                        output: None,
-                        cache_creation_input: None,
-                        cache_read_input: None,
-                    },
-                )
+                .abandon(call)
                 .await;
         match result {
             Ok(()) | Err(sqlx::Error::RowNotFound) => {
@@ -194,7 +185,7 @@ impl InvocationProcessObserver for CredentialInvocationProcesses {
                     Some(ObservedInvocation::Process(group, start_time)) => {
                         Some((group, start_time))
                     }
-                    Some(ObservedInvocation::UnsentTitle) | None => {
+                    Some(ObservedInvocation::AbandonedTitle) | None => {
                         credential_invocations::process_group(&self.pool, call).await?
                     }
                 };
@@ -298,7 +289,7 @@ mod tests {
             }
             observer.pool = unavailable.clone();
             assert!(matches!(
-                observer.finish_unsent_title(call.call).await,
+                observer.abandon_title(call.call).await,
                 Err(sqlx::Error::PoolClosed)
             ));
             assert!(observer.recover().await.is_err());

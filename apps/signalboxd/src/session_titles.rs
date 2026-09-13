@@ -104,7 +104,7 @@ impl SessionTitles {
 
     async fn close_before_send(&self, call: ModelCallId, error: TitleError) -> TitleError {
         // Execution has not begun; a committed preparation/authorization can safely close.
-        let _ = self.processes.finish_unsent_title(call).await;
+        let _ = self.processes.abandon_title(call).await;
         error
     }
 
@@ -170,8 +170,7 @@ impl SessionTitles {
         {
             Ok(text) if !text.is_empty() => text,
             _ => {
-                repository
-                    .finish(call.call, None, usage_axes(TokenUsage::unreported()))
+                self.settle(&call, None, usage_axes(TokenUsage::unreported()))
                     .await?;
                 return Err(TitleError::Generation);
             }
@@ -188,8 +187,7 @@ impl SessionTitles {
         operation.delivery = DeliveryMode::Buffered;
         operation.provider_compaction = ProviderCompactionMode::Suppressed;
         if !fit_title_context(&mut operation, &conversation, input_budget as usize) {
-            repository
-                .finish(call.call, None, usage_axes(TokenUsage::unreported()))
+            self.settle(&call, None, usage_axes(TokenUsage::unreported()))
                 .await?;
             return Err(TitleError::Generation);
         }
@@ -220,8 +218,7 @@ impl SessionTitles {
             PreparationOutcome::Cancelled { .. }
             | PreparationOutcome::Failed { .. }
             | PreparationOutcome::Defect { .. } => {
-                repository
-                    .finish(call.call, None, usage_axes(TokenUsage::unreported()))
+                self.settle(&call, None, usage_axes(TokenUsage::unreported()))
                     .await?;
                 return Err(TitleError::Generation);
             }
@@ -248,9 +245,7 @@ impl SessionTitles {
             )
             .await;
         if let Err(usage) = require_title_correlation(report.correlation, call.call) {
-            repository
-                .finish(call.call, None, usage_axes(usage))
-                .await?;
+            self.settle(&call, None, usage_axes(usage)).await?;
             return Err(TitleError::Generation);
         }
         let same_target = |reported| {
@@ -311,25 +306,44 @@ impl SessionTitles {
                 | AssistantPart::ProviderCompaction { .. } => valid = false,
             }
         }
-        let metadata = SessionMetadataRepository::new(self.pool.clone())
-            .load_session_metadata(call.session)
-            .await
-            .map_err(|_| TitleError::Database)?
-            .ok_or(TitleError::NotFound)?;
-        let title = valid
-            .then(|| normalize_title(&text, metadata.content()))
-            .flatten();
-        let title = repository
-            .finish_generated(
-                DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
-                call.call,
-                title,
-                usage_axes(usage),
-            )
-            .await
-            .map_err(|_| TitleError::Database)?
-            .ok_or(TitleError::Generation)?;
-        Ok(title)
+        self.settle(&call, valid.then_some(text), usage_axes(usage))
+            .await?
+            .ok_or(TitleError::Generation)
+    }
+
+    async fn settle(
+        &self,
+        call: &SessionTitleCall,
+        text: Option<String>,
+        usage: UsageTokenAxes,
+    ) -> Result<Option<String>, TitleError> {
+        let command = DurableCommandId::from_uuid(uuid::Uuid::now_v7());
+        let repository = SessionTitleRepository::new(self.pool.clone());
+        // One immediate retry retains the same settlement identity and provider evidence.
+        for _ in 0..2 {
+            let result = async {
+                let title = if let Some(text) = text.as_deref() {
+                    let metadata = SessionMetadataRepository::new(self.pool.clone())
+                        .load_session_metadata(call.session)
+                        .await
+                        .map_err(|_| TitleError::Database)?
+                        .ok_or(TitleError::NotFound)?;
+                    normalize_title(text, metadata.content())
+                } else {
+                    None
+                };
+                repository
+                    .finish_generated(command, call.call, title, usage)
+                    .await
+                    .map_err(|_| TitleError::Database)
+            }
+            .await;
+            if let Ok(title) = result {
+                return Ok(title);
+            }
+        }
+        let _ = self.processes.abandon_title(call.call).await;
+        Err(TitleError::Database)
     }
 }
 
@@ -426,6 +440,168 @@ fn normalize_title(text: &str, metadata: &SessionMetadataContent) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn settlement_retries_once_then_recovers_abandoned_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_domain::{
+            CreateSession, DirectModelSelection, ModelSelectionRequest, ProviderModelIdentity,
+            ResolvedProviderTarget, SessionConfigurationDefaults, SessionCreationCause,
+            SessionCreationProvenance, TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            create_session::CreateSessionRepository, credential_invocations,
+            scheduler::PostgresEligibilitySweep,
+        };
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let models = Arc::new(crate::HubModelConfiguration::parse(
+            crate::configuration::tests::CONFIGURATION,
+        )?);
+        let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let selection =
+            DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000001"));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )
+        .prepare(session)
+        .map_err(|_| "session creation rejected")?;
+        CreateSessionRepository::new(pool.clone(), models.session_credential_pin())
+            .handle(creation)
+            .await?;
+        let profile = "codex-title-settlement-fixture";
+        credential_invocations::replace_registrations(
+            &pool,
+            &[(profile.to_owned(), std::num::NonZeroU32::new(1))],
+        )
+        .await?;
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let processes =
+            crate::credential_invocations::CredentialInvocationProcesses::new(pool.clone(), nudge);
+        let service = SessionTitles::new(
+            pool.clone(),
+            models,
+            ModelRuntimeFactory::new(None, None, None),
+            processes.clone(),
+        );
+        let repository = SessionTitleRepository::new(pool.clone());
+        sqlx::raw_sql("CREATE SEQUENCE fixture_title_settlement_attempt;
+            CREATE FUNCTION fixture_reject_title_settlement() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.state_kind = 'terminal' AND nextval('fixture_title_settlement_attempt') <= TG_ARGV[0]::bigint THEN
+                    RAISE EXCEPTION 'fixture settlement write failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;").execute(&pool).await?;
+        // One failure permits the immediate retry; three also reject abandonment until recovery.
+        for failed_writes in [1, 3] {
+            sqlx::query("ALTER SEQUENCE fixture_title_settlement_attempt RESTART WITH 1")
+                .execute(&pool)
+                .await?;
+            let trigger = format!("CREATE TRIGGER aaa_fixture_title_settlement BEFORE UPDATE ON session_title_model_call
+                FOR EACH ROW EXECUTE FUNCTION fixture_reject_title_settlement('{failed_writes}')");
+            sqlx::query(sqlx::AssertSqlSafe(trigger.as_str()))
+                .execute(&pool)
+                .await?;
+            let mut call = SessionTitleCall {
+                call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+                session,
+                selection,
+                target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    uuid::Uuid::now_v7(),
+                )),
+                credential_reference: profile.to_owned(),
+                input_includes_cache_tokens: false,
+                initial_for_turn: None,
+            };
+            assert!(repository.prepare(&mut call, &Default::default()).await?);
+            repository.authorize(call.call).await?;
+            processes.finished(call.call, None, false).await;
+            let usage = UsageTokenAxes {
+                input: Some(17),
+                output: Some(5),
+                cache_creation_input: None,
+                cache_read_input: None,
+            };
+            let result = service
+                .settle(&call, Some("Database indexing work".to_owned()), usage)
+                .await;
+            if failed_writes == 1 {
+                assert_eq!(
+                    result.map_err(|_| "settlement failed")?,
+                    Some("Database indexing work".to_owned())
+                );
+                // A lost commit acknowledgment can replay without rewriting immutable evidence.
+                assert_eq!(
+                    repository
+                        .finish_generated(
+                            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                            call.call,
+                            Some("Database indexing work".to_owned()),
+                            usage
+                        )
+                        .await?,
+                    Some("Database indexing work".to_owned())
+                );
+                assert!(matches!(
+                    repository.abandon(call.call).await,
+                    Err(sqlx::Error::RowNotFound)
+                ));
+            } else {
+                assert!(matches!(result, Err(TitleError::Database)));
+                let pending: (String, bool) = sqlx::query_as("SELECT call.state_kind, reservation.released_at IS NULL
+                    FROM session_title_model_call call JOIN credential_invocation_reservation reservation USING (model_call_id)
+                    WHERE model_call_id = $1").bind(call.call.into_uuid()).fetch_one(&pool).await?;
+                assert_eq!(pending, ("in_flight".to_owned(), true));
+            }
+            processes.recover().await?;
+            let recovered: (String, bool, bool, Option<String>, Option<rust_decimal::Decimal>) = sqlx::query_as(
+                "SELECT call.state_kind, call.abandoned, reservation.released_at IS NOT NULL, call.title, call.output_tokens
+                 FROM session_title_model_call call JOIN credential_invocation_reservation reservation USING (model_call_id)
+                 WHERE model_call_id = $1").bind(call.call.into_uuid()).fetch_one(&pool).await?;
+            assert_eq!(
+                recovered,
+                (
+                    "terminal".to_owned(),
+                    failed_writes == 3,
+                    true,
+                    (failed_writes == 1).then(|| "Database indexing work".to_owned()),
+                    (failed_writes == 1).then(|| rust_decimal::Decimal::from(5))
+                )
+            );
+            let attempts: i64 =
+                sqlx::query_scalar("SELECT last_value FROM fixture_title_settlement_attempt")
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(attempts, if failed_writes == 1 { 2 } else { 4 });
+            sqlx::query("DROP TRIGGER aaa_fixture_title_settlement ON session_title_model_call")
+                .execute(&pool)
+                .await?;
+            let mut next_call = SessionTitleCall {
+                call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+                ..call
+            };
+            assert!(
+                repository
+                    .prepare(&mut next_call, &Default::default())
+                    .await?,
+                "capacity admits another call after recovery"
+            );
+            repository.abandon(next_call.call).await?;
+        }
+        pool.close().await;
+        Ok(())
+    }
 
     #[test]
     fn title_output_leaves_input_room_when_model_output_can_fill_the_context() {

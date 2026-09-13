@@ -137,10 +137,31 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             |_| TurnId::from_uuid(Uuid::now_v7()),
         )
         .await?;
+    for startup in [false, true] {
+        let mut abandoned = SessionTitleCall {
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            ..call.clone()
+        };
+        assert!(titles.prepare(&mut abandoned, &Default::default()).await?);
+        titles.authorize(abandoned.call).await?;
+        if startup {
+            titles.abandon_incomplete().await?;
+        } else {
+            titles.abandon(abandoned.call).await?;
+        }
+        let retained: (bool, Uuid) = sqlx::query_as(
+            "SELECT abandoned, initial_for_turn FROM session_title_model_call
+             WHERE model_call_id = $1",
+        )
+        .bind(abandoned.call.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(retained, (true, fixture.turn.into_uuid()));
+    }
     call.initial_for_turn = Some(later_turn);
     assert!(
         titles.prepare(&mut call, &Default::default()).await?,
-        "a later completion claims the initial title when an earlier event left no claim"
+        "a later completion claims the initial title after earlier calls were abandoned"
     );
     assert!(
         !titles
