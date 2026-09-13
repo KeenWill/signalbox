@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useLocation, useNavigate } from '@tanstack/react-router'
+import { useMemo, useState } from 'react'
 import type { WebUsageCallPage } from '../generated/web-contract.mjs'
 import { costText, tokenSummary, UsageTable, usageGroupIdentity } from '../SearchUsage'
 import { costTotalText, totalCost } from './cost'
@@ -23,14 +24,19 @@ export function UsageSurface() {
 }
 
 export function UsageContent({ source }: { source: SearchUsageSource }) {
-  const [filters, setFilters] = useState<UsageFilters>(() => {
-    const query = new URLSearchParams(window.location.search)
+  const search = useLocation({ select: (location) => location.searchStr })
+  const navigate = useNavigate()
+  const filters = useMemo(() => {
+    const query = new URLSearchParams(search)
     return {
-      sessionId: query.get('session') ?? undefined,
-      turnId: query.get('turn') ?? undefined,
-      modelId: query.get('model') ?? undefined,
+      sessionId: query.get('session') || undefined,
+      turnId: query.get('turn') || undefined,
+      modelId: query.get('model') || undefined,
+      fromMicros: query.get('from') || undefined,
+      toMicros: query.get('until') || undefined,
     }
-  })
+  }, [search])
+  const [subtotalsOpen, setSubtotalsOpen] = useState(false)
   const summary = useQuery({
     queryKey: ['search-usage', 'summary', filters],
     queryFn: ({ signal }) => source.usageSummary(filters, signal),
@@ -53,8 +59,34 @@ export function UsageContent({ source }: { source: SearchUsageSource }) {
     // Match the existing usage workbench's retained window.
     maxPages: 6,
   })
-  const rows = calls.data?.pages.flatMap((page) => page.calls) ?? []
-  const change = (patch: Partial<UsageFilters>) => setFilters((value) => ({ ...value, ...patch }))
+  const rows = useMemo(() => calls.data?.pages.flatMap((page) => page.calls) ?? [], [calls.data])
+  const change = (patch: Partial<UsageFilters>) => {
+    const query = new URLSearchParams(search)
+    for (const [key, parameter] of Object.entries({
+      sessionId: 'session',
+      turnId: 'turn',
+      modelId: 'model',
+      fromMicros: 'from',
+      toMicros: 'until',
+    })) {
+      if (!(key in patch)) continue
+      const value = patch[key as keyof UsageFilters]
+      if (value) query.set(parameter, value)
+      else query.delete(parameter)
+    }
+    void navigate({
+      to: '.',
+      search: (previous) => ({
+        ...previous,
+        ...Object.fromEntries(query),
+        session: query.get('session') ?? undefined,
+        turn: query.get('turn') ?? undefined,
+        model: query.get('model') ?? undefined,
+        from: query.get('from') ?? undefined,
+        until: query.get('until') ?? undefined,
+      }),
+    })
+  }
   return (
     <section className="usage-product" aria-label="Usage">
       <div className="usage-filters">
@@ -96,6 +128,7 @@ export function UsageContent({ source }: { source: SearchUsageSource }) {
             {key === 'fromMicros' ? 'From' : 'Until'}
             <input
               type="datetime-local"
+              value={localDateTime(filters[key])}
               onChange={(event) =>
                 change({
                   [key]: event.target.value
@@ -145,50 +178,82 @@ export function UsageContent({ source }: { source: SearchUsageSource }) {
         hasNextPage={calls.hasNextPage && !calls.isFetchingNextPage}
         loadNextPage={() => void calls.fetchNextPage()}
       />
-      <details>
+      <details onToggle={(event) => setSubtotalsOpen(event.currentTarget.open)}>
         <summary>Session and turn costs in loaded calls</summary>
-        <p>These subtotals cover the loaded window. Open a session or turn to see its summary.</p>
-        {[...new Set(rows.map((row) => row.session_id))].map((sessionId) => (
-          <div key={sessionId}>
-            <a href={`/sessions?session=${encodeURIComponent(sessionId)}&workspace=true`}>
-              Session {sessionId}
-            </a>
-            <button type="button" onClick={() => change({ sessionId, turnId: undefined })}>
-              Show session usage
-            </button>
-            <p>
-              {costTotalText(
-                totalCost(
-                  rows.filter((row) => row.session_id === sessionId),
-                  true,
-                ),
-              )}
-            </p>
-            {[
-              ...new Set(
-                rows.filter((row) => row.session_id === sessionId).map((row) => row.turn_id),
-              ),
-            ].map((turnId) => (
-              <p key={turnId ?? 'session'}>
-                {turnId ? (
-                  <button type="button" onClick={() => change({ sessionId, turnId })}>
-                    Turn {turnId}
-                  </button>
-                ) : (
-                  'Outside a turn'
-                )}{' '}
-                ·{' '}
-                {costTotalText(
-                  totalCost(
-                    rows.filter((row) => row.session_id === sessionId && row.turn_id === turnId),
-                    true,
-                  ),
-                )}
-              </p>
-            ))}
-          </div>
-        ))}
+        {subtotalsOpen && <LoadedSubtotals rows={rows} change={change} />}
       </details>
+    </section>
+  )
+}
+
+function localDateTime(micros?: string): string {
+  if (!micros) return ''
+  const date = new Date(Number(micros) / 1000)
+  if (!Number.isFinite(date.getTime())) return ''
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+
+function LoadedSubtotals({
+  rows,
+  change,
+}: {
+  rows: WebUsageCallPage['calls']
+  change: (patch: Partial<UsageFilters>) => void
+}) {
+  const sessions = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        calls: WebUsageCallPage['calls'][number][]
+        turns: Map<string | null, WebUsageCallPage['calls'][number][]>
+      }
+    >()
+    for (const row of rows) {
+      let session = groups.get(row.session_id)
+      if (!session) {
+        session = { calls: [], turns: new Map() }
+        groups.set(row.session_id, session)
+      }
+      session.calls.push(row)
+      const turn = session.turns.get(row.turn_id) ?? []
+      turn.push(row)
+      session.turns.set(row.turn_id, turn)
+    }
+    return [...groups].map(([sessionId, session]) => ({
+      sessionId,
+      total: costTotalText(totalCost(session.calls, true)),
+      turns: [...session.turns].map(([turnId, calls]) => ({
+        turnId,
+        total: costTotalText(totalCost(calls, true)),
+      })),
+    }))
+  }, [rows])
+  return (
+    <section aria-label="Loaded cost subtotals">
+      <p>These subtotals cover the loaded window. Open a session or turn to see its summary.</p>
+      {sessions.map(({ sessionId, total, turns }) => (
+        <div key={sessionId}>
+          <a href={`/sessions?session=${encodeURIComponent(sessionId)}&workspace=true`}>
+            Session {sessionId}
+          </a>
+          <button type="button" onClick={() => change({ sessionId, turnId: undefined })}>
+            Show session usage
+          </button>
+          <p>{total}</p>
+          {turns.map(({ turnId, total }) => (
+            <p key={turnId ?? 'session'}>
+              {turnId ? (
+                <button type="button" onClick={() => change({ sessionId, turnId })}>
+                  Turn {turnId}
+                </button>
+              ) : (
+                'Outside a turn'
+              )}{' '}
+              · {total}
+            </p>
+          ))}
+        </div>
+      ))}
     </section>
   )
 }

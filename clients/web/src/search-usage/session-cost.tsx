@@ -103,11 +103,12 @@ export function CostChip({
 
 export function SessionCostChip({ sessionId }: { sessionId: string }) {
   const cost = useSessionCost(sessionId)
+  if (!sessionId) return <CostChip status="success" />
   return <CostChip cost={cost.data} status={cost.status} />
 }
 
 export function TurnCostChip({ sessionId, turnId }: { sessionId: string; turnId: string }) {
   const cost = useSummaryCost(sessionId, Boolean(sessionId && turnId), turnId)
-  if (!turnId) return <CostChip status="success" />
+  if (!sessionId || !turnId) return <CostChip status="success" />
   return <CostChip cost={cost.data} status={cost.status} />
 }

@@ -1,6 +1,15 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  parseSearchWith,
+  RouterProvider,
+  stringifySearchWith,
+} from '@tanstack/react-router'
 import { createRoot } from 'react-dom/client'
 import '../app.css'
+import { readProductRouteState } from '../product'
 import { SearchUsageScenarioSource } from './scenario'
 import {
   CostChip,
@@ -34,21 +43,37 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
   )
 }
 
+const source = new SearchUsageScenarioSource()
+function Preview() {
+  const query = new URLSearchParams(window.location.search)
+  return query.get('preview') === 'cost' ? (
+    <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
+  ) : query.has('http') ? (
+    <UsageSurface />
+  ) : (
+    <UsageContent source={source} />
+  )
+}
+const rootRoute = createRootRoute()
+const route = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/src/search-usage/preview.html',
+  validateSearch: readProductRouteState,
+  component: Preview,
+})
+const router = createRouter({
+  routeTree: rootRoute.addChildren([route]),
+  parseSearch: parseSearchWith((value) => value),
+  stringifySearch: stringifySearchWith(String),
+})
 if (import.meta.env.DEV) {
   const root = document.getElementById('root')
-  const query = new URLSearchParams(window.location.search)
   if (root)
     createRoot(root).render(
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
-        {query.get('preview') === 'cost' ? (
-          <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
-        ) : query.has('http') ? (
-          <UsageSurface />
-        ) : (
-          <UsageContent source={new SearchUsageScenarioSource()} />
-        )}
+        <RouterProvider router={router} />
       </QueryClientProvider>,
     )
 }
