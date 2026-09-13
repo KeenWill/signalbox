@@ -115,6 +115,9 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         rule: &RepoWatchRule,
     ) -> Result<Option<RuleContext>, StoreError> {
+        if self.observer_evaluation_paused(repository).await? {
+            return Ok(None);
+        }
         let mut tx = self.pool.begin().await?;
         configuration_lock(&mut tx).await?;
         frontier_lock(&mut tx, repository).await?;

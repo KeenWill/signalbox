@@ -3398,6 +3398,7 @@ system_prompt = "Inspect repository activity."
     let store = RepoWatchStore::new(module_pool.clone());
     let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
     for run in [1, 2] {
+        admit_runtime_fixture_identity(&module_pool, &store, &repository).await?;
         store
             .ingest_observation(
                 &store.ingest_baseline(&repository).await?,
@@ -3822,6 +3823,7 @@ system_prompt = "Inspect workflow failures."
 
     let store = RepoWatchStore::new(module_pool.clone());
     let repository = RepositorySlug::try_new(String::from("runtime/project"))?;
+    admit_runtime_fixture_identity(&module_pool, &store, &repository).await?;
     store
         .ingest_observation(
             &store.ingest_baseline(&repository).await?,
@@ -3856,6 +3858,7 @@ system_prompt = "Inspect workflow failures."
                 reqwest::StatusCode::ACCEPTED
             );
         }
+        admit_runtime_fixture_identity(&module_pool, &store, &repository).await?;
         store
             .ingest_observation(
                 &store.ingest_baseline(&repository).await?,
@@ -6004,5 +6007,20 @@ async fn reopening_a_closed_pull_does_not_repeat_its_initial_snapshot_facts()
         ]
     );
     drop(container);
+    Ok(())
+}
+
+async fn admit_runtime_fixture_identity(
+    pool: &sqlx::PgPool,
+    store: &RepoWatchStore,
+    repository: &RepositorySlug,
+) -> Result<(), Box<dyn Error>> {
+    let ready: bool = sqlx::query_scalar("SELECT ready FROM observer_actor WHERE repository=$1")
+        .bind(repository.as_str())
+        .fetch_one(pool)
+        .await?;
+    if !ready {
+        assert!(review_writes::identity_attempt(store, repository, Some("runtime-observer")).await);
+    }
     Ok(())
 }

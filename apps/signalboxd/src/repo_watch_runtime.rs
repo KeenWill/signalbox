@@ -883,6 +883,10 @@ impl RuntimeState {
         {
             for repository in configuration.repositories() {
                 self.store
+                    .prepare_observer_identity(repository.repository())
+                    .await
+                    .map_err(|_| RepositoryWatchRuntimeError::RepositoryWorker)?;
+                self.store
                     .prepare_poll_cache(repository.repository(), configuration.signal_reviewers())
                     .await
                     .map_err(|_| RepositoryWatchRuntimeError::RepositoryWorker)?;

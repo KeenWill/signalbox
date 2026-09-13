@@ -1796,8 +1796,8 @@ async fn append_event(
         "INSERT INTO gh_event
             (event_id, content_identity, repository, event_kind, target_kind,
              pull_request_number, normalized_payload, producer,
-             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id, source_review_actor)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id, source_review_actor, self_review)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($14 = (SELECT login FROM observer_actor WHERE repository=$3 AND ready), false))
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
