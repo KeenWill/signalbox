@@ -227,9 +227,9 @@ pub enum RunnerConnectionTransition {
     HeartbeatRecovered,
     /// Records the first missed heartbeat interval.
     HeartbeatMissed,
-    /// Records hub-initiated clean shutdown.
+    /// Records hub shutdown, losing the connection when a lease remains unsettled.
     DaemonShutdown,
-    /// Records runner-initiated clean shutdown.
+    /// Records runner shutdown, losing the connection when a lease remains unsettled.
     RunnerShutdown,
     /// Records terminal heartbeat loss.
     HeartbeatTimeout,
@@ -783,6 +783,30 @@ impl RunnerProtocolStore {
                 RunnerConnectionTransitionOutcome::Current(current),
             ));
         }
+        let transition = if matches!(
+            transition,
+            RunnerConnectionTransition::DaemonShutdown | RunnerConnectionTransition::RunnerShutdown
+        ) && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                    SELECT 1 FROM runner_lease_generation AS generation
+                    JOIN runner_current_lease_event AS head
+                      ON head.lease_id = generation.lease_id
+                     AND head.generation = generation.generation
+                    JOIN runner_lease_event AS event
+                      ON event.lease_id = head.lease_id
+                     AND event.generation = head.generation
+                     AND event.event_ordinal = head.event_ordinal
+                    WHERE generation.registration_enrollment_id = $1
+                      AND event.state_kind IN ('offered', 'claimed'))",
+        )
+        .bind(enrollment.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?
+        {
+            RunnerConnectionTransition::TransportClosed
+        } else {
+            transition
+        };
         let event_ordinal = NonZeroU64::new(
             current
                 .event_ordinal()

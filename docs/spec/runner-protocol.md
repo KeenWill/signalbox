@@ -223,7 +223,11 @@ before it invokes the executor. The runner retains one terminal evidence
 envelope and resends it until the daemon commits the matching attempt and lease
 transition and replies `result_recorded`, then discards it. Local runner
 shutdown waits for admitted execution and its result acknowledgement before
-sending the shutdown frame.
+sending the shutdown frame. Either shutdown direction checks for offered or
+claimed leases under the enrollment lock. With unsettled execution it records
+connection loss and closes the transport without a clean shutdown frame;
+otherwise it records clean shutdown. Connection loss propagates to the lease and
+runner recovery wait.
 
 Resume authenticates the enrollment receipt before changing registration or
 recording retained terminal evidence. Canonical lease state determines its exact
@@ -235,10 +239,8 @@ from inventory, is durably lost under the effect-class ambiguity law, including
 when inventory names a different historical lease. An equal recorded result is
 acknowledged; an unequal duplicate is fatal. The runner discards its journal
 entry only on the exact recorded or stale directive and never invokes a started
-lease again. Graceful shutdown preserves the loss fence; recovery requiring loss
-closes the resumed physical connection before retrying admission. Fresh offers
-wait until reconnect establishes the resumed connection; prior physical
-connections cannot issue authority after a new epoch.
+lease again. Fresh offers wait until reconnect establishes the resumed connection;
+prior physical connections cannot issue authority after a new epoch.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
