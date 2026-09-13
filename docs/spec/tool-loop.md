@@ -470,12 +470,14 @@ after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These
 effects commit or roll back together. An interrupt or crash loss that ends the
 turn appends the result suffix with its terminal marker and prepares no call.
-When at least one request entered execution, the continuation turn attempt
-already entered `Running` during authorization and owns the new call without
-moving backward. An optional configured ceiling bounds the tool rounds one turn
-may complete, and a policy of none sets no ceiling. After the last batch a
-ceiling admits resolves, continuation still projects every result and creates
-its `Prepared` call, and model execution closes that call `KnownFailed` before
+This also closes unattempted siblings when the lost tool and its turn attempt
+are still `Prepared`; the closure frontier cannot prepare a model call. When at
+least one request entered execution, the continuation turn attempt already
+entered `Running` during authorization and owns the new call without moving
+backward. An optional configured ceiling bounds the tool rounds one turn may
+complete, and a policy of none sets no ceiling. After the last batch a ceiling
+admits resolves, continuation still projects every result and creates its
+`Prepared` call, and model execution closes that call `KnownFailed` before
 capability preparation or send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's
