@@ -6,13 +6,18 @@ import { readSessionTranscript, type SessionTranscriptLimits } from '../product'
 import { SESSION_WINDOW_BYTES } from '../session-workspace'
 import { BoundedSessionHistory, HttpSessionTimelineSource, type SessionWindowAnchor } from './model'
 
-// Each retained window has at most eight bounded detail responses; keep three neighboring windows.
+// Share one detail budget across each window; keep three neighboring windows.
 export const TRANSCRIPT_WINDOW_ITEMS = 8
+export const TRANSCRIPT_WINDOW_BYTES = 65536
 export const TRANSCRIPT_RETAINED_WINDOWS = 3
 
 export interface TranscriptWindow {
   window: WebSessionTimelineWindow
   details: readonly WebSessionTimelineDetailPage[]
+}
+
+export type TranscriptReadAnchor = SessionWindowAnchor & {
+  detailLimits?: SessionTranscriptLimits
 }
 
 export class TranscriptWindowReader {
@@ -21,7 +26,7 @@ export class TranscriptWindowReader {
   constructor(private readonly sessionId: string) {}
 
   async read(
-    anchor: SessionWindowAnchor,
+    anchor: TranscriptReadAnchor,
     limits: SessionTranscriptLimits,
     signal: AbortSignal,
   ): Promise<TranscriptWindow> {
@@ -29,9 +34,15 @@ export class TranscriptWindowReader {
       this.sessionId,
       await HttpSessionTimelineSource.connect((input, init) => fetch(input, init), signal),
     )
+    const selected = anchor.detailLimits ?? limits
+    const maxItems = Math.min(TRANSCRIPT_WINDOW_ITEMS, selected.max_timeline_detail_items)
+    const maxBytes = Math.min(TRANSCRIPT_WINDOW_BYTES, selected.max_timeline_detail_bytes)
     const window = await this.history.load(
       anchor,
-      { maxItems: TRANSCRIPT_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
+      {
+        maxItems: Math.min(maxItems, Math.floor(maxBytes / selected.min_timeline_detail_bytes)),
+        maxBytes: SESSION_WINDOW_BYTES,
+      },
       signal,
     )
     const details = await Promise.all(
@@ -41,7 +52,11 @@ export class TranscriptWindowReader {
           item.address.event_sequence,
           item.address.event_sequence,
           null,
-          limits,
+          {
+            ...selected,
+            max_timeline_detail_items: Math.floor(maxItems / window.items.length),
+            max_timeline_detail_bytes: Math.floor(maxBytes / window.items.length),
+          },
           signal,
         ),
       ),

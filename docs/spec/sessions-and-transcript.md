@@ -534,30 +534,41 @@ wait. The session synchronization service owns the selected stream and publishes
 its phase, monotonic cursor, and live projection to application state. Only the
 open workspace requests a follow subscription, and closing it cancels that
 subscription. Transcript text reads require the bounded timeline-detail
-capability. The virtualized transcript retains three neighboring keyset windows
-of at most eight headers, clamped to the advertised item limit. Each detail read
-returns at most eight items and 65,536 projected bytes, clamped to the
-advertised limits, with exact byte accounting including attachment references.
-The transcript preserves the requested workspace anchor. Readers at the live end
-advance when observed history grows; failed rereads preserve visible text.
-Automatic scans past hidden records count actual returned headers, including the
-initial window, against the workspace record budget. Empty detail pages retain
-their unreturned-item continuation for an explicit read.
+capability. The virtual transcript retains three neighboring keyset windows,
+each with at most eight headers and a shared detail budget of eight items and
+65,536 projected bytes, clamped to the advertised limits. Each header receives
+an equal share of the detail budget; unread body continuations remain available
+on demand. Attachment references are included in the response bound. Scrolling
+loads earlier or later windows. Session and anchor changes reset the view;
+observation refreshes retain visible text while rereading loaded windows, or
+refresh from latest when following the live end.
+
+Windows advance past metadata-only detail records automatically within the
+workspace record budget and projected-byte budget. All returned headers, detail
+items and projected bytes are charged, including discarded records. The scan
+item budget is clamped to the advertised detail limit; each automatic read uses
+only the remaining scan allowance. Scanning stops at a visible item, a detail
+continuation, or an exhausted budget. An empty detail page preserves its
+unreturned-item continuation. Scrolling again starts a fresh bounded scan using
+the timeline continuation.
 
 The transcript groups contiguous events by turn while preserving interleaved
 chronology. Summary shows user messages, assistant text accompanying tool calls,
 final assistant text, compact tool chips, and unsuccessful turn outcomes.
-Repeated terminal outcomes for the same turn and cause appear once. New browser
-profiles start in Summary; stored level choices are preserved. Tools shows
-argument and output summaries. All details exposes every loaded event, including
-bookkeeping, independently of the Events control. Turn details use the bounded
-per-turn detail route. Explicit continuation reads retain earlier opened chunks
-until the detail view closes or leaves the retained transcript. The last bounded
-raw detail page remains available to validate each body continuation. Individual
-turns can expand independently of the persisted level. Escape collapses the
-focused expanded turn and restores its heading control before a subsequent
-Escape closes the workspace. The scrolling transcript owns the conversation
-focus entry and command target; the enclosing section adds no focus stop.
+Provider failures remain visible at their event position, including before a
+later successful retry. Expanded tool evidence stays beside its originating chip
+before later messages. Repeated terminal outcomes for the same turn and cause
+appear once. New browser profiles start in Summary; stored level choices are
+preserved. Tools shows argument and output summaries. All details exposes every
+loaded event, including bookkeeping, independently of the Events control. Turn
+details use the bounded per-turn detail route. Explicit continuation reads
+retain earlier opened chunks until the detail view closes or leaves the retained
+transcript. The last bounded raw detail page remains available to validate each
+body continuation. Individual turns can expand independently of the persisted
+level. Escape collapses the focused expanded turn and restores its heading
+control before a subsequent Escape closes the workspace. The scrolling
+transcript owns the conversation focus entry and command target; the enclosing
+section adds no focus stop.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
