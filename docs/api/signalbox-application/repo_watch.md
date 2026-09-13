@@ -326,6 +326,7 @@ impl RepoWatchMergedPullRequestBaselineV1 {
 
 ```rust
 pub struct RepoWatchPullRequestStateInput {
+    pub required_check_failure: option::Option<bool>,
     pub context: signalbox_domain::PullRequestEventContext,
     pub lifecycle: RepoWatchPullRequestLifecycle,
     pub mergeable_state: signalbox_domain::MergeableState,
@@ -347,6 +348,7 @@ impl RepoWatchPullRequestState {
     pub fn try_new(
         input: RepoWatchPullRequestStateInput,
     ) -> result::Result<Self, RepoWatchRepositoryStateError>;
+    pub const fn required_check_failure(&self) -> option::Option<bool>;
     pub const fn context(&self) -> &signalbox_domain::PullRequestEventContext;
     pub const fn lifecycle(&self) -> RepoWatchPullRequestLifecycle;
     pub const fn mergeable_state(&self) -> signalbox_domain::MergeableState;

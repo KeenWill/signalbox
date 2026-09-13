@@ -69,6 +69,7 @@ fn pull_observation(
 ) -> signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
     let mut observed = dispatch_observation(repository, 1, OffsetDateTime::now_utc());
     let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_failure: None,
         context: PullRequestEventContext::new(PullRequestEventContextInput {
             number: PullRequestNumber::new(NonZeroU64::new(1).expect("fixture PR")),
             head_sha: observed.default_head.clone(),

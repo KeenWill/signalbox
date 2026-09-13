@@ -60,6 +60,7 @@ pub(crate) fn context(v: &Value) -> Option<PullRequestEventContext> {
 
 fn pull_request(v: &Value) -> Option<RepoWatchPullRequestState> {
     RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_failure: optional(v.get("required_check_failure")?, Value::as_bool)?,
         context: context(&v["context"])?,
         lifecycle: match v["lifecycle"].as_str()? {
             "open" => RepoWatchPullRequestLifecycle::Open,
@@ -285,6 +286,7 @@ mod tests {
                 "mergeable_state": "unknown",
                 "completed_check_suites": [],
                 "completed_check_runs": [],
+                "required_check_failure": null,
                 "reviews": [],
                 "threads": [
                     {"thread": "thread-open", "state": "open"},

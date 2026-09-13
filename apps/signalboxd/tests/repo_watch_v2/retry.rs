@@ -29,6 +29,7 @@ pub(super) fn observation(
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests: vec![
                 ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+                    required_check_failure: None,
                     context,
                     lifecycle,
                     mergeable_state: state,
@@ -315,5 +316,215 @@ async fn ended_conflict_dispatch_retries_after_cooldown_without_a_new_matching_e
             .await
             .expect("sticky retry")
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn an_ended_dispatch_retries_only_when_the_failed_check_is_required()
+-> Result<(), Box<dyn Error>> {
+    let (_database, core, url) = postgres().await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core);
+    let repository = RepositorySlug::try_new("required-check/project".to_owned())?;
+    let now = OffsetDateTime::now_utc();
+    let head = CommitSha::try_new("1111111111111111111111111111111111111111".to_owned())?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new("required-check".to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::PullRequestOpened],
+            ..Default::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new("watch".to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::from_secs(5),
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    let mut observed = observation(
+        &repository,
+        MergeableState::Mergeable,
+        RepoWatchPullRequestLifecycle::Open,
+        &head,
+        now,
+    );
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &observed,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let mut ids = FixedDispatchIds {
+        value: 81001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 82001,
+        model: 83001,
+    };
+    let mut codec = FixtureCommandCodec;
+    assert!(
+        store
+            .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+            .await
+            .expect("initial dispatch evaluation")
+    );
+    let first = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(first.len(), 1);
+    let session = SessionId::from_uuid(Uuid::from_u128(84001));
+    store
+        .apply_lifecycle_event(&LifecycleEvent::session_created_for_test(
+            1,
+            now,
+            session,
+            SessionCreated {
+                cause: SessionCreationCause::ModuleDispatched {
+                    dispatch: ModuleDispatch::RepositoryWatch {
+                        dispatch: first[0].dispatch(),
+                    },
+                },
+                ownership: SessionOwnership::Owned,
+            },
+        ))
+        .await?;
+    sqlx::query("UPDATE dispatch_ledger SET session_terminal_at=$2,singleton_released_at=$2 WHERE created_session_id=$1")
+        .bind(session.into_uuid()).bind(now).execute(&pool).await?;
+    // The same failed check and unchanged head survive restart. Only GitHub's required fact changes.
+    for (required, expected_retry) in [(None, false), (Some(false), false), (Some(true), true)] {
+        let context = observed.observation.state().pull_requests()[0]
+            .context()
+            .clone();
+        observed.observation = RepoWatchObservation::new(
+            vec![],
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![ComparisonPullRequestState::try_new(
+                    RepoWatchPullRequestStateInput {
+                        context,
+                        lifecycle: RepoWatchPullRequestLifecycle::Open,
+                        mergeable_state: MergeableState::Mergeable,
+                        required_check_failure: required,
+                        completed_check_suites: vec![],
+                        completed_check_runs: vec![RepoWatchCheckRunObservation::new(
+                            GitHubObjectId::new(NonZeroU64::MIN),
+                            RepoWatchCheckCompletionGeneration::try_new("failed-run".to_owned())?,
+                            CheckRunName::try_new("report only".to_owned())?,
+                            CheckConclusion::Failure,
+                        )],
+                        reviews: vec![],
+                        threads: vec![],
+                        reactions: vec![],
+                    },
+                )?],
+                branch_heads: vec![],
+                workflow_runs: vec![],
+            })?,
+        );
+        store
+            .ingest_observation(
+                &store.ingest_baseline(&repository).await?,
+                &observed,
+                EventProducer::Poll,
+                MERGED_RETENTION,
+            )
+            .await?;
+        let restarted = RepoWatchStore::new(pool.clone());
+        assert_eq!(
+            restarted
+                .retry_due(
+                    &repository,
+                    &rule,
+                    &mut ids,
+                    &mut factory,
+                    &mut codec,
+                    &source,
+                    now + Duration::from_secs(5)
+                )
+                .await
+                .expect("retry evaluation"),
+            expected_retry,
+            "required={required:?}"
+        );
+    }
+    let retry = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(retry.len(), 1);
+    let parent: Uuid =
+        sqlx::query_scalar("SELECT retry_of FROM dispatch_ledger WHERE command_id=$1")
+            .bind(retry[0].command().command_id().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(parent, first[0].dispatch().into_uuid());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn required_check_migration_preserves_the_baseline_with_unknown_check_status()
+-> Result<(), Box<dyn Error>> {
+    const MIGRATION_VERSION: i64 = 202609120531;
+    let previous = sqlx::migrate::Migrator {
+        migrations: signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version != MIGRATION_VERSION)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    let (_container, core, url) = unmigrated_postgres().await?;
+    previous.run(&core).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("migration/project".to_owned())?;
+    let head = CommitSha::try_new("1111111111111111111111111111111111111111".to_owned())?;
+    let observed = observation(
+        &repository,
+        MergeableState::Mergeable,
+        RepoWatchPullRequestLifecycle::Open,
+        &head,
+        OffsetDateTime::now_utc(),
+    );
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &observed,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    sqlx::query("UPDATE repository_state SET comparison_baseline=comparison_baseline #- '{pull_requests,0,required_check_failure}' WHERE repository=$1")
+        .bind(repository.as_str()).execute(&pool).await?;
+    sqlx::query("INSERT INTO poll_cursor(repository,cursor) VALUES ($1,'{}')")
+        .bind(repository.as_str())
+        .execute(&pool)
+        .await?;
+    migrate(&core).await?;
+    assert_eq!(
+        store.ingest_baseline(&repository).await?.observation,
+        Some(observed.observation)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM poll_cursor")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    pool.close().await;
+    core.close().await;
     Ok(())
 }
