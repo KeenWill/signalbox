@@ -138,17 +138,28 @@ test('shows validation inline and adopts a successful saved definition', async (
   await page.screenshot({ path: testInfo.outputPath('template-edit-phone.png'), fullPage: true })
 })
 
-test('refreshes untouched source while retaining an edited draft', async ({ page }) => {
+test('requires reconciling a refreshed definition before saving an edited draft', async ({
+  page,
+}, testInfo) => {
   let current = detailFixture
-  await page.route('**/api/templates/code-review', (route) => route.fulfill({ json: current }))
+  const saves: string[] = []
+  await page.route('**/api/templates/code-review', (route) => {
+    if (route.request().method() === 'PUT') {
+      saves.push(route.request().postDataJSON().definition_toml)
+    }
+    return route.fulfill({ json: current })
+  })
   await page.goto(scenario)
   await page.getByRole('button', { name: /code-review/ }).click()
   await page.getByText('Edit template', { exact: true }).click()
   const editor = page.getByRole('textbox', { name: 'Template definition (TOML)' })
   await expect(editor).toHaveValue(detailFixture.definition_toml)
+  await editor.fill('An edit that will be reverted.')
+  await editor.fill(detailFixture.definition_toml)
   const refreshedPrompt = 'Instructions updated in another browser.'
   current = {
     ...detailFixture,
+    summary: { ...detailFixture.summary, digest: '2'.repeat(64) },
     system_prompt: refreshedPrompt,
     definition_toml: detailFixture.definition_toml.replace(
       detailFixture.system_prompt,
@@ -169,4 +180,83 @@ test('refreshes untouched source while retaining an edited draft', async ({ page
   await page.getByText('System instructions', { exact: true }).click()
   await expect(page.getByText(laterPrompt, { exact: true })).toBeVisible()
   await expect(editor).toHaveValue(draft)
+  const save = page.getByRole('button', { name: 'Save template', exact: true })
+  await expect(save).toBeDisabled()
+  await expect(page.getByRole('alert')).toContainText(
+    'This template changed while you were editing.',
+  )
+  await editor.fill(`${draft} More local edits.`)
+  await expect(save).toBeDisabled()
+  await save.evaluate((button: HTMLButtonElement) => button.form?.requestSubmit())
+  expect(saves).toEqual([])
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await page.screenshot({
+    path: testInfo.outputPath('template-edit-conflict-phone.png'),
+    fullPage: true,
+  })
+  await page.getByRole('button', { name: 'Discard edits and use latest' }).click()
+  await expect(editor).toHaveValue(current.definition_toml)
+  await expect(editor).toBeFocused()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect(page.getByRole('status')).toHaveText('Template saved.')
+  expect(saves).toEqual([current.definition_toml])
+})
+
+test('clears a failed save and follows refreshes when another browser saves the draft', async ({
+  page,
+}) => {
+  let current = detailFixture
+  await page.route('**/api/templates/code-review', (route) => {
+    if (route.request().method() === 'PUT') {
+      return route.fulfill({
+        status: 503,
+        json: {
+          error: {
+            kind: 'application',
+            code: 'configuration_unavailable',
+            message: 'Configuration service is unavailable',
+          },
+        },
+      })
+    }
+    return route.fulfill({ json: current })
+  })
+  await page.goto(scenario)
+  await page.getByRole('button', { name: /code-review/ }).click()
+  await page.getByText('Edit template', { exact: true }).click()
+  await page.getByText('System instructions', { exact: true }).click()
+  const editor = page.getByRole('textbox', { name: 'Template definition (TOML)' })
+  const matchingPrompt = 'Instructions also saved by another browser.'
+  const matchingSource = detailFixture.definition_toml.replace(
+    detailFixture.system_prompt,
+    matchingPrompt,
+  )
+  await editor.fill(matchingSource)
+  await page.getByRole('button', { name: 'Save template', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('Configuration service is unavailable')
+  current = {
+    ...detailFixture,
+    summary: { ...detailFixture.summary, digest: '2'.repeat(64) },
+    system_prompt: matchingPrompt,
+    definition_toml: matchingSource,
+  }
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await expect(page.getByText(matchingPrompt, { exact: true })).toBeVisible()
+  await expect(editor).toHaveValue(matchingSource)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(editor).toHaveAttribute('aria-invalid', 'false')
+  await expect(page.getByRole('button', { name: 'Save template', exact: true })).toBeEnabled()
+  const laterPrompt = 'A later change after the matching save.'
+  current = {
+    ...current,
+    summary: { ...current.summary, digest: '3'.repeat(64) },
+    system_prompt: laterPrompt,
+    definition_toml: matchingSource.replace(matchingPrompt, laterPrompt),
+  }
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await expect(editor).toHaveValue(current.definition_toml)
+  await expect(page.getByRole('alert')).toHaveCount(0)
 })

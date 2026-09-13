@@ -180,23 +180,37 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSearchUsageSource> {
+  static connect(request: typeof fetch = fetch): Promise<HttpSearchUsageSource> {
+    return HttpSearchUsageSource.connectSource(request, true)
+  }
+
+  static connectUsage(
+    request: typeof fetch = fetch,
+  ): Promise<Pick<HttpSearchUsageSource, 'limits' | 'usageSummary' | 'usageCalls'>> {
+    return HttpSearchUsageSource.connectSource(request, false)
+  }
+
+  private static async connectSource(
+    request: typeof fetch,
+    requireSearch: boolean,
+  ): Promise<HttpSearchUsageSource> {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
-    if (!bootstrap.capabilities.bounded_lexical_search) {
+    if (requireSearch && !bootstrap.capabilities.bounded_lexical_search) {
       throw new TypeError('bounded lexical search capability is unavailable')
     }
     if (!bootstrap.capabilities.bounded_usage_cost) {
       throw new TypeError('bounded usage and cost capability is unavailable')
     }
     if (
-      bootstrap.limits.max_search_query_bytes < 1 ||
-      bootstrap.limits.max_search_query_bytes > MAX_CONTRACT_SEARCH_QUERY_BYTES ||
-      bootstrap.limits.max_search_page_items < 1 ||
-      bootstrap.limits.max_search_page_items > MAX_CONTRACT_SEARCH_ITEMS ||
-      bootstrap.limits.max_search_snippet_bytes < 1 ||
-      bootstrap.limits.max_search_snippet_bytes > MAX_CONTRACT_SEARCH_SNIPPET_BYTES ||
+      (requireSearch &&
+        (bootstrap.limits.max_search_query_bytes < 1 ||
+          bootstrap.limits.max_search_query_bytes > MAX_CONTRACT_SEARCH_QUERY_BYTES ||
+          bootstrap.limits.max_search_page_items < 1 ||
+          bootstrap.limits.max_search_page_items > MAX_CONTRACT_SEARCH_ITEMS ||
+          bootstrap.limits.max_search_snippet_bytes < 1 ||
+          bootstrap.limits.max_search_snippet_bytes > MAX_CONTRACT_SEARCH_SNIPPET_BYTES)) ||
       bootstrap.limits.max_usage_aggregate_groups < 1 ||
       bootstrap.limits.max_usage_aggregate_groups > MAX_CONTRACT_USAGE_GROUPS ||
       bootstrap.limits.max_usage_call_page_items < 1 ||
@@ -204,7 +218,7 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     ) {
       throw new TypeError('search or usage contract limits are invalid')
     }
-    return new HttpSearchUsageSource(bootstrap.limits, request)
+    return new HttpSearchUsageSource(bootstrap.limits, (...args) => request(...args))
   }
 
   async search(request: SearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
