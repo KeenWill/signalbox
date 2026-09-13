@@ -72,6 +72,7 @@ import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { UsageSurface } from './search-usage/UsageSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -614,6 +615,12 @@ export function ProductApp({
   const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
     surfaceEscapeRef.current = handler
   }, [])
+  const registerTranscriptUnwind = useCallback((handler: () => boolean) => {
+    surfaceEscapeRef.current = handler
+    return () => {
+      if (surfaceEscapeRef.current === handler) surfaceEscapeRef.current = null
+    }
+  }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const artifactRequest = artifactInspectorState.request
@@ -741,6 +748,7 @@ export function ProductApp({
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
       unwindSurface: () => {
+        if (surfaceEscapeRef.current?.()) return true
         if (surface === 'sessions' && (sessionState.workspace || sessionState.session)) {
           updateSessionSearch(
             { ...sessionState, workspace: undefined, session: undefined },
@@ -748,7 +756,7 @@ export function ProductApp({
           )
           return true
         }
-        return surfaceEscapeRef.current?.() ?? false
+        return false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow:
@@ -968,6 +976,7 @@ export function ProductApp({
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
+        usageSource={productTransport}
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch(
@@ -976,6 +985,7 @@ export function ProductApp({
           )
         }
         focusEntry={sessionState.session === undefined}
+        registerTranscriptUnwind={registerTranscriptUnwind}
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         initialAround={sessionState.around}
@@ -1052,6 +1062,8 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' ? (
+      <UsageSurface />
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (

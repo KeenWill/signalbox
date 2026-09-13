@@ -383,6 +383,29 @@ mod tests {
         assert_eq!(summary.session, session);
         assert!(summary.archived);
         assert_eq!(summary.title_summary.as_deref(), Some("Archived review"));
+        let expected = session_catalog_summary_dto(summary).expect("catalog DTO");
+        let response = router(pool.clone(), "version = 1\n")
+            .oneshot(
+                Request::get(format!("/api/sessions/{}", session.into_uuid()))
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .expect("descriptor request"),
+            )
+            .await
+            .expect("descriptor response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let descriptor: signalbox_web_contract::WebSessionTimelineDescriptor =
+            serde_json::from_slice(
+                &to_bytes(
+                    response.into_body(),
+                    signalbox_web_contract::MAX_JSON_BODY_BYTES,
+                )
+                .await
+                .expect("descriptor body"),
+            )
+            .expect("descriptor");
+        assert_eq!(descriptor.title_summary, expected.title_summary);
+        assert_eq!(descriptor.last_activity, expected.last_activity);
         assert!(
             repository
                 .summary(SessionId::from_uuid(Uuid::now_v7()))
