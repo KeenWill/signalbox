@@ -1312,7 +1312,8 @@ pub enum WebTimelineMediaPresentationKind {
     Document,
 }
 
-/// Immutable presented bytes, fetched through the existing blob content route.
+/// Immutable presented bytes. Images use the blob content route; documents use
+/// the download view in the blob descriptor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolMediaReference {

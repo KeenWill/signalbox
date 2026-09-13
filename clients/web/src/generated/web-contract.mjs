@@ -6716,7 +6716,7 @@ const schemas = {
       },
       "WebTimelineToolMediaReference": {
         "additionalProperties": false,
-        "description": "Immutable presented bytes, fetched through the existing blob content route.",
+        "description": "Immutable presented bytes. Images use the blob content route; documents use\nthe download view in the blob descriptor.",
         "properties": {
           "digest": {
             "$ref": "#/$defs/WebBlobId"
