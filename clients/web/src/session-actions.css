@@ -77,3 +77,7 @@
 .session-actions > p {
   margin: 0 12px;
 }
+
+.session-actions .session-header-line {
+  gap: 4px;
+}

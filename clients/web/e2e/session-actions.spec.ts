@@ -154,6 +154,10 @@ for (const viewport of [
         (box?.x ?? 0) + (box?.width ?? 0),
       )
     }
+    const details = await header.getByText('Session details', { exact: true }).boundingBox()
+    expect((details?.x ?? 0) + (details?.width ?? 0)).toBeLessThanOrEqual(
+      (box?.x ?? 0) + (box?.width ?? 0),
+    )
     await page.screenshot({
       path: testInfo.outputPath(`actions-header-${viewport.name}.png`),
       fullPage: true,
