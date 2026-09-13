@@ -101,6 +101,7 @@ impl SessionStatusWriter for PostgresSessionStatusWriter {
             }
             Err(
                 SessionMetadataRepositoryError::DifferentCommandKind { .. }
+                | SessionMetadataRepositoryError::InvalidTitleMerge(_)
                 | SessionMetadataRepositoryError::Corruption(_),
             ) => Err(PostgresSessionStatusWriterError::Corruption),
         }
