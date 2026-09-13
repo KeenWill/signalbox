@@ -188,7 +188,7 @@ function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
   )
 }
 
-function MediaRead({ arguments: args, result }: RendererProps) {
+function MediaRead({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
       <strong>Read attachment</strong>
@@ -208,6 +208,7 @@ function MediaRead({ arguments: args, result }: RendererProps) {
       ) : typeof result.status === 'string' ? (
         <p>{fieldLabel(result.status)}</p>
       ) : null}
+      {!Object.keys(result).length && <Excerpt excerpt={resultExcerpt} label="Output" />}
       {result.truncated === true && <small>Showing part of the file</small>}
     </>
   )

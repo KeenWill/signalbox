@@ -11,6 +11,23 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([0, 128])('shows paged file_read output at byte %s', (offset) => {
+    const [, tool] = toolExample('file_read', { view: 'text' }, {})
+    if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
+    const text = 'remaining file contents'
+    const result = {
+      ...toolExcerpt(text),
+      offset_bytes: String(offset),
+      total_bytes: String(offset + text.length + 10),
+      continuation: { ...resultCursor.body, offset_bytes: String(offset + text.length) },
+    }
+    const markup = renderToStaticMarkup(
+      createElement(ToolCall, { tool: { ...tool, evidence: { ...tool.evidence, result } } }),
+    )
+    expect(markup).toContain(text)
+    expect(markup).toContain('Showing part of output')
+  })
+
   it('summarizes media reads without displaying their digest', () => {
     const markup = render(
       toolExample(
