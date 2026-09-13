@@ -140,3 +140,43 @@ test('opens creation from the sidebar rail and phone navigation with focus recov
   await page.keyboard.press('Escape')
   await expect(navigationOpener).toBeFocused()
 })
+
+test('releases a timed-out creation for cancellation and retries the retained request', async ({
+  page,
+}) => {
+  await setup(page)
+  await page.clock.install()
+  const requests: unknown[] = []
+  let release = () => {}
+  const stalled = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/sessions', async (route) => {
+    requests.push(route.request().postDataJSON())
+    if (requests.length === 1) {
+      await stalled
+      return route.abort()
+    }
+    return route.fulfill({ status: 201, json: createdSessionFixture })
+  })
+  try {
+    await page.goto('/settings')
+    const opener = page.getByRole('button', { name: 'New session', exact: true })
+    await opener.click()
+    await page.getByRole('button', { name: 'Create session', exact: true }).click()
+    await expect.poll(() => requests.length).toBe(1)
+    await expect(page.getByRole('button', { name: 'Close new session' })).toBeDisabled()
+    await page.clock.fastForward(30_001)
+    await expect(page.getByRole('button', { name: 'Retry creation', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Close new session' })).toBeEnabled()
+    await page.keyboard.press('Escape')
+    await expect(opener).toBeFocused()
+    await opener.click()
+    await page.getByRole('button', { name: 'Retry creation', exact: true }).click()
+    await expect(page).toHaveURL(new RegExp(`session=${createdSessionFixture.session_id}`))
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toEqual(requests[0])
+  } finally {
+    release()
+  }
+})

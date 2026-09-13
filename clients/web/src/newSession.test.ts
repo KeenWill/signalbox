@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import {
   HttpSessionCreationApi,
   readRetainedCreation,
@@ -14,7 +14,10 @@ const request = {
   first_input: null,
 }
 
-afterEach(() => sessionStorage.clear())
+afterEach(() => {
+  sessionStorage.clear()
+  vi.useRealTimers()
+})
 
 it('evicts an unreadable retained creation request', () => {
   sessionStorage.setItem('signalbox.new-session', '{')
@@ -118,5 +121,43 @@ it.each([201, 400, 503])(
     await expect(api.create(request)).rejects.toThrow('product JSON byte limit')
     expect(cancelled).toBe(true)
     expect(chunks).toBe(3)
+  },
+)
+
+it.each([null, 201, 400, 503])(
+  'aborts stalled creation with response status %s and retries the retained identity',
+  async (status) => {
+    vi.useFakeTimers()
+    retainCreation(request)
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      const signal = init?.signal
+      if (status === null) {
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{'))
+            signal?.addEventListener('abort', () => controller.error(signal.reason), { once: true })
+          },
+        }),
+        { status },
+      )
+    })
+    const api = new HttpSessionCreationApi(fetch)
+    const outcome = expect(api.create(request)).rejects.not.toBeInstanceOf(SessionCreationRejected)
+    await vi.advanceTimersByTimeAsync(30_000)
+    await outcome
+    expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(readRetainedCreation()).toEqual(request)
+    fetch.mockResolvedValueOnce(Response.json(createdSessionFixture, { status: 201 }))
+    await expect(api.create(readRetainedCreation() ?? request)).resolves.toEqual(
+      createdSessionFixture,
+    )
+    expect(fetch.mock.calls[1]?.[1]?.body).toEqual(fetch.mock.calls[0]?.[1]?.body)
+    expect(vi.getTimerCount()).toBe(0)
   },
 )
