@@ -156,7 +156,12 @@ function TranscriptWindow({
   const turns = useMemo(
     () =>
       groupTranscriptTurns(entries).filter(
-        (turn) => turn.messages.length > 0 || turn.result || turn.tools.length > 0 || turn.outcome,
+        (turn) =>
+          turn.messages.length > 0 ||
+          turn.result ||
+          turn.tools.length > 0 ||
+          turn.warnings.length > 0 ||
+          turn.outcome,
       ),
     [entries],
   )
@@ -198,6 +203,7 @@ function TranscriptWindow({
               (turn) =>
                 turn.messages.includes(item) ||
                 turn.result === item ||
+                turn.warnings.includes(item) ||
                 turn.outcome === item ||
                 (item.body.type === 'tool_batch' && turn.events.includes(item)),
             ),
@@ -256,6 +262,7 @@ function TranscriptWindow({
                       (turn) =>
                         turn.messages.includes(item) ||
                         turn.result === item ||
+                        turn.warnings.includes(item) ||
                         turn.outcome === item ||
                         (item.body.type === 'tool_batch' && turn.events.includes(item)),
                     ),

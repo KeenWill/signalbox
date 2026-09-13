@@ -5,7 +5,7 @@ import {
   detailTurnId,
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
-import { groupTranscriptTurns, toolContinuationSequence } from './turns'
+import { groupTranscriptTurns, toolContinuationSequence, turnSummaryParts } from './turns'
 
 it('groups final text, user messages, and repeated tool evidence under the durable turn identity', () => {
   const turns = groupTranscriptTurns([
@@ -58,8 +58,7 @@ it('requires a completed turn before presenting a completed model response as fi
   expect(groupTranscriptTurns(detailItems.slice(0, 4))[0]?.result).toBeUndefined()
 })
 
-it('preserves steering messages after the tools that precede them', async () => {
-  const { turnSummaryParts } = await import('./turns')
+it('preserves steering messages after the tools that precede them', () => {
   const input = detailItems[0]
   if (!input) throw new Error('input fixture missing')
   const turn = groupTranscriptTurns([
@@ -95,7 +94,7 @@ it('continues merged result text at the event that supplied its excerpt', () => 
   const result = toolResultItem()
   if (!proposal || result.body.type !== 'tool_batch') throw new Error('tool fixture missing')
   const tool = result.body.tools[0]
-  if (!tool || tool.evidence.type !== 'physical_attempt' || !tool.evidence.result)
+  if (tool?.evidence.type !== 'physical_attempt' || !tool.evidence.result)
     throw new Error('result fixture missing')
   const continued = {
     ...tool,
@@ -120,7 +119,7 @@ it('continues merged result text at the event that supplied its excerpt', () => 
   expect(toolContinuationSequence(turn, turn.tools[0])).toBe('6')
 })
 
-it('retains a provider failure when no response or only a generic failed outcome is loaded', () => {
+it('retains provider failures in event order without treating them as terminal outcomes', () => {
   const model = detailItems[3]
   const terminal = detailItems[4]
   if (model?.body.type !== 'model_call' || terminal?.body.type !== 'turn_lifecycle')
@@ -134,11 +133,22 @@ it('retains a provider failure when no response or only a generic failed outcome
       state: { type: 'terminal' as const, disposition: 'known_failed' as const },
     },
   }
-  expect(groupTranscriptTurns([failure])[0]?.outcome).toEqual(failure)
+  const failedTurn = groupTranscriptTurns([
+    failure,
+    { ...terminal, kind: 'turn_failed', body: { ...terminal.body, cause_code: 'failed' } },
+  ])[0]
+  expect(failedTurn?.warnings).toEqual([failure])
+  expect(failedTurn?.outcome?.body).toMatchObject({ cause_code: 'failed' })
+
+  const success = { ...model, address: { event_sequence: '6' } }
+  const completed = { ...terminal, address: { event_sequence: '7' } }
+  const retriedTurn = groupTranscriptTurns([failure, success, completed])[0]
+  if (!retriedTurn) throw new Error('retried turn fixture missing')
+  expect(retriedTurn.outcome).toBeUndefined()
+  expect(turnSummaryParts(retriedTurn).map((part) => part.kind)).toEqual(['message', 'message'])
   expect(
-    groupTranscriptTurns([
-      failure,
-      { ...terminal, kind: 'turn_failed', body: { ...terminal.body, cause_code: 'failed' } },
-    ])[0]?.outcome,
-  ).toEqual(failure)
+    turnSummaryParts(retriedTurn).map((part) =>
+      part.kind === 'message' ? part.item.address.event_sequence : 'tools',
+    ),
+  ).toEqual([failure.address.event_sequence, '6'])
 })

@@ -10,6 +10,7 @@ export interface TranscriptTurn {
   messages: WebSessionTimelineDetail[]
   result: WebSessionTimelineDetail | undefined
   tools: WebTimelineToolAttempt[]
+  warnings: WebSessionTimelineDetail[]
   outcome?: WebSessionTimelineDetail
 }
 
@@ -28,14 +29,21 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     const id = turnId ?? `event-${item.address.event_sequence}`
     let group = groups.get(id)
     if (!group) {
-      group = { id, turnId, events: [], messages: [], result: undefined, tools: [] }
+      group = {
+        id,
+        turnId,
+        events: [],
+        messages: [],
+        result: undefined,
+        tools: [],
+        warnings: [],
+      }
       groups.set(id, group)
     }
     group.events.push(item)
+    if (item.body.type === 'model_call' && item.body.provider_failure_cause && !item.body.response)
+      group.warnings.push(item)
     if (
-      (item.body.type === 'model_call' &&
-        item.body.provider_failure_cause &&
-        !item.body.response) ||
       item.body.type === 'reconciliation' ||
       (item.body.type === 'event_fact' &&
         (item.body.kind === 'goal_turn_retired' ||
@@ -44,12 +52,7 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
         item.body.lifecycle === 'terminalized' &&
         item.body.cause_code !== 'completed')
     ) {
-      if (
-        item.body.type !== 'turn_lifecycle' ||
-        item.body.cause_code !== 'failed' ||
-        group.outcome?.body.type !== 'model_call'
-      )
-        group.outcome = item
+      group.outcome = item
     }
     if (item.body.type === 'user_input') group.messages.push(item)
     if (
@@ -108,7 +111,7 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
   const parts: TurnSummaryPart[] = []
   const seen = new Set<string>()
   for (const item of turn.events) {
-    if (item.body.type === 'user_input' || item === turn.result)
+    if (item.body.type === 'user_input' || item === turn.result || turn.warnings.includes(item))
       parts.push({ kind: 'message', item })
     if (item.body.type !== 'tool_batch') continue
     for (const evidence of item.body.tools) {
