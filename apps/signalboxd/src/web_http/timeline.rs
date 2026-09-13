@@ -521,7 +521,7 @@ fn tool_media_projection_error(error: ToolMediaPopulationError) -> Response {
             cause,
             "session timeline media projection read failed"
         ),
-        ToolMediaPopulationError::Unavailable => unreachable!(),
+        ToolMediaPopulationError::Unavailable => return session_projection_unavailable(),
     }
     application_error(
         StatusCode::INTERNAL_SERVER_ERROR,
