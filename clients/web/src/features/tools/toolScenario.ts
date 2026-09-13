@@ -44,6 +44,7 @@ export const toolExample = (
 }
 
 export const toolExamples = [
+  toolExample('git_diff', { scope: 'working_tree' }, { patch: '-before\n+after\n' }),
   toolExample(
     'sandboxed_exec',
     { program: 'cargo', arguments: ['check'] },

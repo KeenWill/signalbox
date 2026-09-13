@@ -11,6 +11,24 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each(['application/json', 'text/html; charset=utf-8', 'application/octet-stream'])(
+    'retains response content type %s',
+    (contentType) => {
+      const [, tool] = toolExample(
+        'web_fetch',
+        { url: 'https://example.com/' },
+        {
+          status: 200,
+          content_type: contentType,
+          body: 'response',
+        },
+      )
+      expect(renderToStaticMarkup(createElement(ToolCall, { tool }))).toContain(
+        `Content type: ${contentType}`,
+      )
+    },
+  )
+
   it.each(['9007199254740993', '-9007199254740993', '1e400', '-0', '1.00', '1e3'])(
     'preserves the original JSON number %s',
     (number) => {

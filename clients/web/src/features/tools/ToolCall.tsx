@@ -43,7 +43,7 @@ function TextPreview({
       <pre className={diff ? 'tool-diff' : undefined}>
         <code>
           {diff
-            ? preview.content.split('\n').map((line, index) => (
+            ? preview.content.split(/(?<=\n)/u).map((line, index) => (
                 <span
                   // biome-ignore lint/suspicious/noArrayIndexKey: Immutable lines can repeat.
                   key={index}
@@ -52,7 +52,6 @@ function TextPreview({
                   }
                 >
                   {line}
-                  {'\n'}
                 </span>
               ))
             : preview.content}
@@ -218,6 +217,9 @@ function Web({ arguments: args, result, resultExcerpt }: RendererProps) {
     <>
       <Link url={result.url ?? args.url} />
       {typeof result.status === 'number' && <strong>HTTP {result.status}</strong>}
+      {typeof result.content_type === 'string' && (
+        <small>Content type: {result.content_type}</small>
+      )}
       {textField(args.query) && <strong>{textField(args.query)}</strong>}
       <TextPreview text={textField(result.body ?? result.summary)} label="Summary" />
       {Array.isArray(result.results) && (
