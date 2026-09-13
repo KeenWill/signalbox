@@ -11,6 +11,45 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each(['9007199254740993', '-9007199254740993', '1e400'])(
+    'preserves the original JSON number %s',
+    (number) => {
+      const [argumentsTool, resultTool] = toolExample('custom_tool', {}, {})
+      const text = `{"nested":{"nonce":${number}}}`
+      if (resultTool.evidence.type !== 'physical_attempt')
+        throw new Error('Physical fixture required')
+      for (const tool of [
+        { ...argumentsTool, arguments: toolExcerpt(text) },
+        { ...resultTool, evidence: { ...resultTool.evidence, result: toolExcerpt(text) } },
+      ]) {
+        const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+        expect(markup).toContain(number)
+        expect(markup).not.toContain('9007199254740992')
+      }
+      expect(excerptFields(toolExcerpt(text))).toEqual({})
+    },
+  )
+
+  it('still parses safe integers for typed summaries', () => {
+    expect(excerptFields(toolExcerpt('{"nonce":9007199254740991}'))).toEqual({
+      nonce: Number.MAX_SAFE_INTEGER,
+    })
+  })
+
+  it('retains proposed fields before a familiar tool has validation evidence', () => {
+    const [tool] = toolExample('read_file', { resource: 'x' }, {})
+    const markup = renderToStaticMarkup(
+      createElement(ToolCall, {
+        tool: {
+          ...tool,
+          evidence: { type: 'request_only' },
+        },
+      }),
+    )
+    expect(markup).toContain('<dt>Resource</dt><dd>x</dd>')
+    expect(markup).toContain('Requested')
+  })
+
   it('summarizes a complete large file result without dropping its partial-file evidence', () => {
     const markup = render(
       toolExample(

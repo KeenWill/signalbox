@@ -298,7 +298,7 @@ export function ToolCall({ tool }: ToolCallProps) {
   const args = excerptFields(tool.arguments)
   const result = excerptFields(evidence?.result)
   const Renderer =
-    evidence?.cause === 'invalid_arguments' || evidence?.cause === 'unknown_tool'
+    !evidence || evidence.cause === 'invalid_arguments' || evidence.cause === 'unknown_tool'
       ? Fallback
       : (toolRenderers.get(tool.tool_name) ?? Fallback)
   return (
