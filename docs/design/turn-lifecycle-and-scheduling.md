@@ -91,9 +91,10 @@ vocabulary and its storage discriminators admit a new phase without
 reinterpreting an existing one.
 
 The recovery-only ordering exists so that generic recovery cannot terminalize
-authority that retained runner evidence resolves. The present order, generic
-scan before runner-socket bind, stays compatible with inserting a runner
-reconciliation phase before the scan.
+authority that retained runner evidence resolves. Startup binds the runner
+socket in recovery-only mode and reconciles retained runner execution before
+the generic scan. Ordinary enrollment remains unavailable until the process
+socket is bound and runtime admission begins.
 
 Only the path that prepares the turn's initial model call inside the activation
 transaction records the manifest there. The ordinary path records it after
