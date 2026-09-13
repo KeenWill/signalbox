@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
+import {
+  attachmentTypeLabel,
+  inspectedArtifact,
+  nextResolutionSequence,
+} from './ArtifactInspector'
 import {
   fallbackDescriptor,
   imageArtifact,
@@ -7,6 +11,11 @@ import {
 } from './features/artifacts/artifactScenario'
 
 describe('artifact inspector resolution identity', () => {
+  it('labels MIME types case-insensitively', () => {
+    expect(attachmentTypeLabel('IMAGE/PNG')).toBe('Image')
+    expect(attachmentTypeLabel('APPLICATION/PDF')).toBe('PDF')
+  })
+
   it('keeps an image declaration without admitted image views in the blob renderer', () => {
     const descriptor = { ...fallbackDescriptor, declared_media_type: 'image/svg+xml' }
     expect(inspectedArtifact(descriptor, nextResolutionSequence()).kind).toBe('blob')
