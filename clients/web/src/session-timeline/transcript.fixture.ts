@@ -72,6 +72,8 @@ export function transcriptFixture(url: URL, latest = transcriptSize): unknown {
     supervision: null,
     repository_watch: null,
     workspace_root_kind: null,
+    title_summary: null,
+    last_activity: { kind: 'session', unix_microseconds: '1' },
     sizes: {
       item_count: String(latest),
       projected_text_bytes: String(latest * 12),

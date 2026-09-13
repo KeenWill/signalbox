@@ -510,7 +510,13 @@ export function SessionWorkspaceSurface({
       aria-label="Session workspace"
       className="surface-body session-workspace-surface"
       onKeyDown={(event) => {
-        if (event.key !== 'Escape' || !detailsRef.current?.open) return
+        if (
+          event.key !== 'Escape' ||
+          !detailsRef.current?.open ||
+          !(event.target instanceof Node) ||
+          !detailsRef.current.contains(event.target)
+        )
+          return
         const nearest =
           event.target instanceof Element ? event.target.closest('details[open]') : null
         const details = nearest instanceof HTMLDetailsElement ? nearest : detailsRef.current
