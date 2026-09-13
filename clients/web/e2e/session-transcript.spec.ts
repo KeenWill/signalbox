@@ -702,7 +702,9 @@ for (const [itemLimit, byteLimit, expectedReads] of [
     await expect.poll(() => reads.length).toBe(expectedReads)
     const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
     await expect(
-      surface.getByText('No messages in this part of the conversation. Scroll up to keep looking.'),
+      surface.getByText(
+        'No messages in this part of the conversation. Keep scrolling to look for messages.',
+      ),
     ).toBeVisible()
     expect(reads).toHaveLength(expectedReads)
     expect(reads.length * 128).toBeLessThanOrEqual(byteLimit)
