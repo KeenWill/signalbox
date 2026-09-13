@@ -907,7 +907,7 @@ test('retries a failed rename with the same intent and can cancel editing', asyn
 
 test('links catalog pull request and trigger chips and retains a PR title fallback', async ({
   page,
-}) => {
+}, testInfo) => {
   await useCatalogFixture(page)
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({
@@ -954,4 +954,12 @@ test('links catalog pull request and trigger chips and retains a PR title fallba
     'href',
     'https://github.com/signalbox/example/pull/81',
   )
+  await page.screenshot({ path: testInfo.outputPath('catalog-provenance.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true }).click()
+  await page.getByRole('textbox', { name: 'Session title', exact: true }).fill('Review response')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  )
+  await page.screenshot({ path: testInfo.outputPath('catalog-rename-mobile.png') })
 })
