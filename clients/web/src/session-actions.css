@@ -1,0 +1,63 @@
+.session-actions {
+  display: grid;
+  gap: var(--product-space);
+  font-size: 0.75rem;
+}
+
+.session-action-buttons,
+.session-action-confirmation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--product-space);
+}
+
+.session-action-confirmation label {
+  display: grid;
+  gap: var(--product-space);
+  flex: 1 1 16rem;
+}
+
+.session-action-confirmation textarea {
+  width: 100%;
+  min-height: 4rem;
+}
+
+.session-actions p {
+  margin: 0;
+}
+
+.session-actions button {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.session-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.session-actions button:focus-visible,
+.session-actions textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.session-actions button:disabled {
+  opacity: 0.5;
+}
+
+.session-actions textarea {
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text);
+  padding: var(--product-space);
+}
+
+.session-actions small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+

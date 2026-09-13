@@ -1,5 +1,81 @@
-import type { WebAttentionSnapshot, WebAttentionStreamEvent } from './generated/web-contract.mjs'
+import {
+  decodeWebApiErrorResponse,
+  decodeWebApprovalRequest,
+  decodeWebCancelTurnRequest,
+  decodeWebGoalRequest,
+  decodeWebSessionActionRequest,
+  type WebApprovalRequest,
+  type WebAttentionSnapshot,
+  type WebAttentionStreamEvent,
+  type WebCancelTurnRequest,
+  type WebGoalRequest,
+  type WebSessionActionRequest,
+} from './generated/web-contract.mjs'
 import type { ProductTransport } from './product'
+import { MAX_PRODUCT_JSON_BYTES, ProductRequestError } from './product'
+
+export type SessionAction =
+  | { kind: 'approval'; requestId: string; input: WebApprovalRequest }
+  | { kind: 'cancel'; input: WebCancelTurnRequest }
+  | { kind: 'set-goal'; input: WebGoalRequest }
+  | { kind: 'clear-goal'; input: WebSessionActionRequest }
+
+export async function submitSessionAction(sessionId: string, action: SessionAction): Promise<void> {
+  const input =
+    action.kind === 'approval'
+      ? decodeWebApprovalRequest(action.input)
+      : action.kind === 'cancel'
+        ? decodeWebCancelTurnRequest(action.input)
+        : action.kind === 'set-goal'
+          ? decodeWebGoalRequest(action.input)
+          : decodeWebSessionActionRequest(action.input)
+  const suffix =
+    action.kind === 'approval'
+      ? `approvals/${encodeURIComponent(action.requestId)}`
+      : action.kind === 'cancel'
+        ? 'cancel'
+        : 'goal'
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${suffix}`, {
+    method:
+      action.kind === 'approval' || action.kind === 'cancel'
+        ? 'POST'
+        : action.kind === 'set-goal'
+          ? 'PUT'
+          : 'DELETE',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (response.status === 204) return
+  if (response.ok) throw new Error('The action was not acknowledged. Retry the same action.')
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('The action response was empty.')
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      size += result.value.byteLength
+      if (size > MAX_PRODUCT_JSON_BYTES)
+        throw new Error('The action response exceeded the JSON limit.')
+      chunks.push(result.value)
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  throw new ProductRequestError(
+    response.status,
+    decodeWebApiErrorResponse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))),
+  )
+}
 
 export type AttentionSyncPhase = 'idle' | 'connecting' | 'live' | 'resyncing' | 'stale' | 'failed'
 
