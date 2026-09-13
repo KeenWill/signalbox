@@ -27,8 +27,7 @@ per-judgment totals for all reported token-usage axes; any unknown component
 leaves that axis's total unknown.
 
 `review-judgment-agentic-full` and `review-judgment-agentic-full-no-tools`
-inline the default context builder's output after excluding source-thread
-selection metadata from the candidate payload, followed by the sibling helper's
+inline the unchanged default context builder's output and the sibling helper's
 16,384-byte full-text projection. The templates allow sixteen and zero tool
 requests respectively. Both use the same prompt and terminal-result accounting.
 `read_diff` parses the prepared `change.patch` through the pinned file reader.
