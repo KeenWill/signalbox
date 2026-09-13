@@ -75,6 +75,34 @@ test('persists levels and reads bounded turn detail', async ({ page }, testInfo)
   await page.screenshot({ path: testInfo.outputPath('turn-levels.png') })
 })
 
+test('restores the selected Tools level after collapsing a tool-opened turn', async ({ page }) => {
+  await turnApi(page)
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const tools = page.getByRole('radio', { name: 'Tools', exact: true })
+  await tools.check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const summary = transcript.getByRole('region', { name: 'exec_command details', exact: true })
+  const openTool = transcript.getByRole('button', {
+    name: 'Open turn details for exec_command',
+    exact: true,
+  })
+  const heading = transcript.getByRole('button', { name: 'Open turn details', exact: true })
+  await expect(summary).toContainText('passed')
+  await openTool.click()
+  await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).click()
+  await expect(tools).toBeChecked()
+  await expect(summary).toContainText('release status')
+  await expect(summary).toContainText('passed')
+  await expect(heading).toBeFocused()
+  await openTool.click()
+  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(tools).toBeChecked()
+  await expect(summary).toContainText('release status')
+  await expect(summary).toContainText('passed')
+  await expect(heading).toBeFocused()
+})
+
 test('reads later tool members on demand in Tools mode', async ({ page }) => {
   await turnApi(page)
   const members: string[] = []
