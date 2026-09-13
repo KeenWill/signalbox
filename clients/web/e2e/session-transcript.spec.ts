@@ -890,3 +890,102 @@ test('preserves the reading offset when older rows move the selected row index',
   await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
   expect(problems).toEqual([])
 })
+
+test('follows a taller live window that replaces every retained row', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  let latest = 8
+  let releaseGrowth = () => {}
+  const growth = new Promise<void>((resolve) => {
+    releaseGrowth = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${transcriptSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            {
+              kind: 'snapshot',
+              snapshot: {
+                session_id: transcriptSessionId,
+                observed_through: '8',
+                active: null,
+                queued_turn_count: '0',
+                queued_turn_ids: [],
+                reconciliation: null,
+                runner: null,
+              },
+            },
+            {
+              kind: 'durable',
+              cursor: '16',
+              address: { event_sequence: '16' },
+              event_kind: 'input_accepted',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    const payload = transcriptFixture(url, latest)
+    if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '16') {
+      const detail =
+        payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+      const text = 'New tail line\n'.repeat(40) + 'Replacement tail'
+      return route.fulfill({
+        json: {
+          ...detail,
+          projected_body_bytes: 128 + text.length,
+          items: detail.items.map((item) => ({
+            ...item,
+            projected_body_bytes: 128 + text.length,
+            body: {
+              ...item.body,
+              text: {
+                text,
+                offset_bytes: '0',
+                total_bytes: String(text.length),
+                continuation: null,
+              },
+            },
+          })),
+        },
+      })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const remaining = () =>
+    transcript.evaluate(
+      (element) => element.scrollHeight - element.scrollTop - element.clientHeight,
+    )
+  await expect(transcript.getByText('Message 8', { exact: true })).toBeVisible()
+  await expect.poll(remaining).toBeLessThanOrEqual(1)
+  const oldHeight = await transcript.evaluate((element) => element.scrollHeight)
+  latest = 16
+  releaseGrowth()
+  await expect(transcript.getByText(/Replacement tail/)).toBeVisible()
+  await expect(transcript.getByText('Message 8', { exact: true })).toHaveCount(0)
+  await expect
+    .poll(() => transcript.evaluate((element) => element.scrollHeight))
+    .toBeGreaterThan(oldHeight)
+  await expect.poll(remaining).toBeLessThanOrEqual(1)
+  await expect(transcript).toHaveAttribute('data-total-loaded', '8')
+  await page.screenshot({ path: testInfo.outputPath('replacement-tail.png') })
+  expect(problems).toEqual([])
+})

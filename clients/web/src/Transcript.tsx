@@ -247,7 +247,6 @@ export function VirtualTranscript({
   const atEnd = useRef(initialEnd)
   const restoringLaterAnchor = useRef(false)
   const restoredOffset = useRef<number | null>(null)
-  const previousLast = useRef<string | undefined>(undefined)
   const touchStart = useRef<number | null>(null)
   const virtualizer = useVirtualizer({
     useFlushSync: false,
@@ -322,7 +321,6 @@ export function VirtualTranscript({
       }
     }
     restoringLaterAnchor.current = false
-    previousLast.current = ids.at(-1)
     restoredOffset.current ??= parent.current?.scrollTop ?? null
   }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
   const remember = () => {
