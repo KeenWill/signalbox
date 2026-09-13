@@ -20,9 +20,12 @@ impl RunnerProtocolStore {
         let registration = connected_registration(&mut transaction, &self.catalog).await?;
         let posture = registration.as_ref().and_then(|(_, registration)| {
             let request = stored.placement().request();
-            (registration.registration().satisfies(&request.selector)
+            (request
+                .validate_registration(registration.registration())
+                .is_ok()
                 && registration.registration().tool(tool).is_some()
-                && request.sandbox == RunnerSandboxProfile::Ambient)
+                && request.sandbox == RunnerSandboxProfile::Ambient
+                && request.workspace == WorkspaceRequirement::None)
                 .then(|| requested_posture(request, tool))
         });
         transaction.rollback().await?;
@@ -79,14 +82,24 @@ impl RunnerProtocolStore {
         if registration.registration().tool(tool).is_none() {
             return Ok(None);
         }
-        placement
+        if let Err(error) = placement
             .request()
             .validate_registration(registration.registration())
-            .map_err(RunnerProtocolStoreError::Domain)?;
+        {
+            return if placement.state() == &SessionRunnerPlacementState::Unpinned {
+                Ok(None)
+            } else {
+                Err(RunnerProtocolStoreError::Domain(error))
+            };
+        }
         if placement.request().sandbox != RunnerSandboxProfile::Ambient
             || placement.request().workspace != WorkspaceRequirement::None
         {
-            return Err(invalid());
+            return if placement.state() == &SessionRunnerPlacementState::Unpinned {
+                Ok(None)
+            } else {
+                Err(invalid())
+            };
         }
         if requested_posture(placement.request(), tool) == ToolApprovalPosture::Human
             && authority.request().approval_posture() != ToolApprovalPosture::Human

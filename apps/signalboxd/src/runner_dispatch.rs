@@ -70,8 +70,12 @@ impl RunnerDispatchService {
         };
         self.changed();
         loop {
-            if lease.state() == RunnerLeaseState::Completed {
-                return Ok(true);
+            match lease.state() {
+                RunnerLeaseState::Completed
+                | RunnerLeaseState::LostUnclaimed
+                | RunnerLeaseState::LostExecutionPossible
+                | RunnerLeaseState::LostClaimed => return Ok(true),
+                RunnerLeaseState::Offered | RunnerLeaseState::Claimed => {}
             }
             let _ = changes.changed().await;
             // The issued lease remains authority during a database outage; an
