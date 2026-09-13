@@ -291,3 +291,26 @@ it('keeps retained turn segments unchanged when an earlier window shares the tur
   expect(after.map((turn) => turn.id)).toEqual([`${before[0]?.turnId}:1`, before[0]?.id])
   expect(after[1]).toEqual(before[0])
 })
+
+it('keeps continued members of a window-first batch in one turn row', () => {
+  const first = detailItems[1]
+  if (first?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const tool = first.body.tools[0]
+  if (!tool) throw new Error('Tool member missing')
+  const second = {
+    ...first,
+    body: {
+      ...first.body,
+      projected_member_index: 1,
+      tools: [{ ...tool, request_id: '00000000-0000-0000-0000-000000000141' }],
+    },
+  }
+  const before = groupTranscriptTurns([first], new Set(['2']))
+  const after = groupTranscriptTurns([first, second], new Set(['2']))
+  expect(after).toHaveLength(1)
+  expect(after[0]?.id).toBe(before[0]?.id)
+  expect(after[0]?.tools.map((tool) => tool.request_id)).toEqual([
+    tool.request_id,
+    '00000000-0000-0000-0000-000000000141',
+  ])
+})

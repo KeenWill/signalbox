@@ -198,9 +198,13 @@ test('reads later tool members on demand in Tools mode', async ({ page }) => {
   expect(members).toEqual([])
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
   const details = transcript.getByRole('region', { name: 'More message text' })
-  await details.getByRole('button', { name: 'Continue reading', exact: true }).click()
-  await expect(details.getByText('verify_release', { exact: true })).toBeVisible()
-  await expect(details).toContainText('release verify')
+  await transcript.getByRole('button', { name: 'Show more tools', exact: true }).click()
+  await expect(
+    transcript.getByRole('button', { name: 'Open turn details for verify_release', exact: true }),
+  ).toBeVisible()
+  await expect(
+    transcript.getByRole('region', { name: 'verify_release details', exact: true }),
+  ).toContainText('release verify')
   await expect(details).toContainText('passed')
   expect(members).toEqual(['1'])
 })
@@ -1222,5 +1226,139 @@ for (const open of ['Summary', 'Tools', 'turn link']) {
     await page.screenshot({ path: testInfo.outputPath('associated-compaction.png') })
     await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).first().click()
     await expect(event).toHaveCount(0)
+  })
+}
+
+for (const afterOutput of [false, true]) {
+  test(`shows later batch members as separate chips${afterOutput ? ' after reading tool output' : ''}`, async ({
+    page,
+  }, testInfo) => {
+    const original = detailItems[1]
+    if (original?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+    const batch = original.body
+    const tool = batch.tools[0]
+    if (!tool) throw new Error('Tool member missing')
+    const cursor = (
+      member: number,
+      field: 'tool_arguments' | 'tool_result' = 'tool_arguments',
+    ) => ({
+      type: 'more_body' as const,
+      body: { address: original.address, field, member_index: member, offset_bytes: '0' },
+    })
+    const member = (index: number): WebSessionTimelineDetail => ({
+      ...original,
+      projected_body_bytes: 128 + Number(detailExcerpt(`Arguments for tool ${index}`).total_bytes),
+      body: {
+        ...batch,
+        projected_member_index: index,
+        tools: [
+          {
+            ...tool,
+            request_id: `00000000-0000-0000-0000-${String(140 + index).padStart(12, '0')}`,
+            tool_name: ['exec_command', 'read_file', 'apply_patch'][index] ?? 'tool',
+            arguments: detailExcerpt(`Arguments for tool ${index}`),
+            evidence: index === 0 && afterOutput ? tool.evidence : { type: 'request_only' },
+          },
+        ],
+      },
+    })
+    const first = member(0)
+    await turnApi(
+      page,
+      undefined,
+      detailItems.map((item) => (item === original ? first : item)),
+    )
+    const reads: number[] = []
+    let unavailable = true
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '2')
+        return route.fallback()
+      const index = Number(url.searchParams.get('cursor_member') ?? '0')
+      if (url.searchParams.has('cursor_member')) reads.push(index)
+      if (index === 1 && unavailable)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: { kind: 'application', code: 'timeline_unavailable', message: 'Try again.' },
+          },
+        })
+      if (url.searchParams.get('cursor_field') === 'tool_result') {
+        if (first.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+        const firstTool = first.body.tools[0]
+        if (firstTool?.evidence.type !== 'physical_attempt')
+          throw new Error('Attempt fixture missing')
+        const result = detailExcerpt('First tool output')
+        return route.fulfill({
+          json: detailPage(
+            [
+              {
+                ...first,
+                projected_body_bytes: 128 + Number(result.total_bytes),
+                body: {
+                  ...first.body,
+                  tools: [
+                    { ...firstTool, arguments: null, evidence: { ...firstTool.evidence, result } },
+                  ],
+                },
+              },
+            ],
+            cursor(1),
+          ),
+        })
+      }
+      return route.fulfill({
+        json: detailPage(
+          [member(index)],
+          index === 0 && afterOutput
+            ? cursor(0, 'tool_result')
+            : index < 2
+              ? cursor(index + 1)
+              : null,
+        ),
+      })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const chips = transcript.getByRole('region', { name: 'Tools used' })
+    await expect(chips.getByRole('button', { name: 'exec_command', exact: true })).toBeVisible()
+    expect(reads).toEqual([])
+    if (afterOutput) {
+      await chips.getByRole('button', { name: 'exec_command', exact: true }).click()
+      await chips.getByRole('button', { name: 'Read more', exact: true }).click()
+      await expect(
+        chips
+          .getByRole('region', { name: 'More message text', exact: true })
+          .getByText('First tool output', { exact: true }),
+      ).toBeVisible()
+    }
+    await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
+    await expect(chips.getByRole('alert')).toHaveText('More tools could not be loaded.')
+    unavailable = false
+    await chips.getByRole('button', { name: 'Retry more tools', exact: true }).click()
+    const second = chips.getByRole('button', { name: 'read_file', exact: true })
+    await expect(second).toBeVisible()
+    await second.click()
+    await expect(
+      chips.getByRole('region', { name: 'read_file details', exact: true }),
+    ).toContainText('Arguments for tool 1')
+    await expect(chips.getByRole('button', { name: 'exec_command', exact: true })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
+    const third = chips.getByRole('button', { name: 'apply_patch', exact: true })
+    await expect(third).toBeVisible()
+    await third.click()
+    await expect(
+      chips.getByRole('region', { name: 'apply_patch details', exact: true }),
+    ).toContainText('Arguments for tool 2')
+    await expect(second).toHaveAttribute('aria-expanded', 'false')
+    await expect(chips.getByRole('button', { name: 'Show more tools', exact: true })).toHaveCount(0)
+    expect(reads).toEqual(afterOutput ? [0, 0, 1, 1, 2] : [1, 1, 2])
+    await page.screenshot({ path: testInfo.outputPath('separate-batch-chips.png') })
+    await transcript.getByRole('button', { name: 'Open turn details', exact: true }).first().click()
+    await expect(transcript.locator('[data-event-sequence="2"]')).toBeVisible()
+    await expect(transcript.getByRole('alert')).toHaveCount(0)
   })
 }
