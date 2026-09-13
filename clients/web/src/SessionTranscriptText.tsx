@@ -334,7 +334,7 @@ function TranscriptWindow({
         </p>
       )}
       {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
-        <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
+        <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
       )}
       <VirtualTranscript
         scrollRef={scrollRef}
