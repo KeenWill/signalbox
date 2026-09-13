@@ -18,8 +18,14 @@ impl RepoWatchStore {
         &self,
         repository: &RepositorySlug,
     ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1,0))")
+            .bind(repository.as_str())
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO observer_actor(repository) VALUES ($1) ON CONFLICT(repository) DO UPDATE SET ready=false")
-            .bind(repository.as_str()).execute(&self.pool).await?;
+            .bind(repository.as_str()).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 

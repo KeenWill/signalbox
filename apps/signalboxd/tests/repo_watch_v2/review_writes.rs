@@ -635,3 +635,167 @@ async fn review_payload_quarantine_preserves_an_already_applied_observer_migrati
     assert_eq!(review_payload_migration(true).await?, None);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn observer_pause_rejects_a_batch_planned_before_identity_refresh()
+-> Result<(), Box<dyn Error>> {
+    let (_container, core, url) = postgres().await?;
+    migrate(&core).await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("paused/project".to_owned())?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new("paused-review".to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::ReviewSubmitted],
+            ..Default::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new("watch".to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?;
+    let now = OffsetDateTime::now_utc();
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &goal_review_observation(&repository, 1),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &goal_review_observation(&repository, 2),
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    assert!(identity_attempt(&store, &repository, Some("daemon")).await);
+    let next = store
+        .next_rule_event(&repository, &rule)
+        .await?
+        .expect("ready event");
+    let batches = plan_repository_event(
+        std::slice::from_ref(&rule),
+        &next.event,
+        &mut FixedDispatchIds {
+            value: 91001,
+            calls: 0,
+        },
+        &mut FixtureSessionFactory {
+            next_command: 92001,
+            model: 93001,
+        },
+    )?;
+
+    store.prepare_observer_identity(&repository).await?;
+    assert!(matches!(
+        store
+            .record_rule_commands(
+                &batches[0],
+                now,
+                &mut FixtureCommandCodec,
+                "paused-pull",
+                Duration::ZERO
+            )
+            .await?,
+        DispatchAdmission::Suppressed
+    ));
+    let commands: i64 = sqlx::query_scalar("SELECT count(*) FROM dispatch_ledger")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(commands, 0);
+
+    assert!(identity_attempt(&store, &repository, Some("daemon")).await);
+    assert_eq!(
+        store
+            .next_rule_event(&repository, &rule)
+            .await?
+            .expect("retained event")
+            .event,
+        next.event
+    );
+    assert!(matches!(
+        store
+            .record_rule_commands(
+                &batches[0],
+                now,
+                &mut FixtureCommandCodec,
+                "paused-pull",
+                Duration::ZERO
+            )
+            .await?,
+        DispatchAdmission::Inserted
+    ));
+    pool.close().await;
+    core.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn observer_pause_waits_for_the_repository_admission_lock() -> Result<(), Box<dyn Error>> {
+    let (_container, core, url) = postgres().await?;
+    migrate(&core).await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("serialized/project".to_owned())?;
+    assert!(identity_attempt(&store, &repository, Some("daemon")).await);
+    let held = store.begin_review_write(repository.clone()).await?;
+    let pausing_store = RepoWatchStore::new(pool.clone());
+    let pausing_repository = repository.clone();
+    let pause = tokio::spawn(async move {
+        pausing_store
+            .prepare_observer_identity(&pausing_repository)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted
+                 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))",
+            )
+            .fetch_one(&core)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let ready: bool =
+        sqlx::query_scalar("SELECT ready FROM mod_repo_watch.observer_actor WHERE repository=$1")
+            .bind(repository.as_str())
+            .fetch_one(&core)
+            .await?;
+    assert!(
+        ready,
+        "the earlier transaction retains ready identity until it releases admission"
+    );
+    drop(held);
+    pause.await??;
+    let ready: bool =
+        sqlx::query_scalar("SELECT ready FROM mod_repo_watch.observer_actor WHERE repository=$1")
+            .bind(repository.as_str())
+            .fetch_one(&core)
+            .await?;
+    assert!(!ready);
+    pool.close().await;
+    core.close().await;
+    Ok(())
+}
