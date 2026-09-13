@@ -128,7 +128,8 @@ export function ProductNavigation({
         <Link
           className="brand product-brand"
           to="/$surface"
-          params={{ surface: 'attention' }}
+          params={{ surface: 'sessions' }}
+          search={{ needsAttention: true }}
           aria-label="Signalbox home"
           aria-disabled={context.navigationLocked || undefined}
           tabIndex={context.navigationLocked ? -1 : undefined}
@@ -177,6 +178,7 @@ export function ProductNavigation({
           {collapsed ? <Plus aria-hidden="true" /> : <span>New session</span>}
         </button>
         {productRoutes.map((route) => {
+          if (route.id === 'attention') return null
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
           const Icon = productNavigationIcons[route.id]
           return (
@@ -617,6 +619,7 @@ export function ProductApp({
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
   const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
+  const [catalogAttentionAfter, setCatalogAttentionAfter] = useState<string | null>(null)
   const catalogReturnSessionId = useRef<string | undefined>(undefined)
   const consumeCatalogReturnFocus = useCallback(() => {
     catalogReturnSessionId.current = undefined
@@ -744,7 +747,11 @@ export function ProductApp({
       sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
-        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+        void navigate({
+          to: '/$surface',
+          params: { surface: path === '/attention' ? 'sessions' : path.slice(1) },
+          search: path === '/attention' ? { needsAttention: true } : {},
+        }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
       },
@@ -883,16 +890,8 @@ export function ProductApp({
     void navigate({ to: '/$surface', params: { surface }, search: next })
 
   const content =
-    surface === 'attention' && bootstrap.isSuccess ? (
+    surface === 'attention' ? (
       <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
-    ) : surface === 'attention' ? (
-      <div className="surface-body">
-        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
-          <div>
-            <h2>{bootstrap.isError ? 'Attention unavailable' : 'Loading Attention…'}</h2>
-          </div>
-        </section>
-      </div>
     ) : surface === 'sessions' &&
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
@@ -926,6 +925,15 @@ export function ProductApp({
       <SessionCatalogSurface
         returnSessionId={catalogReturnSessionId.current}
         onReturnFocusConsumed={consumeCatalogReturnFocus}
+        needsAttention={sessionState.needsAttention === true}
+        onNeedsAttentionChange={(needsAttention) =>
+          updateSessionSearch(
+            { ...sessionState, needsAttention: needsAttention || undefined },
+            'replace',
+          )
+        }
+        attentionAfter={catalogAttentionAfter}
+        onAttentionAfterChange={setCatalogAttentionAfter}
         lifecycleFilter={catalogLifecycleFilter}
         pageOrder={catalogPageOrder}
         onLifecycleFilterChange={setCatalogLifecycleFilter}

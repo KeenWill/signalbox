@@ -161,7 +161,10 @@ daemon defaults. The concern inventory a library may carry belongs to
 
 Session execution evidence and attempt configuration agree through two
 independently checked bindings, the session's copied template provenance and the
-attempt's own digest, rather than through a caller-supplied claim.
+attempt's own digest, rather than through a caller-supplied claim. Judgment
+analysis and effect sessions use the template selected by
+`review_library.judgment_template`. A reload that changes that selection or its
+contents does not rebind an existing attempt.
 
 Concern work carries no repair or publication handle and no other member's
 uncommitted output. Why: a concurrent member holds no more authority than it
@@ -344,18 +347,33 @@ or the configured limit when smaller. Template identity narrows this catalog and
 allowance; it grants no additional authority. Ordinary sessions do not advertise
 the two review-text tools.
 
+`review-judgment-agentic-full` adds `review_thread_list` and `read_diff` with a
+sixteen-request allowance and seventeen-round ceiling.
+`review-judgment-agentic-full-no-tools` exposes no tools and allows no requests.
+The list tool projects thread identities and locations from the attached PR/head
+context blob. The diff tool returns the containing or nearest head-side hunk for
+a literal path from the session's prepared patch through the pinned file reader,
+bounded by the existing file-read byte ceiling with explicit truncation. These
+tools are absent from ordinary sessions.
+
 `scripts/review_judge_eval.py --template review-judgment-agentic` supplies the
 candidate in full with 160-character, single-line synopses of the other findings
 and threads. Additional case evidence and the prepared patch remain available
 through explicit read paths. The caller supplies the retained snapshot for the
-exact PR and head, including which threads existed then. The adapter excludes
-the subject finding and its source thread, uploads only context fields, and
-takes structured output from the last committed assistant text in the judged
-turn. Each result records the session, turn, terminal frontier, assistant-entry
+exact PR and head without inferring comment history. The adapter excludes the
+subject finding and its source thread, uploads only context fields, and takes
+structured output from the last committed assistant text in the judged turn.
+Each result records the session, turn, terminal frontier, assistant-entry
 witness, wall time, and the existing per-model-call token-usage records. The
 record also sums each token axis across the turn; an unknown component keeps
 that axis unknown. No separate token table is needed. This evaluation path does
 not change publication policy or select a live judgment variant.
+
+Full-context judgment prompts inline the default finding, change scope, file
+windows, and citation evidence before the sibling projection. They require
+another finding or thread to state the same defect at the reviewed head for a
+`duplicate` decline, naming it in the reason; later resolution alone is not
+evidence against the finding.
 
 ## Planned
 

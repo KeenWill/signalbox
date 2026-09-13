@@ -26,17 +26,20 @@ pub(crate) fn lease_with_cross_wired_dispatch(
     );
     let authorization = lease.credential_authorization().cloned();
     let correlation = RunnerLeaseCorrelation {
-        lease: lease.correlation().lease,
-        runner: lease.runner(),
-        tool: lease.tool().clone(),
         dispatch,
-        generation: lease.generation(),
+        ..lease.correlation()
     };
     RunnerLease::reconstitute(
         RunnerLeaseReconstitutionInput {
             lease: correlation.lease,
             dispatch,
             runner: lease.runner(),
+            registration_revision: correlation.registration_revision,
+            placement_revision: correlation.placement_revision,
+            working_directory: correlation.working_directory.clone(),
+            sandbox: correlation.sandbox,
+            arguments: lease.arguments().clone(),
+            recorded_arguments: lease.arguments().clone(),
             tool: lease.tool().clone(),
             effect: lease.effect(),
             credential_authorization: authorization.clone(),
@@ -126,6 +129,29 @@ async fn current_registration_gates_new_leases() -> Result<(), Box<dyn Error>> {
         )
         .expect("an additive registration retains the pinned tool");
     store.store_lease(&retained_tool_lease).await?;
+    let loaded = store
+        .load_lease(
+            retained_tool_lease.correlation().lease,
+            retained_tool_lease.generation(),
+        )
+        .await?
+        .expect("lease survives registration expansion");
+    assert_eq!(loaded, retained_tool_lease);
+    assert_eq!(
+        loaded.correlation().registration_revision,
+        expanded_registration.registration().revision()
+    );
+    let stored_revisions: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT registration_revision, offer_registration_revision FROM runner_lease_generation WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(loaded.correlation().lease.into_uuid())
+    .bind(Decimal::from(loaded.generation().get()))
+    .fetch_one(&pool)
+    .await?;
+    assert_ne!(
+        stored_revisions.0, stored_revisions.1,
+        "pin snapshot and current offer authority remain distinct"
+    );
     terminalize_physical_attempt(&pool, LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     insert_physical_attempt(&pool, SECOND_LATER_LEASE_PHYSICAL_ATTEMPT).await?;
     let narrowed_registration = store
@@ -260,7 +286,10 @@ async fn registration_replacement_serializes_later_lease_admission() -> Result<(
         lease_blocked,
         "lease admission must wait behind registration replacement"
     );
-    assert_store_check_violation(rejected);
+    assert!(matches!(
+        rejected,
+        RunnerProtocolStoreError::Domain(RunnerDomainError::RegistrationChanged)
+    ));
     Ok(())
 }
 
@@ -1973,14 +2002,14 @@ async fn first_generation_requires_null_predecessor() -> Result<(), Box<dyn Erro
         "INSERT INTO runner_lease_generation
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
-             registration_enrollment_id, registration_revision,
+             registration_enrollment_id, registration_revision, offer_registration_revision,
              credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
-                registration_enrollment_id, registration_revision,
+                registration_enrollment_id, registration_revision, offer_registration_revision,
                 credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0

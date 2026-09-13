@@ -586,6 +586,8 @@ pub enum ToolExecutorDisposition {
     DurableCompletion(CorrelatedDurableToolCompletion),
     /// The executor's transaction already parked this exact foreground wait.
     DurableChildWait(CorrelatedDurableChildWait),
+    /// The executor reports that connection-loss propagation parked this exact attempt.
+    DurableRunnerWait(ToolAttemptDispatchCorrelation),
 }
 impl CorrelatedToolExecutorEvidence {
     /// Returns the executor-supplied correlation.
@@ -790,6 +792,10 @@ enum RetainedToolExecutionStateKind {
         wait: CorrelatedDurableChildWait,
         dispatch_permit: InProcessToolDispatchPermit,
     },
+    DurableRunnerWait {
+        correlation: ToolAttemptDispatchCorrelation,
+        dispatch_permit: InProcessToolDispatchPermit,
+    },
     CrashClassification {
         session: SessionId,
         turn: TurnId,
@@ -833,6 +839,9 @@ impl fmt::Debug for RetainedToolExecutionState {
                         "durable_completion"
                     }
                     RetainedToolExecutionStateKind::DurableChildWait { .. } => "durable_child_wait",
+                    RetainedToolExecutionStateKind::DurableRunnerWait { .. } => {
+                        "durable_runner_wait"
+                    }
                     RetainedToolExecutionStateKind::CrashClassification { .. } => {
                         "crash_classification"
                     }
@@ -855,6 +864,7 @@ impl RetainedToolExecutionState {
             | RetainedToolExecutionStateKind::Observation { .. }
             | RetainedToolExecutionStateKind::DurableCompletion { .. }
             | RetainedToolExecutionStateKind::DurableChildWait { .. }
+            | RetainedToolExecutionStateKind::DurableRunnerWait { .. }
             | RetainedToolExecutionStateKind::CrashClassification { .. } => None,
         }
     }
@@ -867,7 +877,7 @@ pub enum ToolExecutionServiceOutcome {
     NoWork,
     /// The batch remains parked on its earliest undecided request.
     AwaitingApproval(ToolRequestId),
-    /// Exact ambiguity remains parked for user recovery.
+    /// The exact attempt remains parked for user recovery.
     AwaitingRecovery(ToolAttemptId),
     /// A delivered foreground child result reopened serialized execution.
     ChildWaitResumed(TurnAttemptId),
@@ -1008,6 +1018,14 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     #[operator(class = CallerOrHubBug, code = "tool_child_wait_mismatch")]
     /// A reported durable child wait was absent or cross-wired.
     ChildWaitMismatch,
+    #[error("durable runner wait reconciliation failed: {field_0}")]
+    #[operator(delegate = 0, code = "tool_runner_wait_reconciliation")]
+    /// A reported runner recovery wait could not be reread from storage.
+    RunnerWaitReconciliation(#[source] TransactionError),
+    #[error("executor durable runner wait did not match storage")]
+    #[operator(class = CallerOrHubBug, code = "tool_runner_wait_mismatch")]
+    /// A reported runner recovery wait was absent or cross-wired.
+    RunnerWaitMismatch,
     #[error("tool crash classification failed: {field_0}")]
     #[operator(delegate = 0, code = "tool_crash_classification")]
     /// Crash classification failed.
@@ -1215,6 +1233,14 @@ where
                 } => {
                     return self
                         .reconcile_durable_child_wait(wait, dispatch_permit)
+                        .await;
+                }
+                RetainedToolExecutionStateKind::DurableRunnerWait {
+                    correlation,
+                    dispatch_permit,
+                } => {
+                    return self
+                        .reconcile_durable_runner_wait(correlation, dispatch_permit)
                         .await;
                 }
                 RetainedToolExecutionStateKind::CrashClassification {
@@ -1617,6 +1643,21 @@ where
             }
         };
         let evidence = match disposition {
+            ToolExecutorDisposition::DurableRunnerWait(correlation) => {
+                if correlation != expected_correlation {
+                    return self
+                        .classify_untrusted_executor_failure(
+                            expected_correlation,
+                            result_entry_count,
+                            dispatch_permit,
+                            UntrustedExecutorFailure::CorrelationMismatch,
+                        )
+                        .await;
+                }
+                return self
+                    .reconcile_durable_runner_wait(correlation, dispatch_permit)
+                    .await;
+            }
             ToolExecutorDisposition::Completed(evidence) => evidence,
             ToolExecutorDisposition::DurableCompletion(completion) => {
                 if completion.correlation() != expected_correlation {
@@ -1693,6 +1734,35 @@ where
                 Err(ToolExecutionServiceError::DurableCompletionReconciliation(
                     error,
                 ))
+            }
+        }
+    }
+
+    async fn reconcile_durable_runner_wait(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+        dispatch_permit: InProcessToolDispatchPermit,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    > {
+        match self
+            .transaction
+            .reread_durable_runner_wait(correlation)
+            .await
+        {
+            Ok(true) => Ok(ToolExecutionServiceOutcome::AwaitingRecovery(
+                correlation.attempt(),
+            )),
+            Ok(false) => Err(ToolExecutionServiceError::RunnerWaitMismatch),
+            Err(error) => {
+                self.retained_state = Some(RetainedToolExecutionState {
+                    state: RetainedToolExecutionStateKind::DurableRunnerWait {
+                        correlation,
+                        dispatch_permit,
+                    },
+                });
+                Err(ToolExecutionServiceError::RunnerWaitReconciliation(error))
             }
         }
     }
@@ -2588,6 +2658,21 @@ mod tests {
             Ok(true)
         }
 
+        async fn reread_durable_runner_wait(
+            &mut self,
+            _correlation: ToolAttemptDispatchCorrelation,
+        ) -> Result<bool, Self::Error> {
+            self.events
+                .lock()
+                .expect("event lock")
+                .push("reread_runner_wait");
+            if self.commit_failures > 0 {
+                self.commit_failures -= 1;
+                return Err(FakeError::Ordinary);
+            }
+            Ok(self.committed)
+        }
+
         async fn classify_crash_loss<NextTurn>(
             &mut self,
             _session: SessionId,
@@ -2701,6 +2786,83 @@ mod tests {
 
     struct DurableWaitExecutor {
         wait: DelegationWait,
+    }
+
+    struct DurableRunnerWaitExecutor;
+
+    impl ToolExecutor for DurableRunnerWaitExecutor {
+        type Error = FakeError;
+        async fn execute(
+            &mut self,
+            _invocation: ToolExecutionInvocation,
+        ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+            panic!("runner loss has no executor observation")
+        }
+        async fn execute_with_scheduling(
+            &mut self,
+            invocation: ToolExecutionInvocation,
+        ) -> Result<ToolExecutorDisposition, Self::Error> {
+            Ok(ToolExecutorDisposition::DurableRunnerWait(
+                invocation.correlation(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_wait_requires_durable_evidence_and_retains_failed_rereads() {
+        for recorded in [false, true] {
+            let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let transaction = FakeTransaction {
+                prepared: current_attempt_fixture(&batch),
+                batch: batch.clone(),
+                events: Arc::clone(&events),
+                ambiguous_authorization: false,
+                authorization_committed: false,
+                commit_failures: 1,
+                committed: recorded,
+                load_results: VecDeque::new(),
+                allow_crash_classification: false,
+            };
+            let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+                definition(
+                    "known",
+                    ToolPermissionDefault::Auto,
+                    ToolEffectClass::EffectFree,
+                ),
+                |_: &NormalizedToolArguments| Ok(()),
+            )])
+            .expect("one tool");
+            let mut service = ToolExecutionService::new(
+                FixedIds::new(),
+                transaction,
+                catalog,
+                DurableRunnerWaitExecutor,
+                InProcessToolDispatchGate::default(),
+            );
+            assert!(matches!(
+                service.execute(batch.session(), batch.turn()).await,
+                Err(ToolExecutionServiceError::RunnerWaitReconciliation(
+                    FakeError::Ordinary
+                ))
+            ));
+            let outcome = service.execute(batch.session(), batch.turn()).await;
+            if recorded {
+                assert_eq!(
+                    outcome.expect("durable yielded attempt"),
+                    ToolExecutionServiceOutcome::AwaitingRecovery(attempt)
+                );
+            } else {
+                assert!(matches!(
+                    outcome,
+                    Err(ToolExecutionServiceError::RunnerWaitMismatch)
+                ));
+            }
+            assert_eq!(
+                *events.lock().expect("event lock"),
+                ["authorize", "reread_runner_wait", "reread_runner_wait"]
+            );
+        }
     }
 
     struct DurableCompletionExecutor {

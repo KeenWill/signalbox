@@ -1858,6 +1858,33 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         PostgresToolLoopRepository::reread_durable_child_wait(self, wait).await
     }
 
+    async fn reread_durable_runner_wait(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(transaction.as_mut(), correlation.session()).await?;
+        let recorded = sqlx::query_scalar("SELECT EXISTS (
+            SELECT 1 FROM runner_lease_generation AS generation
+            JOIN runner_current_lease_event AS head USING (lease_id, generation)
+            JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+            JOIN tool_attempt AS physical ON physical.attempt_id = generation.attempt_id
+            JOIN turn_attempt AS issuing ON issuing.turn_attempt_id = physical.issuing_turn_attempt_id
+            WHERE generation.session_id = $1 AND physical.session_id = $1 AND physical.turn_id = $2
+                AND physical.issuing_turn_attempt_id = $3 AND physical.request_id = $4
+                AND generation.attempt_id = $5 AND physical.dispatch_generation = $6
+                AND event.state_kind IN ('lost_unclaimed', 'lost_execution_possible', 'lost_claimed')
+                AND issuing.session_id = $1 AND issuing.turn_id = $2
+                AND issuing.state_kind = 'ended' AND issuing.end_variant = 'without_stop'
+                AND issuing.end_disposition = 'yielded_to_durable_wait')")
+            .bind(correlation.session().into_uuid()).bind(correlation.turn().into_uuid())
+            .bind(correlation.issuing_attempt().into_uuid()).bind(correlation.request().into_uuid())
+            .bind(correlation.attempt().into_uuid()).bind(rust_decimal::Decimal::from(correlation.generation().as_u64()))
+            .fetch_one(&mut *transaction).await?;
+        transaction.rollback().await?;
+        Ok(recorded)
+    }
+
     async fn classify_crash_loss<NextTurn>(
         &mut self,
         session: SessionId,

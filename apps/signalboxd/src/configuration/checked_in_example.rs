@@ -7,7 +7,7 @@ use std::{
 use signalbox_domain::{
     BranchName, CommitSha, LabelName, PullRequestBody, PullRequestEventContext,
     PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug,
+    RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug, SessionTemplateName,
 };
 use signalbox_module_repo_watch_v2::matching_rules;
 use uuid::Uuid;
@@ -79,6 +79,33 @@ credential_file = "/run/credentials/repository-watch-token"
         templates: Arc::new(templates),
     })
     .expect("the repository-watch rules resolve against the session-template example");
+}
+
+#[test]
+fn example_full_context_judges_resolve_with_the_same_prompt() {
+    let models = checked_in_example_configuration().expect("example models");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/session-templates.example.toml");
+    let templates = SessionTemplateConfiguration::read(&path, || None, &models)
+        .expect("example session templates");
+    let full = SessionTemplateName::try_new("review-judgment-agentic-full".to_owned())
+        .expect("full-context judge name");
+    let no_tools = SessionTemplateName::try_new("review-judgment-agentic-full-no-tools".to_owned())
+        .expect("zero-tool judge name");
+    let full_prompt = templates
+        .resolve(&full)
+        .expect("the harness's full-context template resolves")
+        .defaults()
+        .system_prompt()
+        .expect("full-context judgment prompt");
+    let no_tools_prompt = templates
+        .resolve(&no_tools)
+        .expect("the harness's zero-tool template resolves")
+        .defaults()
+        .system_prompt()
+        .expect("zero-tool judgment prompt");
+
+    assert_eq!(full_prompt, no_tools_prompt);
 }
 
 fn example_watch_configuration() -> HubModelConfiguration {

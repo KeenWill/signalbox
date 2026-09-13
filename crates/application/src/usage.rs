@@ -237,10 +237,12 @@ pub enum UsageCallKind {
     ApprovalJudge,
     /// A session-level context-summary production call.
     ContextCompaction,
+    /// A session title generation call.
+    SessionTitle,
 }
 
 /// Turn correlation fused with the physical call class, so a session-level
-/// context-compaction call cannot carry a turn and a turn-owned call cannot
+/// title or context-compaction call cannot carry a turn and a turn-owned call cannot
 /// lack one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UsageCallScope {
@@ -250,6 +252,8 @@ pub enum UsageCallScope {
     ApprovalJudge(TurnId),
     /// A session-level context-summary production call with no turn identity.
     ContextCompaction,
+    /// A session title generation call.
+    SessionTitle,
 }
 
 impl UsageCallScope {
@@ -260,15 +264,16 @@ impl UsageCallScope {
             Self::ModelCall(_) => UsageCallKind::ModelCall,
             Self::ApprovalJudge(_) => UsageCallKind::ApprovalJudge,
             Self::ContextCompaction => UsageCallKind::ContextCompaction,
+            Self::SessionTitle => UsageCallKind::SessionTitle,
         }
     }
 
-    /// Owning turn, absent exactly for session-level context compaction.
+    /// Owning turn, absent for session-level title and compaction calls.
     #[must_use]
     pub const fn turn(self) -> Option<TurnId> {
         match self {
             Self::ModelCall(turn) | Self::ApprovalJudge(turn) => Some(turn),
-            Self::ContextCompaction => None,
+            Self::ContextCompaction | Self::SessionTitle => None,
         }
     }
 }

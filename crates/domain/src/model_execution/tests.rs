@@ -3429,3 +3429,90 @@ fn tool_round_rejects_approval_that_disagrees_with_argument_suppression() {
         assert_eq!(error, ModelCallClosureError::InitialToolApprovalMismatch);
     }
 }
+
+#[test]
+fn prepared_tool_closure_cannot_start_a_model_call() {
+    let initial = active_execution();
+    let target = initial
+        .targets
+        .resolve(*initial.configuration.effective().model())
+        .expect("the fixture selection has a target")
+        .target();
+    // Distinct fixture identities; the unattempted request and prepared tenure matter.
+    let request = tool_request_id(0x7a10);
+    let producing_call = model_call_id(0x7a11);
+    let attempt = turn_attempt_id(0x7a12);
+    let assistant = SemanticTranscriptEntry::from_validated_parts(
+        semantic_transcript_entry_id(0x7a13),
+        initial.session,
+        SemanticTranscriptEntryPayload::AssistantToolUse {
+            producing_call,
+            request,
+        },
+    );
+    let closed = SemanticTranscriptEntry::from_validated_parts(
+        semantic_transcript_entry_id(0x7a14),
+        initial.session,
+        SemanticTranscriptEntryPayload::ToolClosed { request },
+    );
+    let yielded = initial
+        .starting_snapshot
+        .derive_appending_candidate(context_frontier_id(0x7a15), vec![assistant.reference()])
+        .expect("the proposal extends the starting frontier");
+    let closure = yielded
+        .derive_appending_candidate(context_frontier_id(0x7a16), vec![closed.reference()])
+        .expect("the closure retains its proposal");
+    let projection = PreparedToolResultProjection::from_validated_parts(
+        yielded.frontier().snapshot(),
+        initial.turn,
+        producing_call,
+        vec![closed.clone()],
+        closure.clone(),
+    );
+    let input = ModelCallExecutionReconstitutionInput::new(
+        initial
+            .active_turn
+            .with_phase_for_test(ActiveTurnPhase::Running {
+                current_attempt: CurrentTurnAttempt::prepared(attempt),
+            }),
+        initial.targets,
+        initial.starting_snapshot,
+        vec![initial.frontier_entries[0].clone(), assistant, closed],
+        initial
+            .origin_contents
+            .into_iter()
+            .map(|(accepted_input, content)| {
+                ModelCallOriginContent::from_validated_parts(accepted_input, content)
+            })
+            .collect(),
+        Some(PinnedProviderTargetReconstitutionInput::new(
+            initial.turn,
+            target,
+        )),
+        Vec::new(),
+    )
+    .with_continuation_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+        closure.frontier().owning_session(),
+        closure.frontier().snapshot(),
+        closure.ordered_entries().collect(),
+    ));
+    assert_eq!(
+        input
+            .clone()
+            .reconstitute()
+            .expect_err("closure still requires atomic projection proof")
+            .failure(),
+        ModelCallExecutionReconstitutionFailure::LifecycleMismatch
+    );
+    let execution = input
+        .with_uncommitted_tool_result_projection(projection)
+        .reconstitute()
+        .expect("the prepared tenure admits its proven closure");
+    let error = execution
+        .prepare_initial_call(model_call_id(0x7a17))
+        .expect_err("terminal tool closures cannot produce another model call");
+    assert_eq!(
+        error.failure(),
+        ModelCallPreparationFailure::AttemptIsNotPrepared
+    );
+}

@@ -101,6 +101,11 @@ impl SessionMetadataSnapshot {
 pub struct ReplaceSessionMetadata {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl ReplaceSessionMetadata {
+    pub const fn for_title_generation(
+        command_id: DurableCommandId,
+        session: SessionId,
+        replacement: SessionMetadataContent,
+    ) -> Self;
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,

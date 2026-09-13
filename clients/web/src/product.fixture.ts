@@ -4,6 +4,7 @@ export const webContractBootstrapFixture = {
   capabilities: {
     bounded_json: true,
     same_origin_json_mutations: true,
+    session_title_generation: false,
     ndjson_streaming: true,
     immutable_blob_content: true,
     blob_derivations: true,

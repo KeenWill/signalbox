@@ -99,11 +99,13 @@ cannot declare this capability. `[model_settings]` is the deployment global
 default and each `[[model_settings_profiles]]` entry is a named profile a
 model's optional `settings_profile` selects; a selected profile outranks the
 global default, and both sit below the session and per-call layers of
-[model session settings](model-session-settings.md). An adapter mapping that
-names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
-`executable`, `mcp_bridge_executable`, and `working_directory`. The required
-`[numeric_bounds]` table holds the central numeric-bound inventory and the
-members are required except for the defaulted repository-watch poll request
+[model session settings](model-session-settings.md). The optional
+`[session_titles]` table names one configured model through `selection_id`,
+including that model's settings profile and credential routing. An adapter
+mapping that names `claude_cli` requires a `[claude_cli]` table carrying that
+adapter's `executable`, `mcp_bridge_executable`, and `working_directory`. The
+required `[numeric_bounds]` table holds the central numeric-bound inventory and
+the members are required except for the defaulted repository-watch poll request
 budget, while other tables carry their own configured limits. Numeric-bound
 duration policies use Jiff's friendly unsigned-duration syntax.
 `max_git_object_bytes` limits decoded Git object content, including packed delta
@@ -778,7 +780,8 @@ session's most recent `Prepared` call on that pool pinned, including one that
 later failed under `stay`. `switch_next_turn` creates a durable pending
 displacement scoped to the session, policy snapshot, member, and source turn; it
 is ignored inside that source turn and consumed by the transaction that prepares
-a later turn through another member.
+a later turn through another member. Session-level calls ignore next-turn
+displacements.
 
 Every transaction writing an exclusion first takes the affected profile's
 action-head lock, keyed by profile reference alone and in byte order when it
@@ -794,15 +797,18 @@ Loading a review library generates four stage templates and one template for
 each configured concern. The concern inventory is a nonempty subset of the five
 closed concern keys and retains their closed order. All nine possible names are
 reserved even when no library is configured, so an ordinary entry cannot shadow
-one. Creation by template name first consults the durable command registry, and
-an equal replay returns its stored session even when the name is absent or
-changed in the current catalog; the claim protocol is owned by
-[identity and commands](identity-and-commands.md). Only an unclaimed command
-identity resolves against the loaded catalog and copies the complete bundle into
-the session's immutable defaults version one. The session records the template
-name and content digest and retains no live catalog reference, so an edit
-affects only creations first handled under the new catalog. The process-protocol
-template list returns sorted name and version summaries.
+one. The reloadable `review_library.judgment_template` selects an existing
+catalog entry for orchestration judgment and defaults to `review-judgment`. An
+unknown name rejects the reload; the selected name and content are bound into
+the attempt's judgment digest. Creation by template name first consults the
+durable command registry, and an equal replay returns its stored session even
+when the name is absent or changed in the current catalog; the claim protocol is
+owned by [identity and commands](identity-and-commands.md). Only an unclaimed
+command identity resolves against the loaded catalog and copies the complete
+bundle into the session's immutable defaults version one. The session records
+the template name and content digest and retains no live catalog reference, so
+an edit affects only creations first handled under the new catalog. The
+process-protocol template list returns sorted name and version summaries.
 
 Model-selection validation happens at two boundaries on frozen semantic meaning
 only; credential presence is never consulted. At session creation the requested

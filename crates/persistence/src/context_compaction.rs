@@ -326,9 +326,13 @@ impl ContextCompactionRepository {
         let source = load_compaction_source(&mut transaction, session).await?;
         let preview = match source {
             Some(source) if source.member_count > 0 => {
-                let visible =
-                    load_projected_frontier_members(&mut transaction, session, source.frontier)
-                        .await?;
+                let visible = load_projected_frontier_members(
+                    &mut transaction,
+                    session,
+                    source.frontier,
+                    None,
+                )
+                .await?;
                 let members = preview_members(&visible)?;
                 Some(AutomaticContextCompactionPreview {
                     source_frontier: source.frontier,
@@ -830,12 +834,12 @@ impl PreparedContextCompaction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompactionSource {
-    frontier: ContextFrontierId,
+pub(crate) struct CompactionSource {
+    pub(crate) frontier: ContextFrontierId,
     member_count: u64,
 }
 
-async fn load_compaction_source(
+pub(crate) async fn load_compaction_source(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
 ) -> Result<Option<CompactionSource>, ContextCompactionRepositoryError> {
@@ -1101,7 +1105,8 @@ async fn prepare_in_transaction(
     })
     .transpose()?;
     let visible =
-        load_projected_frontier_members(transaction, request.session, source_frontier).await?;
+        load_projected_frontier_members(transaction, request.session, source_frontier, None)
+            .await?;
     let Some(first) = visible.first() else {
         return Ok((false, PrepareContextCompactionOutcome::NoBoundary));
     };
@@ -1294,7 +1299,23 @@ pub(crate) async fn projected_frontier_membership(
     frontier: ContextFrontierId,
 ) -> Result<Vec<SemanticTranscriptEntryRef>, ContextCompactionRepositoryError> {
     Ok(
-        load_projected_frontier_members(connection, session, frontier)
+        load_projected_frontier_members(connection, session, frontier, None)
+            .await?
+            .into_iter()
+            .map(|member| member.reference)
+            .collect(),
+    )
+}
+
+/// Reads a bounded newest suffix of nonempty title text in projected order.
+pub(crate) async fn projected_title_frontier_membership(
+    connection: &mut sqlx::PgConnection,
+    session: SessionId,
+    frontier: ContextFrontierId,
+    limit: i32,
+) -> Result<Vec<SemanticTranscriptEntryRef>, ContextCompactionRepositoryError> {
+    Ok(
+        load_projected_frontier_members(connection, session, frontier, Some(limit))
             .await?
             .into_iter()
             .map(|member| member.reference)
@@ -1306,9 +1327,92 @@ async fn load_projected_frontier_members(
     connection: &mut sqlx::PgConnection,
     session: SessionId,
     frontier: ContextFrontierId,
+    newest_text_limit: Option<i32>,
 ) -> Result<Vec<ProjectedFrontierMember>, ContextCompactionRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT member.member_position, member.source_session_id,
+    // Committed summaries replace prefixes. The last summary precedes the
+    // unsummarized suffix, even though its physical position follows it.
+    let rows = if let Some(limit) = newest_text_limit {
+        sqlx::query(
+            "WITH RECURSIVE ancestry AS (
+                SELECT context_frontier_id, prefix_context_frontier_id
+                  FROM context_frontier
+                 WHERE owning_session_id = $1 AND context_frontier_id = $2
+                UNION
+                SELECT prefix.context_frontier_id, prefix.prefix_context_frontier_id
+                  FROM ancestry JOIN context_frontier AS prefix
+                    ON prefix.owning_session_id = $1
+                   AND prefix.context_frontier_id = ancestry.prefix_context_frontier_id
+             ), summaries AS NOT MATERIALIZED (
+                SELECT member.member_position, member.source_session_id, member.semantic_entry_id,
+                       compaction.through_source_session_id AS through_source,
+                       compaction.through_entry_id AS through_entry
+                  FROM ancestry CROSS JOIN context_compaction AS compaction
+                  JOIN context_frontier_delta AS member
+                    ON member.owning_session_id = $1
+                   AND member.context_frontier_id = ancestry.context_frontier_id
+                   AND member.source_session_id = compaction.session_id
+                   AND member.semantic_entry_id = compaction.summary_entry_id
+             ), projection AS MATERIALIZED (
+                SELECT max(summaries.member_position) AS summary_position,
+                       COALESCE(max(member.member_position) FILTER (WHERE boundary.payload_kind <> 'context_summary'), 0) AS through_position
+                  FROM summaries JOIN semantic_transcript_entry AS boundary
+                    ON boundary.source_session_id = summaries.through_source
+                   AND boundary.semantic_entry_id = summaries.through_entry
+                  JOIN context_frontier_delta AS member
+                    ON member.owning_session_id = $1
+                   AND member.source_session_id = summaries.through_source
+                   AND member.semantic_entry_id = summaries.through_entry
+                  JOIN ancestry ON ancestry.context_frontier_id = member.context_frontier_id
+             ), candidates AS (
+             SELECT candidate.* FROM ancestry CROSS JOIN projection
+             CROSS JOIN LATERAL (
+                SELECT member.member_position, member.source_session_id, member.semantic_entry_id,
+                       entry.payload_kind, entry.tool_result_request_id,
+                       entry.context_summary_first_source_session_id, entry.context_summary_first_entry_id,
+                       entry.context_summary_through_source_session_id, entry.context_summary_through_entry_id,
+                       member.member_position AS projected_position
+                  FROM context_frontier_delta AS member
+                  JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
+                 WHERE member.owning_session_id = $1
+                   AND member.context_frontier_id = ancestry.context_frontier_id
+                   AND entry.payload_kind <> 'context_summary'
+                   AND member.member_position > projection.through_position
+                   AND (CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END <> ''
+                     OR EXISTS (SELECT 1 FROM accepted_input_content_part AS part
+                                 WHERE part.accepted_input_id = entry.origin_accepted_input_id
+                                   AND part.part_kind = 'text' AND part.text_value <> '')
+                     OR EXISTS (SELECT 1 FROM imported_transcript_entry AS imported
+                                 WHERE imported.imported_conversation_id = entry.imported_conversation_id
+                                   AND imported.imported_transcript_entry_id = entry.imported_transcript_entry_id
+                                   AND imported.content_kind = 1 AND octet_length(imported.content_encoding) > $4))
+                 ORDER BY member.member_position DESC
+                 LIMIT $3
+             ) AS candidate
+             UNION ALL
+             SELECT member.member_position, member.source_session_id, member.semantic_entry_id,
+                    entry.payload_kind, entry.tool_result_request_id,
+                    entry.context_summary_first_source_session_id, entry.context_summary_first_entry_id,
+                    entry.context_summary_through_source_session_id, entry.context_summary_through_entry_id,
+                    0 AS projected_position
+               FROM ancestry CROSS JOIN projection
+               JOIN context_frontier_delta AS member
+                 ON member.owning_session_id = $1
+                AND member.context_frontier_id = ancestry.context_frontier_id
+                AND member.member_position = projection.summary_position
+               JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
+              WHERE entry.context_summary_value <> ''
+             )
+             SELECT * FROM candidates ORDER BY projected_position DESC LIMIT $3"
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(frontier.into_uuid())
+        .bind(limit.max(0))
+        .bind(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES)
+        .fetch_all(&mut *connection)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT member.member_position, member.source_session_id,
                 member.semantic_entry_id, entry.payload_kind, entry.tool_result_request_id,
                 entry.context_summary_first_source_session_id,
                 entry.context_summary_first_entry_id,
@@ -1321,11 +1425,12 @@ async fn load_projected_frontier_members(
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
           ORDER BY member.member_position",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(frontier.into_uuid())
-    .fetch_all(&mut *connection)
-    .await?;
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(frontier.into_uuid())
+        .fetch_all(&mut *connection)
+        .await?
+    };
     let mut complete = Vec::with_capacity(rows.len());
     for row in rows {
         let payload_kind: String = row.try_get("payload_kind")?;
@@ -1372,7 +1477,12 @@ async fn load_projected_frontier_members(
             summary_range,
         });
     }
-    project_frontier_members(complete)
+    if newest_text_limit.is_some() {
+        complete.reverse();
+        Ok(complete)
+    } else {
+        project_frontier_members(complete)
+    }
 }
 
 fn project_frontier_members(

@@ -8,6 +8,7 @@ import {
 } from '../e2e/session-detail-fixture'
 import {
   decodeWebSessionTimelineDetailPage,
+  decodeWebSessionTitleSuggestion,
   type WebSessionTimelineDetail,
 } from './generated/web-contract.mjs'
 import { isCompatibleDetailBody } from './SessionItemDetail'
@@ -292,4 +293,23 @@ it('rejects mismatched lifecycle and delegation subtypes', () => {
       detail: { type: 'result_wake', relationship_id: detailSessionId },
     }),
   ).toBe(false)
+})
+
+describe('generated session title decoder', () => {
+  it('accepts titles at the UTF-8 byte boundary', () => {
+    for (const title of [
+      'x'.repeat(256),
+      'é'.repeat(128),
+      '界'.repeat(85) + 'x',
+      '😀'.repeat(64),
+    ]) {
+      expect(decodeWebSessionTitleSuggestion({ title }).title).toBe(title)
+    }
+  })
+
+  it('rejects titles over the UTF-8 byte boundary even when their character count fits', () => {
+    for (const title of ['x'.repeat(257), 'é'.repeat(129), '界'.repeat(86), '😀'.repeat(65)]) {
+      expect(() => decodeWebSessionTitleSuggestion({ title })).toThrow(TypeError)
+    }
+  })
 })
