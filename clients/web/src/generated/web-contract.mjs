@@ -8523,10 +8523,16 @@ function assertTimelineDetailPage(value) {
           }
           if (physical !== null) {
             if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {
+              const media = physical.result_media_reference;
+              const mediaPath = `${path}.body.tools[0].evidence.result_media_reference`;
               assertCanonicalMediaType(
-                physical.result_media_reference.media_type,
-                `${path}.body.tools[0].evidence.result_media_reference.media_type`,
+                media.media_type,
+                `${mediaPath}.media_type`,
               );
+              assertCanonicalU64(media.length_bytes, `${mediaPath}.length_bytes`);
+              if (media.presentation_kind === "document" && media.media_type !== "application/pdf") {
+                fail(`${mediaPath}.media_type`, "application/pdf for document presentation");
+              }
             }
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {

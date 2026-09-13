@@ -3540,6 +3540,7 @@ test("completed tool media requires a MIME type within its UTF-8 byte bound", ()
     media.media_type = value;
     assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a MIME value of at most 255 UTF-8 bytes/);
   }
+  media.presentation_kind = "image";
   media.media_type = `application/${"x".repeat(243)}`;
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
 });
@@ -3553,5 +3554,33 @@ test("completed tool media requires canonical MIME spelling", () => {
       () => decodeWebSessionTimelineDetailPage(page),
       /a canonical lowercase MIME type without parameters/,
     );
+  }
+});
+
+test("completed tool media lengths are positive u64 values", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["1", "18446744073709551615"]) {
+    media.length_bytes = value;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const value of ["0", "01", "-1", "18446744073709551616", "9".repeat(100)]) {
+    media.length_bytes = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+  }
+});
+
+test("completed document media requires PDF while image presentation retains its MIME type", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const value of ["image/png", "text/plain", "application/octet-stream"]) {
+    media.media_type = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /application\/pdf for document presentation/);
+  }
+  media.presentation_kind = "image";
+  for (const value of ["image/png", "application/pdf"]) {
+    media.media_type = value;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
   }
 });
