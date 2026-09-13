@@ -53,6 +53,118 @@ test('rejects contradictory detail kinds and recovers after a corrected retry', 
   await expect(surface.getByRole('alert')).toHaveCount(0)
 })
 
+test('rejects a continued detail kind that contradicts the header of an empty initial page', async ({
+  page,
+}) => {
+  let conflict = true
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    const payload = transcriptFixture(url)
+    if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '100000') {
+      if (!url.searchParams.has('cursor_address'))
+        return route.fulfill({
+          json: {
+            session_id: transcriptSessionId,
+            items: [],
+            projected_body_bytes: 0,
+            continuation: { type: 'more_at', address: { event_sequence: '100000' } },
+          },
+        })
+      if (conflict)
+        return route.fulfill({
+          json: {
+            session_id: transcriptSessionId,
+            projected_body_bytes: 128,
+            continuation: null,
+            items: [
+              {
+                address: { event_sequence: '100000' },
+                kind: 'turn_completed',
+                projected_body_bytes: 128,
+                body: {
+                  type: 'turn_lifecycle',
+                  turn_id: transcriptSessionId,
+                  lifecycle: 'terminalized',
+                  cause_code: 'completed',
+                },
+              },
+            ],
+          },
+        })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  const detail = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await expect(detail.getByRole('alert')).toContainText('Details could not be loaded.')
+  await expect(detail.getByText('Message 100000', { exact: true })).toHaveCount(0)
+  conflict = false
+  await detail.getByRole('button', { name: 'Retry details', exact: true }).click()
+  await expect(detail.getByText('Message 100000', { exact: true })).toBeVisible()
+  await expect(detail.getByRole('alert')).toHaveCount(0)
+})
+
+for (const direction of ['before', 'after'] as const) {
+  test(`retries the failed ${direction} edge without refreshing retained windows`, async ({
+    page,
+  }) => {
+    const reads: string[] = []
+    let attempts = 0
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      if (url.pathname.endsWith('/timeline')) {
+        const anchor = url.searchParams.get('anchor') ?? ''
+        reads.push(`${anchor}:${url.searchParams.get('address') ?? ''}`)
+        if (anchor === direction && attempts++ === 0) return route.abort('failed')
+      }
+      return route.fulfill({ json: transcriptFixture(url, 24) })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+    await expect(transcript.getByText('Message 24', { exact: true })).toBeVisible()
+    if (direction === 'after') {
+      await page.getByRole('button', { name: 'First', exact: true }).click()
+      await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+    }
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    await transcript.evaluate((element, direction) => {
+      element.scrollTop = direction === 'before' ? 0 : element.scrollHeight
+      element.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: direction === 'before' ? -900 : 900,
+          bubbles: true,
+        }),
+      )
+    }, direction)
+    await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+    expect(attempts).toBe(1)
+    const failed = reads.at(-1)
+    const beforeRetry = reads.length
+    await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
+    await expect(transcript).toHaveAttribute('data-total-loaded', '16')
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    await expect(surface.getByRole('alert')).toHaveCount(0)
+    expect(attempts).toBe(2)
+    expect(reads.slice(beforeRetry)).toEqual([failed])
+    await expect(transcript.locator('[data-event-sequence="12"]')).toHaveCount(1)
+  })
+}
+
 test('scrolls a hundred thousand messages in both directions with bounded rows', async ({
   page,
 }, testInfo) => {
