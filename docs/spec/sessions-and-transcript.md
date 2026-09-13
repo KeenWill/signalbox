@@ -609,6 +609,7 @@ response remains visible as a non-final message when its completed-turn closure
 is not loaded. Distinct physical tool attempts remain independently inspectable
 in event order even when they share one request. A failed attempt remains
 labeled as failed with its available cause even when it has no failure excerpt.
+Physical attempts without a result or failure excerpt show their current state.
 Later batch members load on demand at the batch position as separate tool chips.
 A cursor advancing to another member is exposed outside the preceding tool
 disclosure; same-member argument, output and failure fields remain inside that

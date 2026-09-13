@@ -941,3 +941,47 @@ test('identifies a failed physical attempt without detail text after a successfu
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
   expect(problems).toEqual([])
 })
+
+for (const [state, label] of [
+  ['ambiguous', 'Outcome unknown'],
+  ['awaiting_child', 'Waiting for child session'],
+] as const) {
+  test(`shows the ${state} physical attempt state without payload text`, async ({ page }, testInfo) => {
+    const item = toolResultItem()
+    const input = detailItems[0]
+    if (item.body.type !== 'tool_batch' || !input) throw new Error('Tool fixture missing')
+    const tool = item.body.tools[0]
+    if (tool?.evidence.type !== 'physical_attempt') throw new Error('Physical attempt missing')
+    const args = detailExcerpt('{"cmd":"check status"}')
+    const physical: WebSessionTimelineDetail = {
+      ...item,
+      projected_body_bytes: 128 + Number(args.total_bytes),
+      body: {
+        ...item.body,
+        tools: [{
+          ...tool,
+          arguments: args,
+          evidence: {
+            ...tool.evidence, state, effect_posture: 'external_effect', cause: null,
+            result: null, result_present: false, failure: null, failure_present: false,
+          },
+        }],
+      },
+    }
+    await turnApi(page, undefined, [input, physical])
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      return url.searchParams.get('first') === physical.address.event_sequence
+        ? route.fulfill({ json: detailPage([physical]) }) : route.fallback()
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+    const details = transcript.getByRole('region', { name: 'exec_command details', exact: true })
+    await expect(details.getByRole('region', { name: 'Arguments', exact: true })).toContainText(args.text)
+    await expect(details.getByText(label, { exact: true })).toBeVisible()
+    await expect(details.getByRole('region', { name: 'Failure', exact: true })).toHaveCount(0)
+    await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath(`${state}-tool-state.png`) })
+  })
+}
