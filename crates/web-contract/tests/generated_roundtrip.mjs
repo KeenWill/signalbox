@@ -1823,6 +1823,7 @@ test("generated attention decoder enforces collection bounds", () => {
 
 function catalogSummary(overrides = {}) {
   return {
+    repository_watch: null,
     session_id: "00000000-0000-0000-0000-000000000001",
     title_summary: null,
     title_truncated: false,
@@ -1851,6 +1852,9 @@ function catalogSnapshot(overrides = {}) {
 }
 
 test("generated catalog decoder requires explicit nullable boundaries", () => {
+  const withoutOrigin = catalogSummary();
+  delete withoutOrigin.repository_watch;
+  assert.throws(() => decodeWebSessionCatalogSnapshot(catalogSnapshot({ summaries: [withoutOrigin] })), /repository_watch must be present/);
   const withoutAction = catalogSummary();
   delete withoutAction.action;
   const withoutCurrentTurn = catalogSummary();
@@ -3398,6 +3402,8 @@ test("repository watch provenance preserves exact ledger identities and rejects 
     session_id: "00000000-0000-0000-0000-000000000001",
     supervision: null,
     repository_watch: {
+      head_branch: null,
+      base_branch: null,
       dispatch_id: "00000000-0000-0000-0000-000000000063",
       event_id: "00000000-0000-0000-0000-000000000064",
       repository: "signalbox/example", rule_id: "review-response", rule_revision: "3",
@@ -3408,6 +3414,12 @@ test("repository watch provenance preserves exact ledger identities and rejects 
     work: { active_turn_count: "0", queued_turn_count: "0" }, observed_through: "1",
   };
   assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).repository_watch, descriptor.repository_watch);
+  for (const member of ["head_branch", "base_branch"]) {
+    const origin = { ...descriptor.repository_watch };
+    delete origin[member];
+    assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: origin }));
+    assert.throws(() => decodeWebSessionCatalogSnapshot(catalogSnapshot({ summaries: [catalogSummary({ repository_watch: origin })] })));
+  }
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, event_kind: "unknown" } }));
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, action_ordinal: "0" } }));
 });

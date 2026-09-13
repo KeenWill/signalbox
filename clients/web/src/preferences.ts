@@ -1,6 +1,7 @@
 import type { DensityMode, DetailMode, LayoutMode, ThemeMode } from './state'
 
 export interface BrowserPreferences {
+  navigationCollapsed: boolean
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
@@ -10,6 +11,7 @@ export interface BrowserPreferences {
 }
 
 export const defaultBrowserPreferences: BrowserPreferences = {
+  navigationCollapsed: false,
   layout: 'workbench',
   density: 'compact',
   detail: 'condensed',
@@ -94,6 +96,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
   const candidate = value as Record<string, unknown>
   if (
     !exactKeys(candidate, [
+      'navigationCollapsed',
       'layout',
       'density',
       'detail',
@@ -115,7 +118,11 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
   if (!exactKeys(panes, ['navigation', 'inspector'])) {
     throw new TypeError('preferences.paneSizes must match the current exact schema')
   }
+  if (typeof candidate.navigationCollapsed !== 'boolean') {
+    throw new TypeError('preferences.navigationCollapsed must be a boolean')
+  }
   return {
+    navigationCollapsed: candidate.navigationCollapsed,
     layout: oneOf(candidate.layout, ['focus', 'workbench'], 'preferences.layout'),
     density: oneOf(candidate.density, ['compact', 'comfortable'], 'preferences.density'),
     detail: oneOf(candidate.detail, ['full', 'condensed', 'results'], 'preferences.detail'),

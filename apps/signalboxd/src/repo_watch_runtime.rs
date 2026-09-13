@@ -302,6 +302,43 @@ impl RepositoryWatchRuntime {
     ) -> signalbox_module_repo_watch_v2::measurements::IngestionMeasurements {
         self.store.ingestion_measurements(repository)
     }
+    pub(crate) async fn session_origins(
+        &self,
+        sessions: &[signalbox_domain::SessionId],
+        core: &PgPool,
+    ) -> Result<
+        BTreeMap<
+            signalbox_domain::SessionId,
+            signalbox_module_repo_watch_v2::RetainedDispatchAction,
+        >,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        let ids: Vec<_> = sessions.iter().map(|session| session.into_uuid()).collect();
+        let origins: Vec<(uuid::Uuid, uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+            "SELECT session.session_id, session.dispatch_ref, creation.command_id
+               FROM session
+               JOIN create_session_command AS creation
+                 ON creation.created_session_id = session.session_id
+              WHERE session.session_id = ANY($1)
+                AND session.creation_cause = 'module_dispatched'
+                AND session.dispatching_module = 'repo_watch'",
+        )
+        .bind(ids)
+        .fetch_all(core)
+        .await?;
+        let origins: Vec<_> = origins
+            .into_iter()
+            .map(|(session, dispatch, command)| {
+                (
+                    signalbox_session_ownership::SessionId::from_uuid(session),
+                    signalbox_session_ownership::RepoWatchDispatchId::from_uuid(dispatch),
+                    signalbox_session_ownership::DurableCommandId::from_uuid(command),
+                )
+            })
+            .collect();
+        self.store.origins_for_sessions(&origins).await
+    }
+
     pub(crate) async fn session_origin(
         &self,
         session: signalbox_domain::SessionId,
@@ -961,7 +998,7 @@ impl RuntimeState {
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store
-                    .evaluate_next(
+                    .evaluate_pending(
                         repository.repository(),
                         rule,
                         &mut RepositoryWatchDispatchIds,

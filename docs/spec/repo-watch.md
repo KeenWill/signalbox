@@ -297,6 +297,9 @@ initial dispatch per provisioned pull-request head within a rule revision, using
 the existing cooldown. Later check completions on that head are consumed without
 dispatch; new review findings and unfinished-work retries remain eligible.
 
+Each rule evaluation pass consumes eligible retained events through its captured
+tail before retries and checkout provisioning.
+
 An ordinary dispatch closes nonsticky after its turn ends and no accepted work
 remains. The closure rechecks that condition under the session lock; a goal,
 active or queued turn, or pending steering prevents it. Reconciliation includes
@@ -493,6 +496,11 @@ stage use persisted validators. Completed stages and budget-limited attempts
 retain accepted transport pages. A completed reconciliation removes untraversed
 resources and terminal pull-request pages; unchanged responses retain their
 traversed pages.
+
+The web session catalog resolves retained creation provenance with one
+module-store batch per page, using core creation references. Catalog and
+timeline provenance include the head and base branches from the dispatched
+pull-request context.
 
 Reading a session's retained dispatch provenance does not wait for
 repository-watch dispatch processing.
