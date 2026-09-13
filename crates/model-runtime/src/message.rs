@@ -48,6 +48,10 @@ impl ConversationMessage {
 /// One part of a conversation message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessagePart {
+    /// Caller-authenticated durable document reference awaiting bounded materialization.
+    DocumentReference(crate::DocumentReference),
+    /// Materialized document bytes, encoded without local format interpretation.
+    Document(crate::DocumentInput),
     /// Caller-authenticated durable image reference awaiting bounded materialization.
     ImageReference(crate::ImageReference),
     /// Materialized image bytes, encoded without local format interpretation.
