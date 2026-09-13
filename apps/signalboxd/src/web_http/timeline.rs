@@ -165,11 +165,26 @@ pub(super) async fn session_descriptor(
             };
             let summary = match attention.summary(session).await {
                 Ok(Some(summary)) => summary,
-                _ => return session_projection_unavailable(),
+                Ok(None) => {
+                    return super::attention_projection_error(Some(
+                        signalbox_persistence::attention::AttentionCorruption::Missing(
+                            "catalog summary for existing session",
+                        )
+                        .into(),
+                    ));
+                }
+                Err(error) => return super::attention_projection_error(Some(error)),
             };
             let summary = match super::session_catalog::session_catalog_summary_dto(summary) {
                 Ok(summary) => summary,
-                Err(()) => return session_projection_unavailable(),
+                Err(()) => {
+                    return super::attention_projection_error(Some(
+                        signalbox_persistence::attention::AttentionCorruption::Invalid(
+                            "session catalog summary projection",
+                        )
+                        .into(),
+                    ));
+                }
             };
             match descriptor_dto(descriptor, summary) {
                 Ok(mut descriptor) => {
@@ -538,7 +553,7 @@ fn tool_media_projection_error(error: ToolMediaPopulationError) -> Response {
             cause,
             "session timeline media projection read failed"
         ),
-        ToolMediaPopulationError::Unavailable => unreachable!(),
+        ToolMediaPopulationError::Unavailable => return session_projection_unavailable(),
     }
     application_error(
         StatusCode::INTERNAL_SERVER_ERROR,

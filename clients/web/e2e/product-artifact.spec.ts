@@ -296,3 +296,29 @@ test('keeps an event row expanded while operating and dismissing attachment deta
   await expect(row).toHaveAttribute('aria-expanded', 'true')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('rejects descriptor lengths that contradict the timeline attachment', async ({ page }) => {
+  const contradictory = decodeWebBlobDescriptor({
+    ...imageArtifact,
+    byte_length: '33750',
+    available_views: imageArtifact.available_views.map((view) =>
+      view.kind === 'download' || view.kind === 'browser_native'
+        ? { ...view, byte_length: '33750' }
+        : view,
+    ),
+  })
+  await useArtifactScenario(page, contradictory)
+  const contentRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/content/')) contentRequests.push(request.url())
+  })
+  await openAttachmentConversation(page, imageArtifact)
+  const attachments = page.getByRole('list', { name: 'Attachments' })
+  await expect(attachments.getByRole('status')).toContainText('Attachment unavailable')
+  await expect(attachments.getByRole('img')).toHaveCount(0)
+  await expect(attachments.getByRole('link', { name: 'Download', exact: true })).toHaveCount(0)
+  await attachments.getByRole('button').first().click()
+  await expect(pane(page).getByRole('alert')).toContainText(incompatibleDescriptorMessage)
+  await expect(pane(page).getByRole('article')).toHaveCount(0)
+  expect(contentRequests).toEqual([])
+})

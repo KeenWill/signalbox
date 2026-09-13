@@ -926,6 +926,7 @@ export function ProductApp({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || app.overlay !== null) return
       const target = event.target
+      if (!(target instanceof Element) || !target.closest('.product-inspector')) return
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
