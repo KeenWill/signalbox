@@ -359,7 +359,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn title_recovery_keeps_unadmitted_work_as_identifiers() {
+    async fn title_handoff_and_recovery_keep_unadmitted_work_as_identifiers() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
         pool.close().await;
