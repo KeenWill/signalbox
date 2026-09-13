@@ -1854,9 +1854,13 @@ async fn run_hub_incarnation(
     };
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service.clone());
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
+    let runner_pool = pool.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
-        RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
+        RuntimeTaskExit::Runner(tokio::select! {
+            result = runner_runtime.run(runner_shutdown_receiver) => result,
+            () = runner_pool.close_event() => Ok(()),
+        })
     });
     let runner_reconciliation = async {
         tokio::select! {
@@ -3001,6 +3005,28 @@ async fn run_hub_incarnation(
             let runtime = async {
                 if guarded_admission.await.is_err() {
                     return RuntimeStopCause::GuardLost;
+                }
+                if let Some(completed) = runtime_tasks.try_join_next() {
+                    return match completed {
+                        Ok(RuntimeTaskExit::Runner(Err(error))) => {
+                            report_runner_runtime_failure(&error);
+                            RuntimeStopCause::RuntimeFailed
+                        }
+                        Ok(RuntimeTaskExit::Runner(Ok(()))) => {
+                            report_runtime_task_defect(
+                                RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
+                            );
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                        Err(error) => {
+                            report_runtime_task_defect(joined_task_defect(&error));
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                        Ok(_) => {
+                            report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                    };
                 }
                 runner_service.enable_ordinary_enrollment();
                 runtime_tasks.spawn(async move {
