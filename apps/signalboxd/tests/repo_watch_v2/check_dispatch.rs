@@ -8,6 +8,7 @@ fn observation(
 ) -> Result<signalbox_module_repo_watch_v2::ingest::RepositoryObservation, Box<dyn Error>> {
     let mut observed = goal_review_observation(repository, generation);
     let mut pull = RepoWatchPullRequestStateInput {
+        required_check_conclusions: None,
         context: PullRequestEventContext::new(PullRequestEventContextInput {
             number: PullRequestNumber::new(NonZeroU64::MIN),
             head_sha: head.clone(),
@@ -24,6 +25,7 @@ fn observation(
         mergeable_state: MergeableState::Mergeable,
         completed_check_suites: vec![],
         completed_check_runs: vec![],
+        required_check_conclusions: None,
         reviews: vec![],
         threads: vec![],
         reactions: vec![],

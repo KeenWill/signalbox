@@ -307,6 +307,10 @@ preceding dispatch and evaluated event context, and pass through the existing
 singleton and dispatch admission limits; they do not create GitHub change
 events.
 
+A matching review received during a released dispatch's cooldown remains
+eligible after cooldown when unfinished matching work remains, including when
+that dispatch pushed. Admission retains the new review's event provenance.
+
 For `labeled-review-response`, completed check runs and suites admit at most one
 initial dispatch per provisioned pull-request head within a rule revision, using
 the existing cooldown. Later check completions on that head are consumed without

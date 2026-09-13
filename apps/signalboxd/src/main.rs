@@ -2094,7 +2094,7 @@ async fn run_hub_incarnation(
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
-    let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
+    let runner_service = match PostgresRunnerRegistrationService::local(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
             let failure = erase_startup_cause(

@@ -1,7 +1,8 @@
 import { useMutation } from '@tanstack/react-query'
-import { ArrowUp, Paperclip } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { ArrowUp } from 'lucide-react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { invokeCommand } from './commands'
+import { Field } from './Field'
 import type {
   WebSessionTimelineDescriptor,
   WebSubmitInputRequest,
@@ -45,6 +46,31 @@ export function SessionComposer({
   const newInputBlocked = retained === null && capacityReached
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')
+  const messageRef = useRef<HTMLTextAreaElement>(null)
+  const message = retained?.message ?? text
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Measure after the rendered message changes.
+  useLayoutEffect(() => {
+    const field = messageRef.current
+    if (!field) return
+    const resize = () => {
+      field.style.height = 'auto'
+      field.style.height = `${field.scrollHeight}px`
+    }
+    resize()
+    let width = 0
+    let frame = 0
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry || width === entry.contentRect.width) return
+      width = entry.contentRect.width
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(resize)
+    })
+    observer.observe(field)
+    return () => {
+      observer.disconnect()
+      cancelAnimationFrame(frame)
+    }
+  }, [message])
   useEffect(() => {
     if (notice === 'Message accepted' && activeState != null) setNotice('')
   }, [activeState, notice])
@@ -127,16 +153,16 @@ export function SessionComposer({
         invokeSend()
       }}
     >
-      <label className="sr-only" htmlFor="session-message">
-        Message
-      </label>
-      <textarea
+      <Field
+        as="textarea"
+        label="Message"
+        ref={messageRef}
         id="session-message"
-        rows={2}
+        rows={1}
         aria-describedby="session-composer-status session-composer-help"
         placeholder="Write a message…"
         maxLength={MAX_SESSION_MESSAGE_LENGTH}
-        value={retained?.message ?? text}
+        value={message}
         readOnly={retained !== null}
         onKeyDown={(event) => {
           if (
@@ -163,27 +189,38 @@ export function SessionComposer({
         }}
       />
       <div className="session-composer-actions">
-        <span className="session-attachment-affordance" title="File attachments are unavailable">
-          <button
-            type="button"
-            disabled
-            aria-label="Attach files (unavailable)"
-            aria-describedby="session-attachment-help"
-          >
-            <Paperclip aria-hidden="true" />
-          </button>
-          <span id="session-attachment-help">Attachments unavailable</span>
+        <span id="session-composer-help" className="sr-only">
+          Enter to send · Shift+Enter for newline
         </span>
-        <span id="session-composer-help">Enter to send · Shift+Enter for newline</span>
-        <button type="submit" disabled={!canSend} aria-describedby="session-composer-status">
+        <button
+          type="submit"
+          disabled={!canSend}
+          aria-label={
+            retained === null
+              ? 'Send message'
+              : pending?.phase === 'sending'
+                ? 'Sending…'
+                : 'Retry message'
+          }
+          aria-describedby="session-composer-status"
+          title="Enter to send · Shift+Enter for newline"
+        >
           <ArrowUp aria-hidden="true" />
-          {retained === null
-            ? 'Send message'
-            : pending?.phase === 'sending'
-              ? 'Sending…'
-              : 'Retry message'}
+          {retained === null ? 'Send' : pending?.phase === 'sending' ? 'Sending…' : 'Retry'}
         </button>
-        <span id="session-composer-status" role="status">
+        <span
+          id="session-composer-status"
+          role="status"
+          className={
+            activeState === null &&
+            retained === null &&
+            !newInputBlocked &&
+            !notice &&
+            !supervision?.pending
+              ? 'sr-only'
+              : undefined
+          }
+        >
           {supervision?.pending
             ? 'Session recovery required'
             : notice.startsWith('Message rejected:')

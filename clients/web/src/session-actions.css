@@ -1,8 +1,13 @@
 .session-actions {
   display: grid;
+  flex: none;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--product-space);
   font-size: 0.75rem;
+}
+
+.session-actions > .session-compact-header {
+  padding: calc(var(--product-space) / 2) var(--product-space);
 }
 
 .session-action-buttons,

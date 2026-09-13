@@ -90,6 +90,16 @@ pub struct SessionRunnerPlacementRequest {
     pub permission_overrides: RunnerToolPermissionOverrides,
 }
 
+impl SessionRunnerPlacementRequest {
+    /// Checks placement availability without pinning or issuing execution authority.
+    pub fn validate_registration(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> Result<(), RunnerDomainError> {
+        validate_placement_request(self, registration)
+    }
+}
+
 /// Last credential-grant identity carried by a pinned placement lineage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerCredentialGrantLineage {
