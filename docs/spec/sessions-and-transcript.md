@@ -502,7 +502,8 @@ Initial-title installation and terminal call evidence commit atomically.
 PATCH route. Generation continues through settlement if the requesting browser
 disconnects or cancels. Recovery after guard loss aborts and drains all title
 work. At most four title tasks run at once; recovery prepares each conversation
-inside an admitted task without blocking reservation reconciliation.
+inside an admitted task without blocking reservation reconciliation. A full
+initial-title handoff defers work instead of waiting for title execution.
 Conversation-read and credential-read failures abandon unsent title claims.
 Title calls record their target, credentials, send boundary, completion, and
 reported token axes as session-level `session_title` usage evidence. Runtime

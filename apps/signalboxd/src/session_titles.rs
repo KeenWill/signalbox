@@ -82,17 +82,18 @@ impl SessionTitles {
 
     pub(crate) async fn submit_initial(&self, prepared: PreparedTitle) {
         let call = prepared.call.call;
+        let session = prepared.call.session;
+        let initial_for_turn = prepared.call.initial_for_turn;
         let titles = self.clone();
-        if !self
-            .processes
-            .submit_title(Box::pin(async move {
-                if let Err(error) = titles.generate_prepared(prepared).await {
-                    tracing::warn!(?error, "initial session title generation failed");
-                }
-            }))
-            .await
-        {
+        if !self.processes.submit_title(Box::pin(async move {
+            if let Err(error) = titles.generate_prepared(prepared).await {
+                tracing::warn!(?error, "initial session title generation failed");
+            }
+        })) {
             self.close_before_send(call, TitleError::Unavailable).await;
+            if let Some(turn) = initial_for_turn {
+                self.defer_initial(session, turn);
+            }
         }
     }
 
