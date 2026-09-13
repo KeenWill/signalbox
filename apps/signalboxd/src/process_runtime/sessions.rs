@@ -1,27 +1,5 @@
 use super::*;
 
-async fn admit_runner_placement(
-    placement: Option<&signalbox_domain::SessionRunnerPlacementRequest>,
-    services: &ConnectionServices,
-) -> Result<(), ProtocolError> {
-    use signalbox_persistence::runner_protocol::{RunnerProtocolStore, RunnerProtocolStoreError};
-    let Some(placement) = placement else {
-        return Ok(());
-    };
-    let catalog = crate::runner_protocol_runtime::local_runner_catalog()
-        .map_err(|_| ProtocolError::without_detail(ErrorCode::Internal))?;
-    RunnerProtocolStore::new(services.pool.clone(), catalog)
-        .validate_creation_placement(placement)
-        .await
-        .map_err(|error| match error {
-            RunnerProtocolStoreError::Domain(_) => {
-                ProtocolError::without_detail(ErrorCode::InvalidRequest)
-            }
-            RunnerProtocolStoreError::Database(_) => ProtocolError::mutation_unavailable(false),
-            _ => ProtocolError::without_detail(ErrorCode::Internal),
-        })
-}
-
 pub(super) struct WireCreateSessionRequest {
     pub(super) command_uuid: uuid::Uuid,
     pub(super) initial_model_selection: WireModelSelection,
@@ -224,7 +202,10 @@ where
             )
             .await;
         }
-        Err(CreateSessionRepositoryError::Corruption(_)) => {
+        Err(
+            CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected,
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -236,9 +217,6 @@ where
             )
             .await;
         }
-    }
-    if let Err(error) = admit_runner_placement(runner_placement.as_ref(), services).await {
-        return write_error(writer, version, request_id, error).await;
     }
     let model_settings = match validate_session_model_settings(
         services.model_configuration.as_ref(),
@@ -418,7 +396,10 @@ where
             )
             .await;
         }
-        Err(CreateSessionRepositoryError::Corruption(_)) => {
+        Err(
+            CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected,
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -432,9 +413,6 @@ where
         }
     }
 
-    if let Err(error) = admit_runner_placement(runner_placement.as_ref(), services).await {
-        return write_error(writer, version, request_id, error).await;
-    }
     let Some(template) = services.template_configuration.resolve(&template_name) else {
         return write_error(
             writer,
@@ -631,9 +609,19 @@ where
         };
         return write_error(writer, version, request_id, refusal).await;
     };
-    if let Err(error) = admit_runner_placement(request.runner_placement(), services).await {
-        return write_error(writer, version, request_id, error).await;
-    }
+    let catalog = match crate::runner_protocol_runtime::local_runner_catalog() {
+        Ok(catalog) => catalog,
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    let store = store.with_runner_placement_catalog(catalog);
     let mut ids = UuidV7CommissionedDispatchIdGenerator;
     let Ok(prepared) = request.prepare(
         &mut ids,
@@ -699,6 +687,17 @@ where
             )
             .await
         }
+        Err(CommissionedDispatchRepositoryError::SessionCreation(
+            CreateSessionRepositoryError::RunnerPlacementRejected,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
         Err(error) => {
             let protocol_error = match commission_failure_ambiguity(&error) {
                 Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
@@ -725,7 +724,8 @@ pub(super) fn commission_failure_ambiguity(
             CreateSessionRepositoryError::Database(_) => Some(false),
             CreateSessionRepositoryError::CommitAmbiguous(_) => Some(true),
             CreateSessionRepositoryError::DifferentCommandKind { .. }
-            | CreateSessionRepositoryError::Corruption(_) => None,
+            | CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected => None,
         },
         CommissionedDispatchRepositoryError::InitialInput(error) => match error {
             SubmitInputRepositoryError::Database(_)
@@ -972,6 +972,7 @@ where
             if command.initial_configuration_defaults() == request.initial_configuration_defaults()
                 && command.template_provenance() == request.template_provenance()
                 && command.placement() == request.placement()
+                && command.runner_placement() == request.runner_placement()
                 && command.start_gate() == request.start_gate()
                 && command.ownership() == request.ownership()
                 && command.finish_condition() == request.finish_condition()
@@ -1014,7 +1015,10 @@ where
             )
             .await;
         }
-        Err(CreateSessionRepositoryError::Corruption(_)) => {
+        Err(
+            CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected,
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -1041,6 +1045,20 @@ where
         .await;
     }
 
+    let catalog = match crate::runner_protocol_runtime::local_runner_catalog() {
+        Ok(catalog) => catalog,
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    let repository = repository.with_runner_placement_catalog(catalog);
+
     let model_settings = request.initial_configuration_defaults().model_settings();
     let mut service = CreateSessionService::new(UuidV7SessionIdGenerator, repository);
     match service.execute(request).await {
@@ -1062,6 +1080,17 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(CreateSessionError::Transaction(
+            CreateSessionRepositoryError::RunnerPlacementRejected,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
             )
             .await
         }

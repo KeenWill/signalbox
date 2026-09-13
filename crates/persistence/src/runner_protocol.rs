@@ -1721,39 +1721,6 @@ impl RunnerProtocolStore {
         Ok(loaded)
     }
 
-    /// Checks an unpinned creation request against the active local registration.
-    pub async fn validate_creation_placement(
-        &self,
-        request: &SessionRunnerPlacementRequest,
-    ) -> Result<(), RunnerProtocolStoreError> {
-        let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let row = sqlx::query(
-            "SELECT enrollment.enrollment_id, registration.registration_revision
-             FROM runner_enrollment AS enrollment
-             JOIN runner_current_registration AS registration USING (enrollment_id)
-             WHERE enrollment.state_kind = 'active'",
-        )
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::SelectorMismatch,
-        ))?;
-        let registration = load_registration_in(
-            transaction.as_mut(),
-            runner_enrollment_id(row.decode_column("enrollment_id")?),
-            decode_registration_revision(row.decode_column("registration_revision")?)?,
-            None,
-            &self.catalog,
-        )
-        .await?
-        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-        request
-            .validate_registration(registration.registration())
-            .map_err(RunnerProtocolStoreError::Domain)?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
     /// Appends one domain-validated placement snapshot and optional grant.
     pub async fn store_placement(
         &self,
@@ -6764,6 +6731,38 @@ fn placement_loss_fence_runner(placement: &SessionRunnerPlacement) -> Option<Run
             Some(lost.pinned().runner)
         }
     }
+}
+
+pub(crate) async fn validate_creation_placement(
+    connection: &mut PgConnection,
+    catalog: &RunnerCatalog,
+    request: &SessionRunnerPlacementRequest,
+) -> Result<(), RunnerProtocolStoreError> {
+    let enrollment: Uuid = sqlx::query_scalar(crate::lock_inventory::RUNNER_CREATION_ENROLLMENT)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::SelectorMismatch,
+        ))?;
+    let revision: Decimal = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+        .bind(enrollment)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::SelectorMismatch,
+        ))?;
+    let registration = load_registration_in(
+        connection,
+        runner_enrollment_id(enrollment),
+        decode_registration_revision(revision)?,
+        None,
+        catalog,
+    )
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    request
+        .validate_registration(registration.registration())
+        .map_err(RunnerProtocolStoreError::Domain)
 }
 
 async fn lock_runner_placement_loss_baseline(

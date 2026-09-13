@@ -95,6 +95,75 @@ fn requests(
     ]
 }
 
+// Fixture timing only bounds observation of PostgreSQL's blocking dependency.
+async fn wait_for_blocked_creation(pool: &PgPool, blocker_pid: i32) -> Result<(), Box<dyn Error>> {
+    const WAIT: Duration = Duration::from_secs(10);
+    const POLL: Duration = Duration::from_millis(10);
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn creation_holds_runner_admission_locks_through_placement_insertion()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let enrollment = enroll_echo(&runtime).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    for kind in 0..3 {
+        let request = requests(command()?, Some(placement()))[kind].clone();
+        let mut blocker = runtime.pool.begin().await?;
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await?;
+        sqlx::query("LOCK TABLE runner_session_placement_record IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await?;
+        connection.request(1, request.clone()).await?;
+        wait_for_blocked_creation(&runtime.pool, blocker_pid).await?;
+
+        for query in [
+            "SELECT enrollment_id FROM runner_enrollment WHERE enrollment_id = $1 FOR UPDATE NOWAIT",
+            "SELECT enrollment_id FROM runner_current_registration WHERE enrollment_id = $1 FOR UPDATE NOWAIT",
+        ] {
+            let error = sqlx::query(query)
+                .bind(enrollment.into_uuid())
+                .fetch_one(&runtime.pool)
+                .await
+                .expect_err("creation retains runner admission locks through insertion");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("55P03"),
+                "request: {request:?}; lock: {query}",
+            );
+        }
+        blocker.rollback().await?;
+        assert!(matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::SessionCreated { .. } | ServerMessage::SessionCommissioned { .. }
+        ));
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn all_creation_verbs_retain_unpinned_placement_and_compare_it_on_replay()

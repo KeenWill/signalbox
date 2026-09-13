@@ -146,6 +146,7 @@ impl From<sqlx::Error> for CommissionedDispatchRepositoryError {
 pub struct PostgresCommissionedDispatchStore {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
+    runner_placement_catalog: Option<signalbox_domain::RunnerCatalog>,
 }
 
 impl PostgresCommissionedDispatchStore {
@@ -154,7 +155,17 @@ impl PostgresCommissionedDispatchStore {
         Self {
             pool,
             credential_pin,
+            runner_placement_catalog: None,
         }
+    }
+
+    /// Checks requested runner placement under locks held through commission commit.
+    pub fn with_runner_placement_catalog(
+        mut self,
+        catalog: signalbox_domain::RunnerCatalog,
+    ) -> Self {
+        self.runner_placement_catalog = Some(catalog);
+        self
     }
 
     /// Loads the committed commission a create-command identity names, if any.
@@ -342,6 +353,7 @@ impl PostgresCommissionedDispatchStore {
             &mut transaction,
             prepared_session,
             &self.credential_pin,
+            self.runner_placement_catalog.as_ref(),
         )
         .await
         .map_err(CommissionedDispatchRepositoryError::SessionCreation)?;

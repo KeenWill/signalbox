@@ -485,10 +485,6 @@ impl runner_protocol::RunnerProtocolStore {
         option::Option<runner_protocol::StoredValidatedRunnerRegistration>,
         runner_protocol::RunnerProtocolStoreError,
     >;
-    pub async fn validate_creation_placement(
-        &self,
-        request: &signalbox_domain::SessionRunnerPlacementRequest,
-    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn store_placement(
         &self,
         placement: &signalbox_domain::SessionRunnerPlacement,
