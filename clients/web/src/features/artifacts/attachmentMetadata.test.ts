@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { attachmentTypeLabel } from '../../ArtifactInspector'
+import { decodeWebBlobDescriptor } from '../../generated/web-contract.mjs'
+import { fallbackDescriptor } from './artifactScenario'
 import { attachmentDescriptorMediaType } from './attachmentMetadata'
 
 describe('attachment descriptor media types', () => {
   it.each([
     'garbage',
+    'text/plain; charset=utf-8   ',
+    String.raw`image/png;x="a\"b"`,
+    'image/png  ;x=y ;z=t',
+    'image/png ;x=y',
     String.raw`image/png;x="abc\"`,
     'image/png;',
     'image/png; ',
@@ -20,17 +26,27 @@ describe('attachment descriptor media types', () => {
   })
   it.each([
     'image/png',
-    'image/png ;x=y',
-    'image/png  ;x=y ;z=t',
     String.raw`image/png;x="a\z"`,
-    String.raw`image/png;x="a\"b"`,
     String.raw`image/png;x="a\\z"`,
     'application/vnd.example+json',
     'text/plain; charset=utf-8',
-    'text/plain; charset=utf-8   ',
     'text/plain; charset="utf-8"',
   ])('preserves MIME label %s', (label) => {
     expect(attachmentDescriptorMediaType(label)).toBe(label)
+    expect(() =>
+      decodeWebBlobDescriptor({
+        ...fallbackDescriptor,
+        declared_media_type: label,
+        available_views: fallbackDescriptor.available_views.map((view) => ({
+          ...view,
+          media_type: label,
+          content_url: view.content_url.replace(
+            /media_type=[^&]*/u,
+            `media_type=${encodeURIComponent(label)}`,
+          ),
+        })),
+      }),
+    ).not.toThrow()
   })
 })
 

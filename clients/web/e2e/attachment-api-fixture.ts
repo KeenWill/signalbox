@@ -108,6 +108,13 @@ export async function openAttachmentConversation(
   )
   await page.route(`**/api/sessions/${detailSessionId}**`, (route) => {
     const url = new URL(route.request().url())
+    const turnAddress = url.pathname.includes('/turns/')
+      ? url.searchParams.get('cursor_address')
+      : null
+    if (turnAddress) {
+      url.searchParams.set('first', turnAddress)
+      url.searchParams.set('through', turnAddress)
+    }
     if (url.pathname.endsWith('/live')) return route.fulfill({ json: detailLive })
     if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: timelineWindow })
     if (toolMedia && url.pathname.endsWith('/timeline-detail')) {
