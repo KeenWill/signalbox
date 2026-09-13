@@ -48,6 +48,16 @@ const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const MAX_CACHED_SESSION_WORKSPACES = 4
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
 
+function createSessionActionCommandId() {
+  // UUID v4 uses 16 random bytes with the version and variant bits fixed.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  const hex = Array.from(bytes, (byte, index) => {
+    const value = index === 6 ? (byte & 0x0f) | 0x40 : index === 8 ? (byte & 0x3f) | 0x80 : byte
+    return value.toString(16).padStart(2, '0')
+  }).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 function SessionActions({
   sessionId,
   pendingRequest,
@@ -145,7 +155,7 @@ function SessionActions({
     if (inFlight.current || sending || capacityReached) return
     let action = retained
     if (!action) {
-      const command_id = crypto.randomUUID()
+      const command_id = createSessionActionCommandId()
       if ((choice === 'approve' || choice === 'deny') && chosenRequest) {
         action = {
           kind: 'approval',
@@ -153,7 +163,8 @@ function SessionActions({
           input: {
             command_id,
             decision: choice,
-            note: choice === 'deny' && text.trim() ? text.trim() : null,
+            // ToolDenialReason preserves non-POSIX whitespace, including NBSP.
+            note: choice === 'deny' && /[^ \t\n\v\f\r]/.test(text) ? text : null,
           },
         }
       } else if (choice === 'cancel' && chosenTurn && text.trim()) {

@@ -49,7 +49,38 @@ test('a denial shows the daemon rejection', async ({ page }) => {
   )
 })
 
-test('goal retry keeps its original command and statement', async ({ page }) => {
+for (const denial of [
+  {
+    name: 'preserves NBSP edges',
+    text: '\u00a0Outside the requested work\u00a0',
+    note: '\u00a0Outside the requested work\u00a0',
+  },
+  { name: 'preserves NBSP only', text: '\u00a0', note: '\u00a0' },
+  { name: 'omits POSIX whitespace only', text: ' \t\n\v\f', note: null },
+]) {
+  test(`denial submission ${denial.name}`, async ({ page }) => {
+    const api = await sessionApi(page, true)
+    api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    const requests: unknown[] = []
+    await page.route(`**/api/sessions/${sessionId}/approvals/${requestId}`, (route) => {
+      requests.push(route.request().postDataJSON())
+      return route.fulfill({ status: 204 })
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: 'Deny', exact: true }).click()
+    await page.getByRole('textbox', { name: 'Note (optional)' }).fill(denial.text)
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    expect(requests).toEqual([
+      { command_id: expect.any(String), decision: 'deny', note: denial.note },
+    ])
+  })
+}
+
+test('goal retry keeps its original command and statement without randomUUID', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined })
+  })
   await sessionApi(page)
   const requests: unknown[] = []
   await page.route(`**/api/sessions/${sessionId}/goal`, (route) => {
@@ -64,7 +95,12 @@ test('goal retry keeps its original command and statement', async ({ page }) => 
   await page.getByRole('button', { name: 'Retry same action' }).click()
   await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
   expect(requests).toHaveLength(2)
-  expect(requests[0]).toEqual({ command_id: expect.any(String), statement: goalStatement })
+  expect(requests[0]).toEqual({
+    command_id: expect.stringMatching(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    ),
+    statement: goalStatement,
+  })
   expect(requests[1]).toEqual(requests[0])
 })
 
