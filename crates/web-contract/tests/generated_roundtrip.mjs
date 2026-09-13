@@ -3497,3 +3497,33 @@ test("session supervision preserves retained evidence and rejects unknown classe
   const { supervision, ...missing } = descriptor;
   assert.throws(() => decodeWebSessionTimelineDescriptor(missing));
 });
+
+
+test("completed tool media preserves document presentation", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const media = {
+    digest: `sha256:${"01".repeat(32)}`, media_type: "application/pdf",
+    presentation_kind: "document", length_bytes: "64",
+  };
+  page.items[0].body = {
+    type: "tool_batch", turn_id: page.session_id,
+    producing_model_call_id: "00000000-0000-0000-0000-000000000993",
+    state: { type: "results_projected", frontier_id: "00000000-0000-0000-0000-000000000996" },
+    projected_member_index: 0, goal_events: [],
+    tools: [{
+      request_id: "00000000-0000-0000-0000-000000000995", tool_name: "file_read",
+      arguments: null, approval_posture: "auto", approval_judge_escalated: false,
+      evidence: {
+        type: "physical_attempt", attempt_id: "00000000-0000-0000-0000-000000000994",
+        result_present: true, failure_present: false, effect_posture: "effect_free",
+        state: "completed", result_media_reference: media,
+        result: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+      },
+    }],
+  };
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  media.presentation_kind = "unknown";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});

@@ -1309,6 +1309,7 @@ pub enum WebTimelineToolFailureCause {
 #[serde(rename_all = "snake_case")]
 pub enum WebTimelineMediaPresentationKind {
     Image,
+    Document,
 }
 
 /// Immutable presented bytes, fetched through the existing blob content route.

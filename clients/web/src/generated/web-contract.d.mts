@@ -695,7 +695,7 @@ export type WebTimelineImportedEvidence = {
 
 export type WebTimelineImportedRelationship = "resume" | "fork";
 
-export type WebTimelineMediaPresentationKind = "image";
+export type WebTimelineMediaPresentationKind = "image" | "document";
 
 export type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
 

@@ -661,7 +661,14 @@ fn tool_media_reference_dto(
     Ok(signalbox_web_contract::WebTimelineToolMediaReference {
         digest: WebBlobId::from_canonical(reference.presented().digest().to_string()).ok_or(())?,
         media_type: reference.presented().media_type().to_owned(),
-        presentation_kind: signalbox_web_contract::WebTimelineMediaPresentationKind::Image,
+        presentation_kind: match reference.kind() {
+            signalbox_domain::ToolMediaKind::Image => {
+                signalbox_web_contract::WebTimelineMediaPresentationKind::Image
+            }
+            signalbox_domain::ToolMediaKind::Document => {
+                signalbox_web_contract::WebTimelineMediaPresentationKind::Document
+            }
+        },
         length_bytes: signalbox_web_contract::WebPositiveU64::from_nonzero(reference.byte_length()),
     })
 }
@@ -1887,6 +1894,35 @@ mod tests {
             json,
             serde_json::json!({
                 "digest": presented.digest().to_string(), "media_type": "image/png", "presentation_kind": "image", "length_bytes": "64"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_media_preserves_document_presentation() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+        };
+        let identity = MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([1; 32]),
+            "application/pdf".into(),
+            "fixture".into(),
+            "reader".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .expect("validated document");
+        let reference = ToolMediaReference::direct_document(
+            identity.clone(),
+            std::num::NonZeroU64::new(64).expect("positive length"),
+        )
+        .expect("document reference");
+        let dto = tool_media_reference_dto(reference).expect("media DTO");
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialized reference"),
+            serde_json::json!({
+                "digest": identity.digest().to_string(), "media_type": "application/pdf",
+                "presentation_kind": "document", "length_bytes": "64"
             })
         );
     }

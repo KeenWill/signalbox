@@ -5707,7 +5707,8 @@ const schemas = {
       "WebTimelineMediaPresentationKind": {
         "description": "Presentation supported by retained tool-result media evidence.",
         "enum": [
-          "image"
+          "image",
+          "document"
         ],
         "type": "string"
       },

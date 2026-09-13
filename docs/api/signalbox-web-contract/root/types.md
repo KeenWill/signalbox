@@ -1019,6 +1019,7 @@ pub enum WebTimelineToolFailureCause {
 ```rust
 pub enum WebTimelineMediaPresentationKind {
     Image,
+    Document,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
