@@ -601,12 +601,14 @@ readers retain their cursor, current page and validation predecessor above
 virtual rows until closed or evicted from the retained windows. A row containing
 the focused control stays mounted. Failed loads show the failure without an
 empty-conversation message. Retrying a failed edge read repeats that earlier or
-later request; other failures retry the retained read. Scrolling again starts a
-fresh bounded scan using the timeline continuation. The conversation shows user
-and assistant text and attachment references, tool arguments and output, and
-unsuccessful turn outcomes in event order. Repeated terminal outcomes for the
-same turn and cause appear once. Bookkeeping is hidden until Events is selected.
-Raw detail pages remain available to validate body continuations.
+later request with its remaining scan allowance; success or a fresh scroll
+releases that allowance. Other failures retry the retained read. Scrolling again
+starts a fresh bounded scan using the timeline continuation. The conversation
+shows user and assistant text and attachment references, tool arguments and
+output, and unsuccessful turn outcomes in event order. Repeated terminal
+outcomes for the same turn and cause appear once. Bookkeeping is hidden until
+Events is selected. Raw detail pages remain available to validate body
+continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

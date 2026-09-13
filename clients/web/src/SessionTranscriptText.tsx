@@ -186,10 +186,13 @@ function TranscriptWindow({
       pageRead.current = true
       const fetchPage =
         direction === 'before' ? transcript.fetchPreviousPage : transcript.fetchNextPage
-      void fetchPage().finally(() => {
-        pageRead.current = false
-        automaticLimits.current = undefined
-      })
+      void fetchPage()
+        .then((result) => {
+          if (!result.isError) automaticLimits.current = undefined
+        })
+        .finally(() => {
+          pageRead.current = false
+        })
     },
     [transcript.fetchPreviousPage, transcript.fetchNextPage],
   )
@@ -419,6 +422,7 @@ function TranscriptWindow({
           if (direction === 'before') followLatest.current = false
           scanDirection.current = direction
           emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
+          automaticLimits.current = undefined
           readPage(direction)
         }}
         renderRow={(index, measure, style) => {
