@@ -275,9 +275,14 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
             }
             for part in &message.parts {
                 match part {
-                    MessagePart::Image(_) | MessagePart::ImageReference(_) => {
+                    MessagePart::Image(_)
+                    | MessagePart::ImageReference(_)
+                    | MessagePart::Document(_)
+                    | MessagePart::DocumentReference(_) => {
                         return Err(PreparationFailure::UnsupportedOperation {
-                            detail: String::from("this adapter does not present images"),
+                            detail: String::from(
+                                "this adapter does not present images or documents",
+                            ),
                         });
                     }
                     MessagePart::ToolResult(result) => {
@@ -430,8 +435,13 @@ fn wire_messages(
     let mut parts = message.parts.iter().peekable();
     while let Some(part) = parts.next() {
         match part {
-            MessagePart::Image(_) | MessagePart::ImageReference(_) => {
-                return Err(unsupported("this adapter does not present images"));
+            MessagePart::Image(_)
+            | MessagePart::ImageReference(_)
+            | MessagePart::Document(_)
+            | MessagePart::DocumentReference(_) => {
+                return Err(unsupported(
+                    "this adapter does not present images or documents",
+                ));
             }
             MessagePart::Text(text) => {
                 let mut content = text.clone();

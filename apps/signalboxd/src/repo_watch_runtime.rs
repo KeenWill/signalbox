@@ -197,6 +197,50 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    /// Loads task data from the immutable create action and its triggering event.
+    pub async fn approval_judge_task(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<Option<serde_json::Value>, signalbox_module_repo_watch_v2::StoreError> {
+        use signalbox_module_repo_watch_v2::StoreError;
+        let core = self.state.lock().await.core_pool.clone();
+        let origin = signalbox_persistence::session::SessionRepository::new(core)
+            .repository_watch_creation_dispatch(session)
+            .await
+            .map_err(|error| match error {
+                signalbox_persistence::session::SessionRepositoryError::Database(error) => {
+                    StoreError::Database(error)
+                }
+                signalbox_persistence::session::SessionRepositoryError::Corruption(_) => {
+                    StoreError::InvalidRetainedCommand
+                }
+            })?;
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
+        let action = self
+            .store
+            .origin_for_create_command(origin.dispatch, origin.command)
+            .await?
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        let checkout = self
+            .store
+            .dispatch_checkout(origin.command)
+            .await?
+            .ok_or(StoreError::InvalidRetainedCommand)?;
+        if checkout.dispatch != origin.dispatch {
+            return Err(StoreError::InvalidRetainedCommand);
+        }
+        let parameters = signalbox_module_repo_watch_v2::normalized_event_payload(&checkout.event);
+        Ok(Some(serde_json::json!({
+            "repository": action.repository().as_str(),
+            "pull_request": action.pull_request().map(|number| number.get()),
+            "rule_id": action.rule_id().as_str(),
+            "event_kind": parameters["kind"]["name"],
+            "parameters": parameters,
+        })))
+    }
+
     /// Loads the pull-request fence retained for the session's creation dispatch.
     pub async fn approval_judge_authority(
         &self,
@@ -258,6 +302,43 @@ impl RepositoryWatchRuntime {
     ) -> signalbox_module_repo_watch_v2::measurements::IngestionMeasurements {
         self.store.ingestion_measurements(repository)
     }
+    pub(crate) async fn session_origins(
+        &self,
+        sessions: &[signalbox_domain::SessionId],
+        core: &PgPool,
+    ) -> Result<
+        BTreeMap<
+            signalbox_domain::SessionId,
+            signalbox_module_repo_watch_v2::RetainedDispatchAction,
+        >,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        let ids: Vec<_> = sessions.iter().map(|session| session.into_uuid()).collect();
+        let origins: Vec<(uuid::Uuid, uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+            "SELECT session.session_id, session.dispatch_ref, creation.command_id
+               FROM session
+               JOIN create_session_command AS creation
+                 ON creation.created_session_id = session.session_id
+              WHERE session.session_id = ANY($1)
+                AND session.creation_cause = 'module_dispatched'
+                AND session.dispatching_module = 'repo_watch'",
+        )
+        .bind(ids)
+        .fetch_all(core)
+        .await?;
+        let origins: Vec<_> = origins
+            .into_iter()
+            .map(|(session, dispatch, command)| {
+                (
+                    signalbox_session_ownership::SessionId::from_uuid(session),
+                    signalbox_session_ownership::RepoWatchDispatchId::from_uuid(dispatch),
+                    signalbox_session_ownership::DurableCommandId::from_uuid(command),
+                )
+            })
+            .collect();
+        self.store.origins_for_sessions(&origins).await
+    }
+
     pub(crate) async fn session_origin(
         &self,
         session: signalbox_domain::SessionId,
@@ -917,7 +998,7 @@ impl RuntimeState {
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store
-                    .evaluate_next(
+                    .evaluate_pending(
                         repository.repository(),
                         rule,
                         &mut RepositoryWatchDispatchIds,

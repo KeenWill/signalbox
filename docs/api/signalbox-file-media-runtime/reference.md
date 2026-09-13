@@ -20,6 +20,7 @@ impl MediaValidationIdentity {
 ```rust
 pub enum MediaPresentationKind {
     Image,
+    Document,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -30,7 +31,7 @@ pub enum MediaPresentationKind {
 pub struct FileMediaReference {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl FileMediaReference {
-    pub fn large_image_description(&self) -> value::Value;
+    pub fn large_image_description(&self) -> option::Option<value::Value>;
     pub const fn presented(&self) -> &MediaValidationIdentity;
     pub const fn source(&self) -> &MediaValidationIdentity;
     pub const fn byte_length(&self) -> nonzero::NonZeroU64;

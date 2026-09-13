@@ -212,6 +212,19 @@ export type WebProviderModelCallFailureCause = "credential_rejected" | "permissi
 
 export type WebRepositoryWatchEventKind = "pull_request_opened" | "pull_request_closed" | "pull_request_merged" | "head_changed" | "mergeable_state_changed" | "checks_completed" | "check_run_completed" | "branch_workflow_run_completed" | "review_submitted" | "thread_opened" | "thread_resolved" | "labeled" | "unlabeled" | "base_advanced" | "reaction_changed";
 
+export type WebRepositoryWatchProvenance = {
+  readonly action_ordinal: WebPositiveU64;
+  readonly base_branch: string | null;
+  readonly dispatch_id: WebLiveResourceId;
+  readonly event_id: WebLiveResourceId;
+  readonly event_kind: WebRepositoryWatchEventKind;
+  readonly head_branch: string | null;
+  readonly pull_request: string | null;
+  readonly repository: string;
+  readonly rule_id: string;
+  readonly rule_revision: WebPositiveU64;
+};
+
 export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
 export type WebSearchHighlight = {
@@ -281,6 +294,7 @@ export type WebSessionCatalogSummary = {
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebSessionCatalogActivity;
   readonly queued_turn_count: WebU64;
+  readonly repository_watch: WebRepositoryWatchProvenance | null;
   readonly session_id: WebSessionId;
   readonly state: WebAttentionState;
   readonly title_summary: string | null;
@@ -458,6 +472,36 @@ export type WebSessionWorkFacts = {
 };
 
 export type WebSessionWorkspaceRootKind = "derived" | "configured" | "provisioned";
+
+export type WebTemplateApprovalPosture = "auto" | "delegated" | "human";
+
+export type WebTemplateSourceKind = "template" | "review_library";
+
+export type WebTemplateSummary = {
+  readonly dangerous_tool_auto_approval: boolean;
+  readonly digest: string;
+  readonly model: WebModelSelection;
+  readonly model_label: string;
+  readonly name: string;
+  readonly version: WebPositiveU64;
+  readonly workflow_tools: ReadonlyArray<WebTemplateWorkflowTool>;
+};
+
+export type WebTemplateWorkflowGrant = {
+  readonly enabled: boolean;
+  readonly kind: "enabled";
+} | {
+  readonly kind: "all_registrations";
+} | {
+  readonly kind: "registrations";
+  readonly names: ReadonlyArray<string>;
+};
+
+export type WebTemplateWorkflowTool = {
+  readonly grant: WebTemplateWorkflowGrant;
+  readonly name: string;
+  readonly posture: WebTemplateApprovalPosture;
+};
 
 export type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
@@ -959,6 +1003,22 @@ export type WebSubmitInputRequest = {
   readonly message: string;
 };
 
+export type WebCreateSessionRequest = {
+  readonly command_id: string;
+  readonly first_input?: WebSubmitInputRequest | null;
+  readonly template_name: string;
+};
+
+export type WebCreateSessionResponse = {
+  readonly session_id: WebSessionId;
+  readonly summary: WebSessionCatalogSummary;
+};
+
+export type WebSessionTitleRequest = {
+  readonly command_id: string;
+  readonly title: string;
+};
+
 export type WebContractExample = {
   readonly message: string;
   readonly request_id: string;
@@ -982,9 +1042,11 @@ export type WebSessionTimelineDescriptor = {
   readonly observed_through: WebU64;
   readonly repository_watch: {
   readonly action_ordinal: WebPositiveU64;
+  readonly base_branch: string | null;
   readonly dispatch_id: WebLiveResourceId;
   readonly event_id: WebLiveResourceId;
   readonly event_kind: WebRepositoryWatchEventKind;
+  readonly head_branch: string | null;
   readonly pull_request: string | null;
   readonly repository: string;
   readonly rule_id: string;
@@ -1117,6 +1179,21 @@ export type WebSessionLiveStreamEvent = {
   readonly kind: "resync_required";
 };
 
+export type WebTemplateList = {
+  readonly templates: ReadonlyArray<WebTemplateSummary>;
+};
+
+export type WebTemplateSaveRequest = {
+  readonly definition_toml: string;
+};
+
+export type WebTemplateDetail = {
+  readonly definition_toml: string;
+  readonly source_kind: WebTemplateSourceKind;
+  readonly summary: WebTemplateSummary;
+  readonly system_prompt: string;
+};
+
 export type WebImportListRequest = {
   readonly after?: string | null;
   readonly format?: WebImportFormat | null;
@@ -1195,6 +1272,9 @@ export type WebUsageCallPage = {
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebSubmitInputRequest(value: unknown): WebSubmitInputRequest;
+export function decodeWebCreateSessionRequest(value: unknown): WebCreateSessionRequest;
+export function decodeWebCreateSessionResponse(value: unknown): WebCreateSessionResponse;
+export function decodeWebSessionTitleRequest(value: unknown): WebSessionTitleRequest;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;
@@ -1207,6 +1287,9 @@ export function decodeWebSessionRates(value: unknown): WebSessionRates;
 export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
 export function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;
 export function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;
+export function decodeWebTemplateList(value: unknown): WebTemplateList;
+export function decodeWebTemplateSaveRequest(value: unknown): WebTemplateSaveRequest;
+export function decodeWebTemplateDetail(value: unknown): WebTemplateDetail;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;

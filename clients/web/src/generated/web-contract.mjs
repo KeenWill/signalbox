@@ -994,6 +994,458 @@ const schemas = {
     "title": "WebContractExample",
     "type": "object"
   },
+  "WebCreateSessionRequest": {
+    "$defs": {
+      "WebSubmitInputRequest": {
+        "additionalProperties": false,
+        "description": "An idempotent text submission using the session's current defaults.",
+        "properties": {
+          "command_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "message": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Creates an interactive session using the named template's defaults.",
+    "properties": {
+      "command_id": {
+        "description": "Durable identity for creation, retained when retrying.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "first_input": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebSubmitInputRequest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Separately idempotent input submitted after creation commits."
+      },
+      "template_name": {
+        "description": "Configured session template name.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "template_name"
+    ],
+    "title": "WebCreateSessionRequest",
+    "type": "object"
+  },
+  "WebCreateSessionResponse": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure",
+          "finish_check_failed"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "parked",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebRepositoryWatchEventKind": {
+        "description": "Closed repository-watch event categories.",
+        "oneOf": [
+          {
+            "const": "pull_request_opened",
+            "description": "The `pull_request_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_closed",
+            "description": "The `pull_request_closed` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_merged",
+            "description": "The `pull_request_merged` event.",
+            "type": "string"
+          },
+          {
+            "const": "head_changed",
+            "description": "The `head_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "mergeable_state_changed",
+            "description": "The `mergeable_state_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "checks_completed",
+            "description": "The `checks_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "check_run_completed",
+            "description": "The `check_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "branch_workflow_run_completed",
+            "description": "The `branch_workflow_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "review_submitted",
+            "description": "The `review_submitted` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_opened",
+            "description": "The `thread_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_resolved",
+            "description": "The `thread_resolved` event.",
+            "type": "string"
+          },
+          {
+            "const": "labeled",
+            "description": "The `labeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "unlabeled",
+            "description": "The `unlabeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "base_advanced",
+            "description": "The `base_advanced` event.",
+            "type": "string"
+          },
+          {
+            "const": "reaction_changed",
+            "description": "The `reaction_changed` event.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebRepositoryWatchProvenance": {
+        "additionalProperties": false,
+        "description": "Retained repository-watch creation origin, resolved from its dispatch ledger.",
+        "properties": {
+          "action_ordinal": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Position in the dispatch's action batch."
+          },
+          "base_branch": {
+            "description": "Base branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatch_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Exact retained dispatch."
+          },
+          "event_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Triggering immutable event."
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebRepositoryWatchEventKind",
+            "description": "Triggering event category."
+          },
+          "head_branch": {
+            "description": "Head branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "description": "Triggering pull request, absent for branch events.",
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository": {
+            "description": "Watched repository.",
+            "type": "string"
+          },
+          "rule_id": {
+            "description": "Retained rule identity.",
+            "type": "string"
+          },
+          "rule_revision": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Retained rule revision."
+          }
+        },
+        "required": [
+          "head_branch",
+          "base_branch",
+          "dispatch_id",
+          "action_ordinal",
+          "repository",
+          "rule_id",
+          "rule_revision",
+          "event_id",
+          "event_kind",
+          "pull_request"
+        ],
+        "type": "object"
+      },
+      "WebSessionCatalogActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebSessionCatalogSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "current_turn_id": {
+            "anyOf": [
+              {
+                "description": "Checked canonical UUID used for browser-visible non-session identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebSessionCatalogActivity"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "repository_watch": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepositoryWatchProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Retained origin of a repository-watch create action."
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repository_watch",
+          "session_id",
+          "title_summary",
+          "title_truncated",
+          "archived",
+          "current_turn_id",
+          "active_turn_count",
+          "queued_turn_count",
+          "state",
+          "action",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Committed creation identity and a current catalog projection.",
+    "properties": {
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      },
+      "summary": {
+        "$ref": "#/$defs/WebSessionCatalogSummary"
+      }
+    },
+    "required": [
+      "session_id",
+      "summary"
+    ],
+    "title": "WebCreateSessionResponse",
+    "type": "object"
+  },
   "WebImportContinuationRequest": {
     "$defs": {
       "WebImportContinuationReference": {
@@ -2421,6 +2873,169 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebRepositoryWatchEventKind": {
+        "description": "Closed repository-watch event categories.",
+        "oneOf": [
+          {
+            "const": "pull_request_opened",
+            "description": "The `pull_request_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_closed",
+            "description": "The `pull_request_closed` event.",
+            "type": "string"
+          },
+          {
+            "const": "pull_request_merged",
+            "description": "The `pull_request_merged` event.",
+            "type": "string"
+          },
+          {
+            "const": "head_changed",
+            "description": "The `head_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "mergeable_state_changed",
+            "description": "The `mergeable_state_changed` event.",
+            "type": "string"
+          },
+          {
+            "const": "checks_completed",
+            "description": "The `checks_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "check_run_completed",
+            "description": "The `check_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "branch_workflow_run_completed",
+            "description": "The `branch_workflow_run_completed` event.",
+            "type": "string"
+          },
+          {
+            "const": "review_submitted",
+            "description": "The `review_submitted` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_opened",
+            "description": "The `thread_opened` event.",
+            "type": "string"
+          },
+          {
+            "const": "thread_resolved",
+            "description": "The `thread_resolved` event.",
+            "type": "string"
+          },
+          {
+            "const": "labeled",
+            "description": "The `labeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "unlabeled",
+            "description": "The `unlabeled` event.",
+            "type": "string"
+          },
+          {
+            "const": "base_advanced",
+            "description": "The `base_advanced` event.",
+            "type": "string"
+          },
+          {
+            "const": "reaction_changed",
+            "description": "The `reaction_changed` event.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebRepositoryWatchProvenance": {
+        "additionalProperties": false,
+        "description": "Retained repository-watch creation origin, resolved from its dispatch ledger.",
+        "properties": {
+          "action_ordinal": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Position in the dispatch's action batch."
+          },
+          "base_branch": {
+            "description": "Base branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dispatch_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Exact retained dispatch."
+          },
+          "event_id": {
+            "$ref": "#/$defs/WebLiveResourceId",
+            "description": "Triggering immutable event."
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebRepositoryWatchEventKind",
+            "description": "Triggering event category."
+          },
+          "head_branch": {
+            "description": "Head branch in the dispatched pull-request context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pull_request": {
+            "anyOf": [
+              {
+                "description": "Triggering pull request, absent for branch events.",
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repository": {
+            "description": "Watched repository.",
+            "type": "string"
+          },
+          "rule_id": {
+            "description": "Retained rule identity.",
+            "type": "string"
+          },
+          "rule_revision": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Retained rule revision."
+          }
+        },
+        "required": [
+          "head_branch",
+          "base_branch",
+          "dispatch_id",
+          "action_ordinal",
+          "repository",
+          "rule_id",
+          "rule_revision",
+          "event_id",
+          "event_kind",
+          "pull_request"
+        ],
+        "type": "object"
+      },
       "WebSessionCatalogActivity": {
         "additionalProperties": false,
         "properties": {
@@ -2494,6 +3109,17 @@ const schemas = {
           "queued_turn_count": {
             "$ref": "#/$defs/WebU64"
           },
+          "repository_watch": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepositoryWatchProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Retained origin of a repository-watch create action."
+          },
           "session_id": {
             "$ref": "#/$defs/WebSessionId"
           },
@@ -2512,6 +3138,7 @@ const schemas = {
           }
         },
         "required": [
+          "repository_watch",
           "session_id",
           "title_summary",
           "title_truncated",
@@ -3939,6 +4566,13 @@ const schemas = {
                 "$ref": "#/$defs/WebPositiveU64",
                 "description": "Position in the dispatch's action batch."
               },
+              "base_branch": {
+                "description": "Base branch in the dispatched pull-request context.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "dispatch_id": {
                 "$ref": "#/$defs/WebLiveResourceId",
                 "description": "Exact retained dispatch."
@@ -3950,6 +4584,13 @@ const schemas = {
               "event_kind": {
                 "$ref": "#/$defs/WebRepositoryWatchEventKind",
                 "description": "Triggering event category."
+              },
+              "head_branch": {
+                "description": "Head branch in the dispatched pull-request context.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "pull_request": {
                 "anyOf": [
@@ -3977,6 +4618,8 @@ const schemas = {
               }
             },
             "required": [
+              "head_branch",
+              "base_branch",
               "dispatch_id",
               "action_ordinal",
               "repository",
@@ -6936,6 +7579,29 @@ const schemas = {
     "title": "WebSessionTimelineWindow",
     "type": "object"
   },
+  "WebSessionTitleRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Human title replacement preserving the other loaded metadata fields.",
+    "properties": {
+      "command_id": {
+        "description": "Durable identity retained when retrying the title edit.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "title": {
+        "description": "Exact nonempty human-facing title.",
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "title"
+    ],
+    "title": "WebSessionTitleRequest",
+    "type": "object"
+  },
   "WebSubmitInputRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -6955,6 +7621,425 @@ const schemas = {
       "message"
     ],
     "title": "WebSubmitInputRequest",
+    "type": "object"
+  },
+  "WebTemplateDetail": {
+    "$defs": {
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTemplateApprovalPosture": {
+        "description": "Effective workflow approval selection.",
+        "enum": [
+          "auto",
+          "delegated",
+          "human"
+        ],
+        "type": "string"
+      },
+      "WebTemplateSourceKind": {
+        "description": "Source section that defines the selected template.",
+        "enum": [
+          "template",
+          "review_library"
+        ],
+        "type": "string"
+      },
+      "WebTemplateSummary": {
+        "additionalProperties": false,
+        "description": "Creation defaults and workflow authority for one loaded template.",
+        "properties": {
+          "dangerous_tool_auto_approval": {
+            "type": "boolean"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/$defs/WebModelSelection"
+          },
+          "model_label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "workflow_tools": {
+            "items": {
+              "$ref": "#/$defs/WebTemplateWorkflowTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "digest",
+          "version",
+          "model",
+          "model_label",
+          "dangerous_tool_auto_approval",
+          "workflow_tools"
+        ],
+        "type": "object"
+      },
+      "WebTemplateWorkflowGrant": {
+        "description": "Operation authority copied from the accepted template.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "enabled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "all_registrations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "registrations",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTemplateWorkflowTool": {
+        "additionalProperties": false,
+        "description": "One declared workflow operation with its effective approval posture.",
+        "properties": {
+          "grant": {
+            "$ref": "#/$defs/WebTemplateWorkflowGrant"
+          },
+          "name": {
+            "type": "string"
+          },
+          "posture": {
+            "$ref": "#/$defs/WebTemplateApprovalPosture"
+          }
+        },
+        "required": [
+          "name",
+          "grant",
+          "posture"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Full accepted definition, including retained external prompt contents.",
+    "properties": {
+      "definition_toml": {
+        "description": "Version-one TOML document containing this template or its shared review library.",
+        "type": "string"
+      },
+      "source_kind": {
+        "$ref": "#/$defs/WebTemplateSourceKind"
+      },
+      "summary": {
+        "$ref": "#/$defs/WebTemplateSummary"
+      },
+      "system_prompt": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "summary",
+      "system_prompt",
+      "source_kind",
+      "definition_toml"
+    ],
+    "title": "WebTemplateDetail",
+    "type": "object"
+  },
+  "WebTemplateList": {
+    "$defs": {
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTemplateApprovalPosture": {
+        "description": "Effective workflow approval selection.",
+        "enum": [
+          "auto",
+          "delegated",
+          "human"
+        ],
+        "type": "string"
+      },
+      "WebTemplateSummary": {
+        "additionalProperties": false,
+        "description": "Creation defaults and workflow authority for one loaded template.",
+        "properties": {
+          "dangerous_tool_auto_approval": {
+            "type": "boolean"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/$defs/WebModelSelection"
+          },
+          "model_label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "workflow_tools": {
+            "items": {
+              "$ref": "#/$defs/WebTemplateWorkflowTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "digest",
+          "version",
+          "model",
+          "model_label",
+          "dangerous_tool_auto_approval",
+          "workflow_tools"
+        ],
+        "type": "object"
+      },
+      "WebTemplateWorkflowGrant": {
+        "description": "Operation authority copied from the accepted template.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "enabled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "all_registrations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "registrations",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTemplateWorkflowTool": {
+        "additionalProperties": false,
+        "description": "One declared workflow operation with its effective approval posture.",
+        "properties": {
+          "grant": {
+            "$ref": "#/$defs/WebTemplateWorkflowGrant"
+          },
+          "name": {
+            "type": "string"
+          },
+          "posture": {
+            "$ref": "#/$defs/WebTemplateApprovalPosture"
+          }
+        },
+        "required": [
+          "name",
+          "grant",
+          "posture"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Complete loaded template catalog in name order.",
+    "properties": {
+      "templates": {
+        "items": {
+          "$ref": "#/$defs/WebTemplateSummary"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "templates"
+    ],
+    "title": "WebTemplateList",
+    "type": "object"
+  },
+  "WebTemplateSaveRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Replacement source for one template or its shared review library.",
+    "properties": {
+      "definition_toml": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "definition_toml"
+    ],
+    "title": "WebTemplateSaveRequest",
     "type": "object"
   },
   "WebUsageCallPage": {
@@ -9478,6 +10563,21 @@ export function decodeWebSubmitInputRequest(value) {
   return value;
 }
 
+export function decodeWebCreateSessionRequest(value) {
+  assertSchema(schemas.WebCreateSessionRequest, schemas.WebCreateSessionRequest, value, "webcreatesessionrequest");
+  return value;
+}
+
+export function decodeWebCreateSessionResponse(value) {
+  assertSchema(schemas.WebCreateSessionResponse, schemas.WebCreateSessionResponse, value, "webcreatesessionresponse");
+  return value;
+}
+
+export function decodeWebSessionTitleRequest(value) {
+  assertSchema(schemas.WebSessionTitleRequest, schemas.WebSessionTitleRequest, value, "websessiontitlerequest");
+  return value;
+}
+
 export function decodeWebContractExample(value) {
   assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "webcontractexample");
   return value;
@@ -9520,6 +10620,21 @@ export function decodeWebSessionLiveStreamEvent(value) {
   if (value.kind === "provider_text_delta" && new TextEncoder().encode(value.content).length > 8192) {
     fail("session_live_event.content", "at most 8192 UTF-8 bytes");
   }
+  return value;
+}
+
+export function decodeWebTemplateList(value) {
+  assertSchema(schemas.WebTemplateList, schemas.WebTemplateList, value, "webtemplatelist");
+  return value;
+}
+
+export function decodeWebTemplateSaveRequest(value) {
+  assertSchema(schemas.WebTemplateSaveRequest, schemas.WebTemplateSaveRequest, value, "webtemplatesaverequest");
+  return value;
+}
+
+export function decodeWebTemplateDetail(value) {
+  assertSchema(schemas.WebTemplateDetail, schemas.WebTemplateDetail, value, "webtemplatedetail");
   return value;
 }
 

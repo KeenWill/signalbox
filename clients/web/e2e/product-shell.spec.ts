@@ -589,7 +589,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
   await page.getByRole('link', { name: /Sessions/ }).click()
-  await page.getByRole('button', { name: 'Open by ID' }).click()
+  await page.goto('/sessions?workspace=true')
   const reopenedSessionId = page.getByRole('textbox', { name: 'Session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
@@ -797,6 +797,8 @@ test('uses the displayed product navigation sequence', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
+  await expect(page.getByRole('region', { name: '0 sessions', exact: true })).toBeVisible()
+  await page.getByRole('main').focus()
 
   await page.keyboard.press('g')
   await page.keyboard.press('s')
@@ -2097,4 +2099,73 @@ test('offers the sidebar command only when the desktop sidebar is visible', asyn
   await page.setViewportSize({ width: 390, height: 844 })
   await palette.click()
   await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toHaveCount(0)
+})
+
+for (const catalogState of [
+  { q: 'review', sort: 'identity', archived: 'true', afterSession: sessionWorkspaceFixture.id },
+  { q: 'review', archived: 'true', afterSession: sessionWorkspaceFixture.id, afterActivity: '42' },
+]) {
+  test(`opening and reopening a session by id preserves catalog state for ${catalogState.sort ?? 'activity'} order`, async ({
+    page,
+  }) => {
+    await useDeterministicBootstrap(page)
+    await useDeterministicSession(page)
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          ...emptySessionCatalogFixture,
+          sort:
+            catalogState.sort === 'identity'
+              ? 'session_identity_ascending'
+              : 'last_activity_descending',
+        },
+      }),
+    )
+    const search = new URLSearchParams(Object.entries(catalogState))
+    await page.goto(`/sessions?${search}`)
+    for (const step of ['Open from catalog', 'Reopen the current session']) {
+      await test.step(step, async () => {
+        await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+        await page.getByRole('button', { name: /^Open session by id/ }).click()
+        await page
+          .getByRole('dialog', { name: 'Open session by id' })
+          .getByLabel('Session ID')
+          .fill(sessionWorkspaceFixture.id)
+        await page.keyboard.press('Enter')
+        search.set('session', sessionWorkspaceFixture.id)
+        search.set('workspace', 'true')
+        await expect
+          .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+          .toEqual(Object.fromEntries(search))
+      })
+    }
+    await page.keyboard.press('Escape')
+    await expect
+      .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+      .toEqual(catalogState)
+  })
+}
+
+test('opening a session by id from a direct empty workspace returns to the catalog', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/settings')
+  await page.goto('/sessions?workspace=true&q=review&archived=true')
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await page
+    .getByRole('dialog', { name: 'Open session by id' })
+    .getByLabel('Session ID')
+    .fill(sessionWorkspaceFixture.id)
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`session=${sessionWorkspaceFixture.id}`))
+  await page.keyboard.press('Escape')
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/sessions')
+  await expect
+    .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+    .toEqual({ q: 'review', archived: 'true' })
+  await page.goBack()
+  await expect(page).toHaveURL(/\/settings$/)
 })

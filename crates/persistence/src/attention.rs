@@ -112,6 +112,31 @@ impl AttentionRepository {
         }
     }
 
+    /// Reads one current catalog summary, including an archived session.
+    pub async fn summary(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<AttentionSummary>, AttentionRepositoryError> {
+        let mut transaction = self.read_transaction().await?;
+        let query = AttentionQuery::try_new(
+            None,
+            Vec::new(),
+            true,
+            AttentionSort::SessionIdentityAscending,
+            None,
+        )
+        .map_err(|_| AttentionCorruption::Invalid("point summary query"))?;
+        let mut summaries = load_summaries(
+            &mut transaction,
+            Some(&[session.into_uuid()]),
+            Some(&query),
+            self.automatic_resume_attempts,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(summaries.pop())
+    }
+
     pub async fn snapshot(
         &self,
         query: AttentionQuery,
@@ -555,7 +580,7 @@ const SELECT_IDENTITY: &str = summary_sql!(
       LEFT JOIN session_metadata AS metadata USING (session_id)
      WHERE ($2::uuid[] IS NOT NULL
             AND session_row.session_id = ANY($2)
-            AND NOT COALESCE(metadata.archived, false))
+            AND ($10 OR NOT COALESCE(metadata.archived, false)))
         OR ($2::uuid[] IS NULL
             AND ($3::uuid IS NULL OR session_row.session_id > $3)
             AND ($8::text IS NULL

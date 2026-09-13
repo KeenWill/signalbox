@@ -880,7 +880,9 @@ fn operation_tool_results(
             | MessagePart::ProviderCompaction { .. }
             | MessagePart::ProviderReasoning { .. }
             | MessagePart::ImageReference(_)
-            | MessagePart::Image(_) => None,
+            | MessagePart::Image(_)
+            | MessagePart::DocumentReference(_)
+            | MessagePart::Document(_) => None,
         })
         .collect::<Result<Vec<_>, _>>()?)
 }

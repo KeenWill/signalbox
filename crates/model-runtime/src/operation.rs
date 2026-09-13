@@ -108,6 +108,8 @@ pub enum ToolChoice {
 pub struct ModelOperation<C> {
     /// Configured image capability applied to this exact request before send authorization.
     pub image_presentation: Option<crate::ImagePresentationCapability>,
+    /// Effective target's admitted document presentation capability.
+    pub document_presentation: Option<crate::DocumentPresentationCapability>,
     /// The caller's durable identity for this operation, threaded onto every
     /// observation and evidence record.
     pub correlation: C,
@@ -160,6 +162,7 @@ impl<C> ModelOperation<C> {
     ) -> Self {
         Self {
             image_presentation: None,
+            document_presentation: None,
             correlation,
             credential_reference,
             requested_target,
