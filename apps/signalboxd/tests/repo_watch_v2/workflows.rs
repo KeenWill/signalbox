@@ -1233,3 +1233,80 @@ async fn workflow_evaluation_revalidates_plans_and_rolls_back_without_a_receipt(
     core.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires disposable PostgreSQL"]
+async fn recovered_workflow_commit_waits_for_observer_identity() -> Result<(), Box<dyn Error>> {
+    let (_database, core, module, mut effects, repository, rule) = fixture(Case::Dispatch).await?;
+    let context = effects
+        .store
+        .next_rule_context(&repository, &rule)
+        .await?
+        .expect("retained context");
+    let effect = Uuid::now_v7();
+    let input = b"retained workflow evaluation";
+    let plan = context.plan();
+    let now = OffsetDateTime::now_utc();
+    effects.store.prepare_observer_identity(&repository).await?;
+    effects.store = RepoWatchStore::new(module.clone());
+    let paused = effects
+        .store
+        .commit_evaluation(
+            EvaluationInvocation {
+                effect,
+                input,
+                context: &context,
+                plan: &plan,
+                now,
+            },
+            &mut effects.ids,
+            &mut effects.factory,
+            &mut effects.codec,
+        )
+        .await;
+    assert!(
+        matches!(paused, Err(StoreError::WorkflowInputRejected)),
+        "a recovered commit cannot bypass identity preparation"
+    );
+    assert_eq!(
+        effects.ids.calls, 0,
+        "no dispatch is minted while identity is unknown"
+    );
+    assert!(
+        effects
+            .store
+            .adopt_evaluation(effect, input)
+            .await?
+            .is_none(),
+        "the rejected evaluation leaves no receipt or cursor advance"
+    );
+    assert!(
+        super::review_writes::identity_attempt(&effects.store, &repository, Some("observer")).await
+    );
+    let committed = effects
+        .store
+        .commit_evaluation(
+            EvaluationInvocation {
+                effect,
+                input,
+                context: &context,
+                plan: &plan,
+                now,
+            },
+            &mut effects.ids,
+            &mut effects.factory,
+            &mut effects.codec,
+        )
+        .await?;
+    assert_eq!(
+        effects.store.adopt_evaluation(effect, input).await?,
+        Some(committed)
+    );
+    assert!(
+        effects.ids.calls > 0,
+        "the retained eligible event commits after identity resolution"
+    );
+    module.close().await;
+    core.close().await;
+    Ok(())
+}
