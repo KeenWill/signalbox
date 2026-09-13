@@ -217,6 +217,7 @@ export async function openSessionFromCatalog(page: Page, id: string) {
             session_id: id,
             title_summary: title,
             title_truncated: false,
+            repository_watch: null,
             action: null,
             active_turn_count: '0',
             queued_turn_count: '0',

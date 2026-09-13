@@ -13,6 +13,7 @@ const continuationSummaries = Array.from({ length: 30 }, (_, index) => ({
   judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
   last_activity: { kind: 'session', unix_microseconds: String(1_724_194_799_999_000 - index) },
   queued_turn_count: '0',
+  repository_watch: null,
   session_id: `018f1840-6f3d-7a8b-9c1d-${(0x0e2f3a4b5c80n + BigInt(index))
     .toString(16)
     .padStart(12, '0')}`,
@@ -40,6 +41,7 @@ const firstPage = {
       judge: { actionable: '0', completed: '3', escalated: '0', failed: '0' },
       last_activity: { kind: 'turn', unix_microseconds: '1724200000000000' },
       queued_turn_count: '2',
+      repository_watch: null,
       session_id: firstSessionId,
       state: 'active',
       title_summary: 'Release verification',
@@ -58,6 +60,7 @@ const firstPage = {
       judge: { actionable: '1', completed: '7', escalated: '1', failed: '0' },
       last_activity: { kind: 'goal', unix_microseconds: '1724194800000000' },
       queued_turn_count: '0',
+      repository_watch: null,
       session_id: secondSessionId,
       state: 'blocked',
       title_summary: 'Deployment decision',
@@ -87,6 +90,7 @@ const secondPage = {
       judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
       last_activity: { kind: 'session', unix_microseconds: '1724100000000000' },
       queued_turn_count: '0',
+      repository_watch: null,
       session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c8f',
       state: 'idle',
       title_summary: 'A'.repeat(128),

@@ -131,10 +131,19 @@ with a visible reason, while retries remain available. A bounded rates read
 reports lifecycle state, turn outcome counts, the latest failed turn and its
 provider cause, and goal disposition for up to 32 listed sessions.
 
+`POST /api/sessions` creates a pathless interactive session from a named
+template through `CreateSession`, with an open start gate and unmonitored
+ownership. It accepts a creation command ID and an optional first text input
+with its own command ID; creation commits before input submission. A 201
+response returns the session ID and current catalog summary after both requested
+commands succeed. Retries retain both identities and payloads.
+
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command
-service while carrying forward the loaded tags, attributes, and archive flag. A
-204 response acknowledges the committed replacement; equal replay returns the
+service. It loads and preserves tags, attributes, and the archive flag under the
+session lock in the replacement transaction. A title that exceeds the complete
+metadata size limit after merging returns 400 without changing metadata. A 204
+response acknowledges the committed replacement; equal replay returns the
 recorded result without reinstalling it. Title-only intent is retained with the
 receipt; reusing a full-replacement command ID for a title request, or the
 reverse, is conflicting reuse.
@@ -518,7 +527,9 @@ issued it and is rejected under the other order. The catalog keeps only sessions
 carrying every required tag, excludes archived sessions unless they are
 requested, and searches by an exact case-sensitive substring of the title or the
 canonical session UUID. A catalog page, its exact total, and its cursor are read
-in one snapshot.
+in one snapshot. Catalog summaries require `repository_watch`, with null for a
+non-watch session; provenance requires nullable `head_branch` and `base_branch`
+members.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read

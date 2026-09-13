@@ -33,6 +33,8 @@ test('Escape closes trigger details before session details', async ({ page }) =>
     dispatch_id: turnId,
     action_ordinal: '1',
     repository: 'signalbox/example',
+    head_branch: null,
+    base_branch: null,
     pull_request: '81',
     rule_id: 'review-response',
     rule_revision: '3',
