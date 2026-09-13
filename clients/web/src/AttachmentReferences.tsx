@@ -36,6 +36,7 @@ function AttachmentReference({
   const chip = useRef<HTMLButtonElement>(null)
   const opener = useRef<HTMLButtonElement | null>(null)
   const [visible, setVisible] = useState(false)
+  const [focused, setFocused] = useState(false)
   const [reservedHeight, setReservedHeight] = useState(0)
   useEffect(() => {
     const element = container.current
@@ -58,8 +59,9 @@ function AttachmentReference({
     }),
     [attachment.blob_id, attachment.media_type],
   )
+  const active = visible || focused || state.request !== null
   const descriptor = useArtifactDescriptor(
-    available && visible ? input : null,
+    available && active ? input : null,
     attachment.length_bytes,
   )
   const artifact = useMemo(
@@ -112,6 +114,10 @@ function AttachmentReference({
     >
       <div
         ref={container}
+        onFocusCapture={() => setFocused(true)}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false)
+        }}
         className="inline-attachment"
         style={{ minHeight: artifact ? undefined : reservedHeight }}
       >
@@ -146,7 +152,7 @@ function AttachmentReference({
             }}
           />
         )}
-        {available && visible && descriptor.isPending && (
+        {available && active && descriptor.isPending && (
           <small role="status">Loading attachment…</small>
         )}
         {descriptor.isError && (
