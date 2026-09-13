@@ -12,9 +12,9 @@ use std::{
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest, Enroll,
-    Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64,
-    ReconnectInventory, Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason,
-    ValueError, advertisement_digest, decode_line, encode_line,
+    Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64, Registered,
+    Rejected, RejectionCode, Resume, Shutdown, ShutdownReason, ValueError, advertisement_digest,
+    decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -559,7 +559,7 @@ where
                 (receipt, outcome, connection_epoch)
             }
             RunnerState::Enrolled { receipt } => {
-                let inventory = ReconnectInventory::default();
+                let inventory = state.reconnect_inventory();
                 send_message(
                     &mut io,
                     Message::Resume(Box::new(Resume {
@@ -1068,6 +1068,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use signalbox_runner_wire::ReconnectInventory;
     use tempfile::TempDir;
     use tokio::io::DuplexStream;
     use uuid::Uuid;

@@ -16,7 +16,7 @@ export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
-export type Overlay = 'palette' | 'help' | 'navigation' | 'session-entry' | null
+export type Overlay = 'palette' | 'help' | 'navigation' | 'session-entry' | 'new-session' | null
 export type ArtifactOriginalState = 'loading' | 'loaded' | 'failed'
 
 export interface VisibleRange {
@@ -50,6 +50,7 @@ interface AppState extends BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
+  detailRevision: number
   theme: ThemeMode
   overlay: Overlay
   sessionSync: SessionSyncState
@@ -84,6 +85,7 @@ const initialState: AppState = {
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
   activitySequence: 0,
+  detailRevision: 0,
 }
 
 // Tunable effective ceiling: diagnostics retain a concise Redux activity tail for local triage.
@@ -167,6 +169,7 @@ const appSlice = createSlice({
     },
     detailSet(state, action: { payload: DetailMode }) {
       state.detail = action.payload
+      state.detailRevision += 1
       state.activitySequence += 1
     },
     themeSet(state, action: { payload: ThemeMode }) {
@@ -182,6 +185,7 @@ const appSlice = createSlice({
     },
     preferencesReset(state) {
       Object.assign(state, createDefaultBrowserPreferences())
+      state.detailRevision += 1
       state.activitySequence += 1
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {

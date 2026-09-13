@@ -4347,6 +4347,7 @@ async fn create_connection_failure_is_definitely_uncommitted() -> Result<(), Box
         Some(CommandId::try_from_uuid(Uuid::from_u128(2))?),
         None,
         super::SessionPlacement::Pathless {},
+        None,
     )
     .await;
 
@@ -4373,6 +4374,7 @@ async fn create_rejects_settings_for_another_direct_model() -> Result<(), Box<dy
         assert_eq!(
             request.request(),
             &ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id,
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: requested_selection_id,
@@ -4411,6 +4413,7 @@ async fn create_rejects_settings_for_another_direct_model() -> Result<(), Box<dy
         Some(command_id),
         None,
         SessionPlacement::Pathless {},
+        None,
     )
     .await
     .expect_err("creation must reject settings validated for another direct model");

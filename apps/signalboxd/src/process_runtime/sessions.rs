@@ -7,6 +7,7 @@ pub(super) struct WireCreateSessionRequest {
     pub(super) system_prompt: SystemPromptMember,
     pub(super) placement: WireSessionPlacement,
     pub(super) lifecycle: SessionLifecycleMembers,
+    pub(super) runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 }
 
 /// The lifecycle members of one creation, admitted into domain values.
@@ -96,7 +97,20 @@ where
         system_prompt,
         placement,
         lifecycle,
+        runner_placement,
     } = wire_request;
+    let Ok(runner_placement) = runner_placement
+        .map(signalbox_process_protocol::RunnerPlacementRequest::try_into_domain)
+        .transpose()
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let Ok(lifecycle) = LifecycleMembers::admit(lifecycle) else {
         return write_error(
             writer,
@@ -147,6 +161,7 @@ where
                 && defaults.model_settings().precedence().session() == caller_model_settings
                 && command.template_provenance().is_none()
                 && command.placement() == &placement
+                && command.runner_placement() == runner_placement.as_ref()
                 && lifecycle.matches(command)
             {
                 return write_recorded_creation(writer, version, request_id, &recorded).await;
@@ -187,7 +202,10 @@ where
             )
             .await;
         }
-        Err(CreateSessionRepositoryError::Corruption(_)) => {
+        Err(
+            CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected,
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -232,11 +250,14 @@ where
     };
     let request = CreateSessionRequest::try_new(command_id, defaults);
     let Ok(request) = request.map(|request| {
-        request.with_placement(placement).with_lifecycle(
-            lifecycle.start_gate,
-            lifecycle.ownership,
-            lifecycle.finish_condition,
-        )
+        request
+            .with_runner_placement(runner_placement)
+            .with_placement(placement)
+            .with_lifecycle(
+                lifecycle.start_gate,
+                lifecycle.ownership,
+                lifecycle.finish_condition,
+            )
     }) else {
         return write_error(
             writer,
@@ -262,6 +283,7 @@ pub(super) struct WireCreateSessionFromTemplateRequest {
     pub(super) template_name: String,
     pub(super) placement: WireSessionPlacement,
     pub(super) lifecycle: SessionLifecycleMembers,
+    pub(super) runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 }
 
 pub(super) async fn handle_create_session_from_template<Writer>(
@@ -279,7 +301,20 @@ where
         template_name,
         placement,
         lifecycle,
+        runner_placement,
     } = request;
+    let Ok(runner_placement) = runner_placement
+        .map(signalbox_process_protocol::RunnerPlacementRequest::try_into_domain)
+        .transpose()
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let Ok(lifecycle) = LifecycleMembers::admit(lifecycle) else {
         return write_error(
             writer,
@@ -320,6 +355,7 @@ where
                 .map(SessionTemplateProvenance::name);
             if recorded_name == Some(&template_name)
                 && recorded.command().placement() == &placement
+                && recorded.command().runner_placement() == runner_placement.as_ref()
                 && lifecycle.matches(recorded.command())
             {
                 return write_recorded_creation(writer, version, request_id, &recorded).await;
@@ -360,7 +396,10 @@ where
             )
             .await;
         }
-        Err(CreateSessionRepositoryError::Corruption(_)) => {
+        Err(
+            CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected,
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -389,11 +428,14 @@ where
         template.defaults().clone(),
     );
     let Ok(request) = request.map(|request| {
-        request.with_placement(placement).with_lifecycle(
-            lifecycle.start_gate,
-            lifecycle.ownership,
-            lifecycle.finish_condition,
-        )
+        request
+            .with_runner_placement(runner_placement)
+            .with_placement(placement)
+            .with_lifecycle(
+                lifecycle.start_gate,
+                lifecycle.ownership,
+                lifecycle.finish_condition,
+            )
     }) else {
         return write_error(
             writer,
@@ -420,6 +462,7 @@ pub(super) struct WireCommissionSessionRequest {
     pub(super) fence: WireCommissionedSessionFence,
     pub(super) statement: String,
     pub(super) content: InputContent,
+    pub(super) runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 }
 
 /// Admits one wire fence into its exact domain values.
@@ -469,12 +512,17 @@ where
         fence,
         statement,
         content,
+        runner_placement,
     } = request;
     let admitted = (|| {
         let template_name = SessionTemplateName::try_new(template_name).map_err(|_| ())?;
         let statement = GoalStatement::try_new(statement).map_err(|_| ())?;
         let content = UserContent::try_text(content.into_string()).map_err(|_| ())?;
         let fence = domain_commissioned_fence(fence)?;
+        let runner_placement = runner_placement
+            .map(signalbox_process_protocol::RunnerPlacementRequest::try_into_domain)
+            .transpose()
+            .map_err(|_| ())?;
         CommissionDispatchRequest::try_new(
             DurableCommandId::from_uuid(command_uuid),
             template_name,
@@ -482,6 +530,7 @@ where
             statement,
             content,
         )
+        .map(|request| request.with_runner_placement(runner_placement))
         .map_err(|_| ())
     })();
     let Ok(request) = admitted else {
@@ -560,6 +609,19 @@ where
         };
         return write_error(writer, version, request_id, refusal).await;
     };
+    let catalog = match crate::runner_protocol_runtime::local_runner_catalog() {
+        Ok(catalog) => catalog,
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    let store = store.with_runner_placement_catalog(catalog);
     let mut ids = UuidV7CommissionedDispatchIdGenerator;
     let Ok(prepared) = request.prepare(
         &mut ids,
@@ -625,6 +687,17 @@ where
             )
             .await
         }
+        Err(CommissionedDispatchRepositoryError::SessionCreation(
+            CreateSessionRepositoryError::RunnerPlacementRejected,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
         Err(error) => {
             let protocol_error = match commission_failure_ambiguity(&error) {
                 Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
@@ -651,7 +724,8 @@ pub(super) fn commission_failure_ambiguity(
             CreateSessionRepositoryError::Database(_) => Some(false),
             CreateSessionRepositoryError::CommitAmbiguous(_) => Some(true),
             CreateSessionRepositoryError::DifferentCommandKind { .. }
-            | CreateSessionRepositoryError::Corruption(_) => None,
+            | CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected => None,
         },
         CommissionedDispatchRepositoryError::InitialInput(error) => match error {
             SubmitInputRepositoryError::Database(_)
@@ -898,6 +972,7 @@ where
             if command.initial_configuration_defaults() == request.initial_configuration_defaults()
                 && command.template_provenance() == request.template_provenance()
                 && command.placement() == request.placement()
+                && command.runner_placement() == request.runner_placement()
                 && command.start_gate() == request.start_gate()
                 && command.ownership() == request.ownership()
                 && command.finish_condition() == request.finish_condition()
@@ -940,7 +1015,10 @@ where
             )
             .await;
         }
-        Err(CreateSessionRepositoryError::Corruption(_)) => {
+        Err(
+            CreateSessionRepositoryError::Corruption(_)
+            | CreateSessionRepositoryError::RunnerPlacementRejected,
+        ) => {
             return write_error(
                 writer,
                 version,
@@ -967,6 +1045,20 @@ where
         .await;
     }
 
+    let catalog = match crate::runner_protocol_runtime::local_runner_catalog() {
+        Ok(catalog) => catalog,
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await;
+        }
+    };
+    let repository = repository.with_runner_placement_catalog(catalog);
+
     let model_settings = request.initial_configuration_defaults().model_settings();
     let mut service = CreateSessionService::new(UuidV7SessionIdGenerator, repository);
     match service.execute(request).await {
@@ -988,6 +1080,17 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(CreateSessionError::Transaction(
+            CreateSessionRepositoryError::RunnerPlacementRejected,
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
             )
             .await
         }

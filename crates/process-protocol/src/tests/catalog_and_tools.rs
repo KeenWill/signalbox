@@ -12,6 +12,7 @@ fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::err
     assert_client_request_round_trip(
         request(1)?,
         ClientRequest::CommissionSession {
+            runner_placement: None,
             command_id: command(2)?,
             template_name: String::from("review-response"),
             fence: CommissionedSessionFence::PullRequest {
@@ -43,6 +44,7 @@ fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::err
     assert_client_request_round_trip(
         request(3)?,
         ClientRequest::CommissionSession {
+            runner_placement: None,
             command_id: command(4)?,
             template_name: String::from("branch-watch"),
             fence: CommissionedSessionFence::Branch {
@@ -77,6 +79,7 @@ fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::err
     )?;
 
     let zero_pull_request = ClientRequest::CommissionSession {
+        runner_placement: None,
         command_id: command(8)?,
         template_name: String::from("review-response"),
         fence: CommissionedSessionFence::PullRequest {
@@ -96,6 +99,7 @@ fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::err
     );
 
     let empty_statement = ClientRequest::CommissionSession {
+        runner_placement: None,
         command_id: command(10)?,
         template_name: String::from("review-response"),
         fence: CommissionedSessionFence::Branch {
@@ -111,6 +115,7 @@ fn commission_session_has_an_exact_closed_shape() -> Result<(), Box<dyn std::err
     );
 
     let uppercase_template = ClientRequest::CommissionSession {
+        runner_placement: None,
         command_id: command(12)?,
         template_name: String::from("Review-Response"),
         fence: CommissionedSessionFence::Branch {

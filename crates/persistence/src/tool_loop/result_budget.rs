@@ -185,22 +185,26 @@ mod tests {
 
     #[test]
     fn context_prefix_reports_exact_utf8_counts_within_escaped_budget() {
-        let source = "🙂\u{0008}\u{000c}\t\"".repeat(101);
-        let limit = 160;
-        let bounded = context_text(&source, limit);
-        let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
-        let (prefix, marker) = bounded.split_at(marker_start);
-        assert_eq!(prefix, &source[..prefix.len()]);
-        assert_eq!(
-            marker,
-            format!(
-                "\n[tool result truncated: retained {} bytes; dropped {} bytes]",
-                prefix.len(),
-                source.len() - prefix.len(),
-            )
-        );
-        assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
-        assert_eq!(context_text(&bounded, limit), bounded);
+        for source in [
+            "🙂\u{0008}\u{000c}\t\"".repeat(101),
+            "𝄞\r\n\\\"".repeat(100),
+        ] {
+            let limit = 160;
+            let bounded = context_text(&source, limit);
+            let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
+            let (prefix, marker) = bounded.split_at(marker_start);
+            assert_eq!(prefix, &source[..prefix.len()]);
+            assert_eq!(
+                marker,
+                format!(
+                    "\n[tool result truncated: retained {} bytes; dropped {} bytes]",
+                    prefix.len(),
+                    source.len() - prefix.len(),
+                )
+            );
+            assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
+            assert_eq!(context_text(&bounded, limit), bounded);
+        }
     }
 
     #[test]
@@ -216,7 +220,7 @@ mod tests {
 
     #[test]
     fn context_prefix_keeps_a_small_result_exact() {
-        let source = "unchanged \"界\" \\ result";
+        let source = "unchanged \"雪\" \\ result\t\u{000b}\u{000c}\r\n";
         let limit = serde_json::to_vec(source).expect("fixture encodes").len();
         assert_eq!(context_text(source, limit), source);
     }

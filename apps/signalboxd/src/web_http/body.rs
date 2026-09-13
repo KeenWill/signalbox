@@ -156,11 +156,14 @@ impl io::Write for NdjsonItemWriter {
 }
 
 pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Response {
-    if !matches!(*request.method(), Method::POST | Method::PATCH) {
+    if !matches!(
+        *request.method(),
+        Method::POST | Method::PATCH | Method::PUT | Method::DELETE
+    ) {
         return transport_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "mutation_method_not_allowed",
-            "browser JSON mutations use POST or PATCH",
+            "browser JSON mutations use POST, PATCH, PUT, or DELETE",
         );
     }
     if !has_json_content_type(request.headers()) {

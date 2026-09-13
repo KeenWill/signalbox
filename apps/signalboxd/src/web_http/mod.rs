@@ -319,6 +319,15 @@ impl BoundWebHttpListener {
 }
 
 impl WebHttpRuntime {
+    /// Shares the daemon's ordering between tool dispatch and turn interruption.
+    pub fn with_tool_dispatch_gate(
+        mut self,
+        gate: signalbox_application::InProcessToolDispatchGate,
+    ) -> Self {
+        self.router = self.router.layer(axum::Extension(gate));
+        self
+    }
+
     /// Supplies one current catalog snapshot to each browser request.
     pub fn with_configuration_reload(
         mut self,
@@ -566,6 +575,15 @@ fn production_router_with_budget(
             patch(metadata::replace_title),
         )
         .route("/sessions/{session_id}/input", post(session_submit_input))
+        .route("/sessions/{session_id}/cancel", post(actions::cancel_turn))
+        .route(
+            "/sessions/{session_id}/approvals/{request_id}",
+            post(actions::decide_approval),
+        )
+        .route(
+            "/sessions/{session_id}/goal",
+            axum::routing::put(actions::set_goal).delete(actions::clear_goal),
+        )
         .route_layer(middleware::from_fn(validate_json_mutation))
         .route_layer(middleware::from_fn(validate_admitted_host))
         .with_state(state.clone());
@@ -1096,6 +1114,7 @@ mod usage;
 use usage::{usage_aggregate_cost_dto, usage_cost_dto};
 use usage::{usage_calls, usage_summary};
 
+mod actions;
 mod metadata;
 mod sessions;
 mod timeline;
