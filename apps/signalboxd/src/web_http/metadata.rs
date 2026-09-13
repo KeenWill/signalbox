@@ -200,7 +200,9 @@ mod tests {
         use signalbox_domain::{ModelCallId, ProviderModelIdentity, ResolvedProviderTarget};
         use signalbox_persistence::{
             credential_invocations,
-            session_titles::{SessionTitleCall, SessionTitleRepository},
+            session_titles::{
+                PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository,
+            },
         };
         let (_database, pool, _) =
             signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
@@ -254,6 +256,7 @@ mod tests {
                     .prepare(&mut generation_call, &Default::default())
                     .await
                     .expect("prepare")
+                    == PrepareSessionTitleOutcome::Prepared
             );
             generation_repository
                 .authorize(generation_call.call)
@@ -304,7 +307,8 @@ mod tests {
         );
         call.call = ModelCallId::from_uuid(Uuid::now_v7());
         assert!(
-            repository.prepare(&mut call, &Default::default()).await?,
+            repository.prepare(&mut call, &Default::default()).await?
+                == PrepareSessionTitleOutcome::Prepared,
             "the next invocation can use capacity"
         );
         repository.abandon(call.call).await?;

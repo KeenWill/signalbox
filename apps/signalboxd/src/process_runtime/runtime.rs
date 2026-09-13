@@ -426,6 +426,9 @@ async fn dispatch_updates_with_titles(
                             });
                         }
                         Ok(None) => {}
+                        Err(crate::session_titles::TitleError::Unavailable) => {
+                            titles.defer_initial(session, turn);
+                        }
                         Err(error) => {
                             tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title preparation failed")
                         }
