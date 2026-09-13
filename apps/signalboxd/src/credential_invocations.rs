@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn contended_initial_title_is_admitted_by_recovery_without_another_turn()
+    async fn contended_initial_title_is_restored_after_restart_without_another_turn()
     -> Result<(), Box<dyn std::error::Error>> {
         use signalbox_application::{
             InProcessAttemptDispatchGate, StartEligibleTurnOutcome, StartEligibleTurnService,
@@ -395,10 +395,10 @@ mod tests {
                 .await?,
             PrepareSessionTitleOutcome::Prepared
         );
-        let processes = CredentialInvocationProcesses::new(pool.clone(), nudge);
+        let processes = CredentialInvocationProcesses::new(pool.clone(), nudge.clone());
         let titles = crate::session_titles::SessionTitles::new(
             pool.clone(),
-            models,
+            models.clone(),
             crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
             processes.clone(),
         );
@@ -417,10 +417,33 @@ mod tests {
                 .len(),
             1
         );
+        drop(titles);
+        drop(processes);
+        let processes = CredentialInvocationProcesses::new(pool.clone(), nudge);
+        let titles = crate::session_titles::SessionTitles::new(
+            pool.clone(),
+            models,
+            crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
+            processes.clone(),
+        );
+        assert!(processes.prepare_pending_titles().await.is_empty());
+        titles.restore_pending().await?;
+        titles.restore_pending().await?;
+        assert_eq!(
+            processes
+                .pending_titles
+                .lock()
+                .expect("restored titles")
+                .len(),
+            1
+        );
+        assert!(processes.prepare_pending_titles().await.is_empty());
         repository.abandon(occupying.call).await?;
         let ready = processes.prepare_pending_titles().await;
         assert_eq!(ready.len(), 1);
+        titles.restore_pending().await?;
         assert!(processes.prepare_pending_titles().await.is_empty());
+        assert!(repository.unclaimed_initial_turns().await?.is_empty());
         let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2")
             .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(

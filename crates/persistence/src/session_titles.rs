@@ -44,6 +44,27 @@ impl SessionTitleRepository {
         Self { pool }
     }
 
+    /// Finds one completed turn for each untitled session without an initial claim.
+    pub async fn unclaimed_initial_turns(&self) -> Result<Vec<(SessionId, TurnId)>, sqlx::Error> {
+        let rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+            "SELECT DISTINCT ON (turn.session_id) turn.session_id, turn.turn_id
+             FROM turn_lifecycle AS turn
+             WHERE turn.state_kind = 'terminal' AND turn.terminal_disposition_kind = 'completed'
+               AND NOT EXISTS (SELECT 1 FROM session_metadata metadata
+                   WHERE metadata.session_id = turn.session_id AND metadata.title IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM session_title_model_call title
+                   WHERE title.session_id = turn.session_id AND title.initial_for_turn IS NOT NULL
+                     AND NOT title.abandoned)
+             ORDER BY turn.session_id, turn.turn_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(session, turn)| (SessionId::from_uuid(session), TurnId::from_uuid(turn)))
+            .collect())
+    }
+
     /// Claims an initial call for a completed turn and an unset, unclaimed session.
     /// On-demand calls require only an existing session.
     pub async fn prepare(

@@ -83,6 +83,16 @@ impl From<signalbox_persistence::model_execution::ModelCallRepositoryError> for 
 }
 
 impl SessionTitles {
+    pub(crate) async fn restore_pending(&self) -> Result<(), sqlx::Error> {
+        for (session, turn) in SessionTitleRepository::new(self.pool.clone())
+            .unclaimed_initial_turns()
+            .await?
+        {
+            self.defer_initial(session, turn);
+        }
+        Ok(())
+    }
+
     pub(crate) fn defer_initial(&self, session: SessionId, turn: TurnId) {
         self.processes.retain_initial_title(PendingInitialTitle {
             session,
@@ -149,12 +159,11 @@ impl SessionTitles {
             .ok_or(TitleError::Configuration)?;
         let catalog = self.models.runtime_model_catalog();
         let definition = catalog.resolve(target).ok_or(TitleError::Configuration)?;
-        let route = self
-            .models
-            .resolve_direct_model(selection)
-            .ok_or(TitleError::Configuration)?;
         let families = self.models.credential_family_catalog();
         let family = families.family(target).ok_or(TitleError::Configuration)?;
+        // The title target already includes the selected fast-mode route.
+        let migration_fallback = families
+            .migration_fallback_family_for_call(target, signalbox_domain::FastMode::Disabled);
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
                 .bind(session.into_uuid())
@@ -169,7 +178,7 @@ impl SessionTitles {
             return Err(TitleError::Configuration);
         }
         let credential = signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
-            &self.pool, session, family, route.migration_credential_family(),
+            &self.pool, session, family, migration_fallback,
         ).await.map_err(|error| match error { sqlx::Error::RowNotFound => TitleError::Configuration, _ => TitleError::Database })?;
         let mut call = SessionTitleCall {
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
@@ -451,6 +460,110 @@ fn normalize_title(text: &str) -> Option<String> {
 mod tests {
     use super::*;
     use signalbox_domain::SessionMetadataContent;
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn migrated_title_admission_uses_the_effective_targets_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_domain::{
+            CreateSession, DirectModelSelection, ModelSelectionRequest,
+            SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance,
+            TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            create_session::CreateSessionRepository,
+            scheduler::PostgresEligibilitySweep,
+            session_credentials::{SessionCredentialPin, SessionModelCredential},
+        };
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let selection =
+            DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000001"));
+        let effective_target = uuid::uuid!("20000000-0000-4000-8000-000000000002");
+        for (adapter, credential_pool, expected_credential) in [
+            ("anthropic", "anthropic-main", Some("anthropic-primary")),
+            ("codex_cli", "codex-main", None),
+        ] {
+            let source = crate::configuration::tests::CONFIGURATION
+                .replace("version = 1", "version = 1\n[model_settings]\nfast_mode = \"enabled\"")
+                .replace("model_family = \"anthropic\"", "model_family = \"base-family\"")
+                .replace("adapter = \"anthropic\"\ncredential_pool = \"anthropic-main\"", &format!("adapter = \"{adapter}\"\ncredential_pool = \"{credential_pool}\""))
+                .replace("context_window_tokens = 200000", &format!("context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"{effective_target}\""));
+            let models = Arc::new(HubModelConfiguration::parse(&format!(
+                r#"{source}
+[codex_cli]
+executable = "/bin/true"
+working_directory = "/tmp"
+
+[[adapter_mappings]]
+model_family = "fast-family"
+adapter = "{adapter}"
+credential_pool = "{credential_pool}"
+
+[[serving_targets]]
+target_id = "{effective_target}"
+model_family = "fast-family"
+provider_model = "synthetic-fast-title"
+max_output_tokens = 256
+context_window_tokens = 200000
+
+[session_titles]
+selection_id = "{selection}"
+"#,
+                selection = selection.into_uuid()
+            ))?);
+            let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+            let creation = CreateSession::new(
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                SessionCreationProvenance::new(
+                    SessionCreationCause::Interactive,
+                    TranscriptAncestry::None,
+                ),
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+            )
+            .prepare(session)
+            .map_err(|_| "fixture session rejected")?;
+            let legacy_pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                "anthropic",
+                "anthropic-primary",
+            )])
+            .expect("one legacy credential");
+            CreateSessionRepository::new(pool.clone(), legacy_pin)
+                .handle(creation)
+                .await?;
+            // Seed the migration provenance in this isolated database's legacy-only snapshot.
+            let mut seed = pool.begin().await?;
+            sqlx::query("ALTER TABLE session_model_credential_record DISABLE TRIGGER session_model_credential_record_immutable").execute(&mut *seed).await?;
+            sqlx::query("UPDATE session_model_credential_record SET provenance_kind = 'migration_backfill' WHERE session_id = $1")
+                .bind(session.into_uuid()).execute(&mut *seed).await?;
+            sqlx::query("ALTER TABLE session_model_credential_record ENABLE TRIGGER session_model_credential_record_immutable").execute(&mut *seed).await?;
+            seed.commit().await?;
+            let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+                PostgresEligibilitySweep::new(pool.clone()),
+            );
+            let service = SessionTitles::new(
+                pool.clone(),
+                models,
+                ModelRuntimeFactory::new(None, None, None),
+                crate::credential_invocations::CredentialInvocationProcesses::new(
+                    pool.clone(),
+                    nudge,
+                ),
+            );
+            // The empty conversation cannot generate a title, but valid credentials reach admission.
+            assert!(service.prepare(session, None).await.is_err());
+            let admitted: Option<(uuid::Uuid, String)> = sqlx::query_as("SELECT resolved_provider_model_identity_id, credential_reference FROM session_title_model_call WHERE session_id = $1")
+                .bind(session.into_uuid()).fetch_optional(&pool).await?;
+            assert_eq!(
+                admitted,
+                expected_credential.map(|credential| (effective_target, credential.to_owned())),
+                "{adapter}"
+            );
+        }
+        pool.close().await;
+        Ok(())
+    }
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
