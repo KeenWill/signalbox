@@ -713,7 +713,7 @@ function TranscriptWindow({
                 (isVisibleTurnEvent(turn, item) &&
                   (item.body.type !== 'tool_batch' ||
                     detail === 'condensed' ||
-                    item.body.tools.some(
+                    turn.tools.some(
                       (tool) =>
                         tool.evidence.type === 'physical_attempt' &&
                         tool.evidence.result_media_reference != null,
@@ -877,7 +877,7 @@ function TranscriptWindow({
                         (isVisibleTurnEvent(turn, item) &&
                           (item.body.type !== 'tool_batch' ||
                             detail === 'condensed' ||
-                            item.body.tools.some(
+                            turn.tools.some(
                               (tool) =>
                                 tool.evidence.type === 'physical_attempt' &&
                                 tool.evidence.result_media_reference != null,
