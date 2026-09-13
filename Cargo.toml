@@ -87,3 +87,7 @@ unwrap_used = "deny"
 # (`debug = 2`) if full interactive-debugger support is ever needed.
 [profile.dev]
 debug = "line-tables-only"
+
+# The native allocator's configure probes require optimization with fortified libc headers.
+[profile.dev.package.tikv-jemalloc-sys]
+opt-level = 1
