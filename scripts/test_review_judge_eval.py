@@ -50,6 +50,8 @@ class ScratchCheckoutTests(unittest.TestCase):
         self.repository = root / "repository"
         self.repository.mkdir()
         self.workspace = root / "workspace"
+        self.workspace.mkdir()
+        git(self.workspace, "init", "--initial-branch=main")
         git(self.repository, "init", "--initial-branch=main")
         self.head = self.commit("first")
 
@@ -115,6 +117,16 @@ class ScratchCheckoutTests(unittest.TestCase):
                     prepare_workspace(self.workspace, "session", tree, self.head, patch, changed_context)
                 self.assertEqual((head.parent / "change.patch").read_text(), "Original diff")
                 self.assertEqual((head.parent / "context.txt").read_text(), "Original context")
+
+    def test_agentic_root_uses_the_configured_workspaces_object_format(self):
+        workspace = self.repository.parent / "sha256-workspace"
+        git(self.repository, "init", "--object-format=sha256", str(workspace))
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        patch = self.repository.parent / "change.patch"
+        patch.write_text("Diff")
+        head = prepare_workspace(workspace, "session", tree, self.head, patch, "Context")
+        self.assertEqual(git(head.parent, "rev-parse", "--show-object-format"), "sha256")
+        self.assertEqual(git(head, "rev-parse", "HEAD"), self.head)
 
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
