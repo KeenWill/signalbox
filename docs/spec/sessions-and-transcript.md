@@ -585,7 +585,8 @@ initial reads. It retains facts for at most 24 recently read event addresses;
 changed excerpt lengths under different read budgets preserve compatible
 prefixes and retain the longest checked excerpt.
 
-Windows advance past metadata-only detail records in the requested direction
+Windows advance past metadata-only detail records, including goal-only tool
+batches hidden by the selected conversation summary, in the requested direction
 automatically within the workspace record budget and projected-byte budget. All
 returned headers, detail items and projected bytes are charged, including
 discarded records. The scan item budget is clamped to the advertised detail
@@ -598,17 +599,40 @@ scrolls into view once its row is available. An empty detail page preserves its
 unreturned-item continuation. Hidden non-tool details with a body continuation
 retain an addressable reading row; opening it shows the requested excerpt. Open
 readers retain their cursor, current page and validation predecessor above
-virtual rows until closed or evicted from the retained windows. A row containing
-the focused control stays mounted. Failed loads show the failure without an
-empty-conversation message. Retrying a failed edge read repeats that earlier or
-later request with its remaining scan allowance; success or a fresh scroll
-releases that allowance. Other failures retry the retained read. Scrolling again
-starts a fresh bounded scan using the timeline continuation. The conversation
-shows user and assistant text and attachment references, tool arguments and
-output, and unsuccessful turn outcomes in event order. Repeated terminal
-outcomes for the same turn and cause appear once. Bookkeeping is hidden until
-Events is selected. Raw detail pages remain available to validate body
-continuations.
+virtual rows until closed or evicted from the retained windows. Reader identity
+uses the row, event and logical body field/member rather than its current
+offset. Refreshed excerpts retain open readers even when their cursor changes or
+the refreshed excerpt is complete. A row containing the focused control stays
+mounted. Failed loads show the failure without an empty-conversation message.
+Retrying a failed edge read repeats that earlier or later request with its
+remaining scan allowance; success or a fresh scroll releases that allowance.
+Other failures retry the retained read. Scrolling again starts a fresh bounded
+scan using the timeline continuation. Turn segments retain window boundaries so
+prepending history preserves existing rows and their disclosures. Retained tool
+chips stay in their assigned window segment when earlier proposal evidence is
+loaded; evicted assignments are discarded. An open request-only tool keeps its
+disclosure and continued text when its first physical attempt arrives. Later
+physical attempts retain separate disclosure identities. Turn-wide
+classification uses all loaded events. The conversation shows user and assistant
+text and attachment references, tool arguments and output, and unsuccessful turn
+outcomes in event order. A completed response remains visible as a non-final
+message when its completed-turn closure is not loaded. Distinct physical tool
+attempts remain independently inspectable in event order even when they share
+one request. Physical-attempt chips include their current state in the visible
+and accessible label. A failed attempt remains labeled as failed with its
+available cause even when it has no failure excerpt. Physical attempts without a
+result or failure excerpt show their current state. Each batch retains its
+initial window page and the latest three on-demand pages; evicted members
+release their saved readers. Later batch members load on demand at the batch
+position as separate tool chips. A cursor advancing to another member is exposed
+outside the preceding tool disclosure; same-member argument, output and failure
+fields remain inside that disclosure. Tool reading controls name their argument,
+output or failure path. Goal-only batch continuations do not stop automatic
+history scans. Goal-text cursors do not belong to tool disclosures, including
+cursors returned after reading tool text; nested reading controls stop before a
+goal field. Repeated terminal outcomes for the same turn and cause appear once
+at their first chronological position. Bookkeeping is hidden until Events is
+selected. Raw detail pages remain available to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
