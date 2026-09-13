@@ -28,9 +28,17 @@ async fn recovery_rejects_checkout_revision_without_repository_before_staging()
     provision_with_candidate_capabilities(ProvisionCase::RevisionWithoutRepository).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unborn_repository_placement_and_replacement_receipt_round_trip_without_a_commit()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::UnbornRepository).await
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProvisionCase {
     Supported,
+    UnbornRepository,
     Unsupported,
     RevisionWithoutRepository,
 }
@@ -51,13 +59,20 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             selector: RunnerSelector::Identity(predecessor.identities().runner()),
             working_directory: WorkingDirectorySelection::RunnerDefault,
             credential_profile: None,
-            workspace: WorkspaceRequirement::None,
+            workspace: if case == ProvisionCase::UnbornRepository {
+                WorkspaceRequirement::RepositoryWorktree {
+                    repository: repository_key(),
+                }
+            } else {
+                WorkspaceRequirement::None
+            },
             sandbox: RunnerSandboxProfile::WorkspaceRestricted,
             permission_overrides: no_permission_overrides(),
         },
     );
     store.store_placement(&placement, None, None).await?;
-    let initial_root = private_workspace(
+    let initial_root = case_workspace(
+        case,
         session,
         predecessor.identities().runner(),
         placement.revision(),
@@ -105,7 +120,10 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         revision: (case == ProvisionCase::RevisionWithoutRepository)
             .then(|| WorkspaceRevision::try_new("a".repeat(40)).expect("checkout SHA is valid")),
     };
-    if case != ProvisionCase::Supported {
+    if !matches!(
+        case,
+        ProvisionCase::Supported | ProvisionCase::UnbornRepository
+    ) {
         let rejected =
             RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
                 if case == ProvisionCase::RevisionWithoutRepository {
@@ -135,19 +153,21 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     let operations = store
         .replacement_provisioning(candidate.identities().enrollment())
         .await?;
-    let mut malformed = pool.begin().await?;
-    sqlx::query("ALTER TABLE runner_replacement_provisioning_authorization DISABLE TRIGGER runner_replacement_provisioning_authorization_is_append_only")
+    if case == ProvisionCase::Supported {
+        let mut malformed = pool.begin().await?;
+        sqlx::query("ALTER TABLE runner_replacement_provisioning_authorization DISABLE TRIGGER runner_replacement_provisioning_authorization_is_append_only")
         .execute(&mut *malformed).await?;
-    let error = sqlx::query("UPDATE runner_replacement_provisioning_authorization SET repository_key = $1 WHERE command_id = $2")
+        let error = sqlx::query("UPDATE runner_replacement_provisioning_authorization SET repository_key = $1 WHERE command_id = $2")
         .bind(repository_key().as_str()).bind(command.command_id.into_uuid())
         .execute(&mut *malformed).await.expect_err("a repository authorization without a revision cannot persist");
-    assert_eq!(
-        error
-            .as_database_error()
-            .and_then(|error| error.constraint()),
-        Some("runner_replacement_repository_recovery_pair")
-    );
-    malformed.rollback().await?;
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("runner_replacement_repository_recovery_pair")
+        );
+        malformed.rollback().await?;
+    }
     assert_eq!(operations.len(), 1);
     assert_eq!(
         store.replace_lost_runner(command.clone()).await?,
@@ -164,7 +184,8 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         RunnerRecoveryOutcome::Pending
     );
     let authorization = &operations[0];
-    let ready = private_workspace(
+    let ready = case_workspace(
+        case,
         session,
         candidate.identities().runner(),
         authorization.placement_revision,
@@ -241,7 +262,50 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             .fetch_one(&pool)
             .await?;
     assert_eq!(consumed, 1);
+    let placement = store
+        .load_placement(session)
+        .await?
+        .expect("installed placement");
+    if case == ProvisionCase::UnbornRepository {
+        let persisted: (String, Option<String>, String) = sqlx::query_as("SELECT workspace_recovery_kind, workspace_revision, workspace_branch_name FROM runner_session_placement_record WHERE session_id = $1 AND workspace_manifest_id = $2")
+            .bind(session.into_uuid()).bind(ready.manifest_id.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(
+            persisted,
+            ("unborn_branch".to_owned(), None, "main".to_owned())
+        );
+        assert_eq!(
+            placement.placement().revision(),
+            authorization.placement_revision
+        );
+    }
     Ok(())
+}
+
+fn case_workspace(
+    case: ProvisionCase,
+    session: SessionId,
+    runner: RunnerId,
+    revision: RunnerGeneration,
+) -> ProvisionedWorkspace {
+    let mut workspace = private_workspace(session, runner, revision);
+    if case == ProvisionCase::UnbornRepository {
+        workspace.repository = Some(repository_key());
+        workspace.canonical_clone_url_digest = Some(
+            signalbox_domain::CanonicalCloneUrlDigest::try_new("a".repeat(64))
+                .expect("arbitrary fixture digest"),
+        );
+        workspace.recovery = Some(signalbox_domain::WorkspaceRecovery::UnbornBranch {
+            name: signalbox_domain::WorkspaceBranchName::try_new("main".to_owned())
+                .expect("branch name"),
+        });
+        let relative = format!("sessions/{}/{}/repo", session.into_uuid(), revision.get());
+        workspace.working_directory =
+            RunnerWorkingDirectory::try_new(format!("/workspace/{relative}"))
+                .expect("fixture directory");
+        workspace.relative_path =
+            WorkspaceRelativePath::try_new(relative).expect("fixed repository path");
+    }
+    workspace
 }
 
 fn private_workspace(

@@ -286,6 +286,12 @@ impl PostgresRunnerRegistrationService {
                 .map_err(|error| failure(RunnerProtocolStoreError::Domain(error)))?,
             manifest_id: WorkspaceManifestId::from_uuid(manifest.manifest_id.into_uuid()),
             recovery: match &manifest.recovery {
+                Some(Recovery::UnbornBranch { name }) => {
+                    Some(signalbox_domain::WorkspaceRecovery::UnbornBranch {
+                        name: signalbox_domain::WorkspaceBranchName::try_new(name.clone())
+                            .map_err(|error| failure(RunnerProtocolStoreError::Domain(error)))?,
+                    })
+                }
                 Some(Recovery::Commit { revision }) => {
                     Some(signalbox_domain::WorkspaceRecovery::Commit {
                         revision: signalbox_domain::WorkspaceRevision::try_new(revision.clone())
@@ -327,7 +333,7 @@ impl PostgresRunnerRegistrationService {
     }
 }
 
-fn provision_message(
+pub(super) fn provision_message(
     operation: &RunnerReplacementProvisioning,
 ) -> Result<WorkspaceProvision, RunnerRegistrationFailure> {
     let invalid = |_| {
@@ -370,6 +376,9 @@ fn provision_message(
                 .map_err(invalid)?,
         },
         recovery: operation.recovery.as_ref().map(|recovery| match recovery {
+            signalbox_domain::WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
+                name: name.as_str().to_owned(),
+            },
             signalbox_domain::WorkspaceRecovery::Commit { revision } => Recovery::Commit {
                 revision: revision.as_str().to_owned(),
             },

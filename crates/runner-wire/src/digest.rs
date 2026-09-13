@@ -242,11 +242,19 @@ pub enum Recovery {
         /// Full lowercase Git object identity.
         revision: String,
     },
+    /// Validated branch with no commit.
+    UnbornBranch {
+        /// Name without `refs/heads/`.
+        name: String,
+    },
 }
 
 impl Recovery {
     pub(crate) fn validate(&self) -> Result<(), ValueError> {
         match self {
+            Self::UnbornBranch { name } => WorkspaceBranchName::try_new(name.clone())
+                .map(|_| ())
+                .map_err(|_| ValueError::Result),
             Self::Commit { revision } => WorkspaceRevision::try_new(revision.clone())
                 .map(|_| ())
                 .map_err(|_| ValueError::Result),
@@ -335,6 +343,9 @@ impl WorkspaceManifest {
         workspace: &ProvisionedWorkspace,
     ) -> Result<Self, ValueError> {
         let recovery = workspace.recovery.as_ref().map(|value| match value {
+            WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
+                name: name.as_str().to_owned(),
+            },
             WorkspaceRecovery::Commit { revision } => Recovery::Commit {
                 revision: revision.as_str().to_owned(),
             },
@@ -642,6 +653,10 @@ fn repository_record(value: &RepositoryEntry) -> Vec<u8> {
 fn recovery_record(value: &Recovery) -> Vec<u8> {
     let mut record = Vec::new();
     match value {
+        Recovery::UnbornBranch { name } => {
+            push_field(&mut record, b"unborn_branch");
+            push_field(&mut record, name.as_bytes());
+        }
         Recovery::Commit { revision } => {
             push_field(&mut record, b"commit");
             push_field(&mut record, revision.as_bytes());

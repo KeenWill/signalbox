@@ -87,7 +87,7 @@ async fn run(
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
         } {
-            Ok(connection) => connection,
+            Ok(connection) => connection.with_configuration(configuration.clone()),
             Err(error) if error.is_reconnectable() => {
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Establishment, &error, delay);

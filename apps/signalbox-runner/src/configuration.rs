@@ -171,7 +171,7 @@ impl RunnerConfiguration {
         Ok(configuration)
     }
 
-    fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
+    pub(crate) fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
         let raw: RawConfiguration =
             toml::from_str(content).map_err(|_| RunnerConfigurationError::InvalidDocument)?;
         if raw.version != CONFIGURATION_VERSION {
@@ -211,7 +211,15 @@ impl RunnerConfiguration {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(RunnerConfigurationError::InvalidAdvertisement)?,
-            workspace_capabilities: Vec::new(),
+            workspace_capabilities: if raw
+                .sandbox_profiles
+                .iter()
+                .any(|profile| matches!(profile, ConfiguredSandbox::Ambient))
+            {
+                vec![signalbox_runner_wire::WorkspaceCapability::WorktreePerSession]
+            } else {
+                Vec::new()
+            },
             sandbox_profiles: raw
                 .sandbox_profiles
                 .into_iter()
@@ -747,11 +755,9 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
             configuration.advertisement().sandbox_profiles,
             [SandboxProfile::Ambient]
         );
-        assert!(
-            configuration
-                .advertisement()
-                .workspace_capabilities
-                .is_empty()
+        assert_eq!(
+            configuration.advertisement().workspace_capabilities,
+            [signalbox_runner_wire::WorkspaceCapability::WorktreePerSession]
         );
     }
 

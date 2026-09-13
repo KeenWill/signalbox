@@ -30,6 +30,8 @@ use crate::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
 };
 
+mod workspaces;
+
 const SOCKET_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const FIRST_RUNNER_SEQUENCE: u64 = 1;
@@ -285,7 +287,7 @@ pub enum ServeOutcome {
 /// Closed local recovery gap; no wire recovery facts are fabricated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryGap {
-    UnbornHeadNotRepresentable,
+    ReleaseNotBuilt,
 }
 
 /// Typed proof that recovery is deliberately unavailable.
@@ -303,7 +305,7 @@ impl RecoveryUnavailable {
 
 impl fmt::Display for RecoveryUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runner recovery is unavailable because unborn HEAD is unrepresentable")
+        formatter.write_str("runner workspace release is unavailable")
     }
 }
 
@@ -457,6 +459,7 @@ pub enum RunnerConnectionError {
     Violation(ProtocolViolation),
     InvalidLocalFrame(ValueError),
     RecoveryUnavailable(RecoveryUnavailable),
+    Workspace(crate::WorkspaceProvisionError),
 }
 
 impl fmt::Display for RunnerConnectionError {
@@ -478,6 +481,7 @@ impl fmt::Display for RunnerConnectionError {
             Self::Violation(error) => write!(formatter, "runner protocol violation: {error}"),
             Self::InvalidLocalFrame(_) => formatter.write_str("runner local frame is invalid"),
             Self::RecoveryUnavailable(error) => error.fmt(formatter),
+            Self::Workspace(error) => error.fmt(formatter),
         }
     }
 }
@@ -491,6 +495,7 @@ impl Error for RunnerConnectionError {
             Self::Violation(error) => Some(error),
             Self::InvalidLocalFrame(error) => Some(error),
             Self::RecoveryUnavailable(error) => Some(error),
+            Self::Workspace(error) => Some(error),
             Self::PeerClosed | Self::PeerRejected { .. } => None,
         }
     }
@@ -526,6 +531,9 @@ pub struct RunnerConnection<S> {
     resumed_lease: Option<LeaseCorrelation>,
     execution: Option<RunnerExecution>,
     last_recorded: Option<LeaseCorrelation>,
+    configuration: Option<crate::RunnerConfiguration>,
+    workspace: Option<workspaces::WorkspaceExecution>,
+    last_workspace_recorded: Option<signalbox_runner_wire::WorkspaceRecorded>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
@@ -536,6 +544,7 @@ pub struct RunnerConnection<S> {
 enum RunnerEvent {
     Message(Message),
     Result(RetainedResult),
+    WorkspaceReady(signalbox_runner_wire::WorkspaceReady),
 }
 
 struct RunnerExecution {
@@ -686,6 +695,16 @@ where
                         }
                     }
                 }
+                if resumed
+                    .directives
+                    .workspace_operation
+                    .as_ref()
+                    .is_some_and(|directive| directive.action != DirectiveAction::Await)
+                {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::ResumeDirectives,
+                    ));
+                }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 if let Some(correlation) = &resumed_lease {
                     send_message(
@@ -710,12 +729,21 @@ where
             resumed_lease,
             execution: None,
             last_recorded: None,
+            configuration: None,
+            workspace: None,
+            last_workspace_recorded: None,
             receipt,
             advertisement: advertisement.clone(),
             outcome,
             connection_epoch,
             heartbeat: None,
         })
+    }
+
+    /// Supplies the local repository and sandbox configuration for workspace operations.
+    pub fn with_configuration(mut self, configuration: crate::RunnerConfiguration) -> Self {
+        self.configuration = Some(configuration);
+        self
     }
 
     /// Returns the establishment path used by this live connection.
@@ -741,7 +769,7 @@ where
     /// Reports the recovery design gap without constructing wire recovery facts.
     pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
         RecoveryUnavailable {
-            gap: RecoveryGap::UnbornHeadNotRepresentable,
+            gap: RecoveryGap::ReleaseNotBuilt,
         }
     }
 
@@ -822,6 +850,7 @@ where
     {
         tokio::pin!(shutdown);
         let mut shutdown_requested = false;
+        self.ensure_workspace(state)?;
         loop {
             if shutdown_requested && !self.has_unsettled_lease(state) {
                 return Ok(ServeOutcome::ShutdownReady);
@@ -845,6 +874,7 @@ where
             || self.execution.is_some()
             || inventory.lease.is_some()
             || inventory.result.is_some()
+            || inventory.workspace_operation.is_some()
     }
 
     /// Handles one complete daemon frame or completed child result.
@@ -852,6 +882,7 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
+        self.ensure_workspace(state)?;
         let event = self.receive_event().await?;
         self.serve_event(state, event).await
     }
@@ -860,6 +891,7 @@ where
         tokio::select! {
             message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => message.map(RunnerEvent::Message),
             result = execution_finished(&mut self.execution) => result.map(RunnerEvent::Result),
+            ready = workspaces::workspace_finished(&mut self.workspace) => ready.map(RunnerEvent::WorkspaceReady),
         }
     }
 
@@ -870,6 +902,12 @@ where
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match event {
             RunnerEvent::Message(message) => self.serve_message(state, message).await,
+            RunnerEvent::WorkspaceReady(ready) => {
+                state.record_workspace_ready(ready)?;
+                self.workspace = Some(workspaces::WorkspaceExecution::Ready);
+                self.send_retained_workspace(state).await?;
+                Ok(None)
+            }
             RunnerEvent::Result(result) => {
                 state.record_terminal_result(result)?;
                 self.execution = None;
@@ -908,6 +946,7 @@ where
                 let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
                 self.send_retained_result(state).await?;
+                self.send_retained_workspace(state).await?;
                 Ok(None)
             }
             Message::Shutdown(shutdown)
@@ -942,9 +981,18 @@ where
                     provision.correlation.runner_id,
                     provision.correlation.registration_revision,
                 )?;
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                if self.pending_offer.is_some() || self.execution.is_some() {
+                    return Err(lease_mismatch());
+                }
+                self.check_workspace(provision.clone())?;
+                state.record_provision(provision)?;
+                self.ensure_workspace(state)?;
+                self.send_retained_workspace(state).await?;
+                Ok(None)
+            }
+            Message::WorkspaceRecorded(recorded) => {
+                self.record_workspace(state, recorded)?;
+                Ok(None)
             }
             Message::WorkspaceRelease(release) => {
                 if release.correlation.runner_id != self.receipt.runner_id() {
@@ -963,6 +1011,7 @@ where
                 )?;
                 if self.pending_offer.is_some()
                     || state.reconnect_inventory().lease.is_some()
+                    || state.retained_provision().is_some()
                     || offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
                     || self
                         .advertisement
@@ -1690,7 +1739,7 @@ mod tests {
 
         assert_eq!(
             connection.recovery_unavailable().gap(),
-            RecoveryGap::UnbornHeadNotRepresentable
+            RecoveryGap::ReleaseNotBuilt
         );
     }
 
@@ -1793,7 +1842,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_provision_stops_at_the_typed_recovery_seam() {
+    async fn workspace_provision_requires_local_configuration_before_acceptance() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -1847,9 +1896,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
-                gap: RecoveryGap::UnbornHeadNotRepresentable,
-            })
+            RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::RepositoryUnavailable)
         ));
     }
 
@@ -1980,3 +2027,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod workspace_tests;

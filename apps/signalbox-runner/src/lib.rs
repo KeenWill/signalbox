@@ -5,8 +5,10 @@ mod executor;
 mod journal;
 mod protocol;
 mod state;
+mod workspace;
 
 pub use executor::{ECHO_CHILD_ARGUMENT, run_echo_child};
+pub use workspace::provision::WorkspaceProvisionError;
 
 pub use configuration::{
     AllowedNetworkHost, ArgumentError, RunnerConfiguration, RunnerConfigurationError,

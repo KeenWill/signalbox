@@ -75,35 +75,14 @@ argument. The runner rejects an unknown credential profile before accepting the
 authorization and returns one `ProvisionedWorkspace` receipt whose manifest
 facts match every correlation.
 
-A complete workspace lives at
-`sessions/<canonical-session-uuid>/<placement-revision>/repo` with its own
-`.git`; no shared Git directory, linked-worktree administration, home path, or
-credential-bearing remote URL is used. Provisioning creates a sibling staging
-directory, clones under the restricted profile, writes a versioned `0600`
-non-secret manifest in the non-mounted placement parent, fsyncs, and atomically
-renames the placement directory before returning the receipt. Exact provisioning
-replay returns the matching ready receipt, and conflicting facts fail closed. A
-clone of an empty repository is an ordinary success whose manifest records the
-unborn branch.
+[Workspace publication](../spec/runner-protocol.md#workspace-publication) owns
+the ambient anonymous clone, private root, protected manifest, and restart
+re-adoption. Restricted acquisition clones inside the restricted profile. Each
+placement has exactly one writable root, whether a repository, selected plain
+directory, or private root. Confinement is defined over that root.
 
-Exactly one writable root exists per placement: the provisioned repository, the
-exact selected working directory, or a private root at the sibling path
-`sessions/<canonical-session-uuid>/<placement-revision>/work` that the runner
-creates on first use with the same manifest and no repository key, clone-URL
-digest, or credential-profile name. Confinement is defined over that root, which
-need not be a repository. Each root is identified by durable facts, a manifest,
-the placement value that names the directory, or the private root's
-deterministic path and manifest, never by process memory. A restarted runner
-recomputes the private-root path from placement facts, authenticates it against
-the manifest, and re-adopts the root with whatever the session wrote into it; it
-never substitutes a fresh empty directory for one holding session files.
-
-The manifest lifecycle is `staging`, `ready`, `active`, then `releasing`.
-Transitions advance only in that order, equal replay retains the same value, and
-deletion is represented by absence rather than a fifth token. Recovery resolves
-the repository key again and requires the current canonical URL digest to equal
-the manifest value; a changed mapping is `manifest_conflict`, never a
-reinterpretation of an existing clone.
+After `active`, the manifest advances to `releasing`; deletion is represented by
+absence rather than another lifecycle token.
 
 Runners are not cleanup authorities. Only the runner that provisioned a
 workspace can delete it; a replaced, revoked, or dead runner leaves its

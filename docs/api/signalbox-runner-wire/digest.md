@@ -98,6 +98,9 @@ pub enum Recovery {
         name: string::String,
         revision: string::String,
     },
+    UnbornBranch {
+        name: string::String,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

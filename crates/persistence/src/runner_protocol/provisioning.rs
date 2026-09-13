@@ -357,11 +357,14 @@ fn decode_recovery(
     branch: Option<String>,
 ) -> Result<Option<WorkspaceRecovery>, RunnerProtocolStoreError> {
     let Some(revision) = revision else {
-        return if branch.is_none() {
-            Ok(None)
-        } else {
-            Err(RunnerProtocolCorruption::InvalidEncoding.into())
-        };
+        return branch
+            .map(|name| {
+                Ok(WorkspaceRecovery::UnbornBranch {
+                    name: WorkspaceBranchName::try_new(name)
+                        .map_err(RunnerProtocolStoreError::Domain)?,
+                })
+            })
+            .transpose();
     };
     let revision =
         WorkspaceRevision::try_new(revision).map_err(RunnerProtocolStoreError::Domain)?;

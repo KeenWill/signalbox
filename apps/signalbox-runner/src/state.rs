@@ -313,6 +313,7 @@ impl Error for RunnerStateError {
 #[derive(Debug)]
 pub struct RunnerStateRoot {
     directory: File,
+    canonical_root: std::path::PathBuf,
     state: RunnerState,
     journal: Journal,
 }
@@ -445,8 +446,14 @@ impl RunnerStateRoot {
             }
         };
         journal.validate_owner(&state)?;
+        let canonical_root = fs::canonicalize(path).map_err(|source| RunnerStateError::Io {
+            operation: StateOperation::Inspect,
+            resource: StateResource::Root,
+            source,
+        })?;
         Ok(Self {
             directory,
+            canonical_root,
             state,
             journal,
         })
@@ -457,9 +464,70 @@ impl RunnerStateRoot {
         &self.state
     }
 
+    pub(crate) fn workspace_store(
+        &self,
+    ) -> Result<crate::workspace::RunnerWorkspaceStore, RunnerStateError> {
+        let directory = self
+            .directory
+            .try_clone()
+            .map_err(|source| RunnerStateError::Io {
+                operation: StateOperation::Open,
+                resource: StateResource::Root,
+                source,
+            })?;
+        Ok(crate::workspace::RunnerWorkspaceStore::from_root(
+            directory,
+            self.canonical_root.clone(),
+        ))
+    }
+
     /// Projects the replayed durable journal into the next resume inventory.
     pub fn reconnect_inventory(&self) -> signalbox_runner_wire::ReconnectInventory {
         self.journal.reconnect_inventory()
+    }
+
+    pub(crate) fn retained_provision(
+        &self,
+    ) -> Option<(
+        &signalbox_runner_wire::WorkspaceProvision,
+        Option<&signalbox_runner_wire::WorkspaceReady>,
+    )> {
+        self.journal.provision()
+    }
+
+    pub(crate) fn record_provision(
+        &mut self,
+        request: signalbox_runner_wire::WorkspaceProvision,
+    ) -> Result<(), RunnerStateError> {
+        let receipt = self
+            .state
+            .receipt()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if receipt.runner_id() != request.correlation.runner_id
+            || (receipt.registration_revision() != request.correlation.registration_revision
+                && !self
+                    .journal
+                    .provision()
+                    .is_some_and(|(prior, _)| prior == &request))
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.journal.record_provision(&self.directory, request)
+    }
+
+    pub(crate) fn record_workspace_ready(
+        &mut self,
+        ready: signalbox_runner_wire::WorkspaceReady,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.record_workspace_ready(&self.directory, ready)
+    }
+
+    pub(crate) fn acknowledge_workspace(
+        &mut self,
+        recorded: &signalbox_runner_wire::WorkspaceRecorded,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_workspace(&self.directory, recorded)
     }
 
     /// Fsyncs the exact claimed lease phase before its named execution step.

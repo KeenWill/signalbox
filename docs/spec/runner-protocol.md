@@ -21,13 +21,14 @@ have durable request, receipt, and daemon handlers. The local catalog admits the
 `echo` capability class, the `ambient` profile, and the existing daemon `echo`
 tool as a combined-locus pure declaration with the identical model definition
 and permission default. The runner advertises configured availability for those
-entries, credential profiles, and repositories, with no workspace capability. It
-executes `echo` in a plain child process under `ambient` and retains the claimed
-phase and terminal result in a versioned, fsynced, atomically published private
-journal. An initialized state root without that journal fails startup. Resume
-reconciles the retained lease phase and terminal result against durable daemon
-state. Workspace reconciliation and sandbox supervision are listed under
-Planned.
+entries, credential profiles, and repositories. An ambient runner also
+advertises `worktree_per_session`. It executes `echo` in a plain child process
+under `ambient` and retains the claimed phase and terminal result in a
+versioned, fsynced, atomically published private journal. An initialized state
+root without that journal fails startup. Resume reconciles the retained lease
+phase and terminal result against durable daemon state. Provisioning resumes the
+exact retained workspace operation; release, leak reconciliation, and sandbox
+supervision are listed under Planned.
 
 The daemon admits authenticated runner recovery after migrations and before the
 generic startup scan or blob checks. Ordinary enrollment waits until the process
@@ -112,6 +113,32 @@ filesystem-confidentiality claim under `ambient`.
 The workspace manifest carries the digest of the canonical clone URL rather than
 the URL. Why: the URL is credential-free, but its digest is sufficient identity
 and avoids repeating the operator's configuration value.
+
+## Workspace publication
+
+The runner accepts an ambient `workspace_provision` only after resolving its
+repository and optional credential profile against local configuration. Unknown
+profiles reject before the operation is journaled. Anonymous acquisition runs
+Git as a plain child process. Credentialed acquisition is unavailable.
+
+Repository workspaces live at
+`sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
+`.git` directory and no shared object store or credential-bearing remote URL.
+Repository-free private roots use the sibling `work` path. A sibling staging
+placement holds a versioned `0600` manifest outside the writable root;
+publication fsyncs the files and directories and atomically renames the
+placement. The manifest advances from `staging` to `ready`, then to `active`
+upon an exact `workspace_recorded` acknowledgement. A repository records a
+commit, a branch and commit, or an `unborn_branch` with its name and no commit
+revision.
+
+The runner retains the complete provisioning request and ready receipt in its
+private journal. Restart recomputes the fixed path and authenticates the root
+and manifest, preserving session files. Equal replay retains the manifest
+identity and ready receipt. A changed repository mapping fails as
+`manifest_conflict`. Reconnect admits only the exact stored daemon authorization
+under the unchanged registration, and the runner resends its authenticated
+receipt until acknowledgement activates the manifest and clears the journal.
 
 ## Boundary contracts
 
@@ -366,15 +393,15 @@ release dispatch.
 
 ## Planned
 
-- Failure spooling and workspace, failure, and leak reconnect-inventory
+- Failure spooling and release, failure, and leak reconnect-inventory
   reconciliation over the wire:
   [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:
   [runner protocol design](../design/runner-protocol.md).
-- Workspace provisioning, private writable roots, the workspace manifest
-  lifecycle, and root re-adoption on runner restart:
+- Initial repository-placement provisioning admission and credentialed or
+  restricted repository acquisition:
   [runner protocol design](../design/runner-protocol.md).
 - Workspace release and startup leak reconciliation:
   [runner protocol design](../design/runner-protocol.md).

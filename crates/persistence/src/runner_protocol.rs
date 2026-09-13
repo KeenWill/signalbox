@@ -5970,6 +5970,9 @@ fn decode_provisioned_workspace(
     }
     let recovery = match (recovery_kind.as_deref(), branch_name, revision) {
         (None, None, None) => None,
+        (Some("unborn_branch"), Some(name), None) => Some(WorkspaceRecovery::UnbornBranch {
+            name: WorkspaceBranchName::try_new(name).map_err(RunnerProtocolStoreError::Domain)?,
+        }),
         (Some("commit"), None, Some(revision)) => Some(WorkspaceRecovery::Commit {
             revision: WorkspaceRevision::try_new(revision)
                 .map_err(RunnerProtocolStoreError::Domain)?,
@@ -7175,6 +7178,9 @@ fn encode_workspace_recovery(
     recovery: &WorkspaceRecovery,
 ) -> (Option<&'static str>, Option<&str>, Option<&str>) {
     match recovery {
+        WorkspaceRecovery::UnbornBranch { name } => {
+            (Some("unborn_branch"), Some(name.as_str()), None)
+        }
         WorkspaceRecovery::Commit { revision } => (Some("commit"), None, Some(revision.as_str())),
         WorkspaceRecovery::Branch { name, revision } => {
             (Some("branch"), Some(name.as_str()), Some(revision.as_str()))

@@ -477,10 +477,7 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::UnsupportedDigestVersion,
             ));
         }
-        if request.inventory.workspace_operation.is_some()
-            || request.inventory.operation_failure.is_some()
-            || request.inventory.leak_page.is_some()
-        {
+        if request.inventory.operation_failure.is_some() || request.inventory.leak_page.is_some() {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
                 correlation,
@@ -578,6 +575,79 @@ impl PostgresRunnerRegistrationService {
                     store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
                 })?;
         }
+        let workspace_directive = if let Some(operation) = &request.inventory.workspace_operation {
+            use signalbox_runner_wire::{OperationCorrelation, WorkspaceOperation};
+            let WorkspaceOperation::Provision {
+                correlation: provision,
+                ..
+            } = operation
+            else {
+                return Err(invalid_inventory());
+            };
+            if request.inventory.lease.is_some() || request.inventory.result.is_some() {
+                return Err(invalid_inventory());
+            }
+            let authorization = self
+                .store
+                .replacement_provisioning_authorization(
+                    signalbox_domain::RunnerProvisioningAuthorizationId::from_uuid(
+                        provision.authorization_id.into_uuid(),
+                    ),
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?
+                .ok_or_else(invalid_inventory)?;
+            if authorization.enrollment != identities.enrollment()
+                || recovery::provision_message(&authorization)?.correlation != *provision
+            {
+                return Err(invalid_inventory());
+            }
+            let enrollment = self
+                .store
+                .load_enrollment(identities.enrollment())
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?
+                .ok_or_else(invalid_inventory)?;
+            let registration = self
+                .store
+                .load_current_registration(&enrollment)
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?
+                .ok_or_else(invalid_inventory)?;
+            if registration.revision().get() != authorization.registration_revision.get()
+                || signalbox_domain::RunnerAdvertisement::new(
+                    registration.registration().classes().cloned(),
+                    registration.registration().tool_names().cloned(),
+                    registration
+                        .registration()
+                        .profiles()
+                        .map(|profile| profile.name().clone()),
+                    registration.registration().workspaces(),
+                    registration.registration().sandboxes(),
+                    registration.registration().repositories().cloned(),
+                )
+                .with_default_working_directory(
+                    registration
+                        .registration()
+                        .default_working_directory()
+                        .cloned(),
+                ) != advertisement
+            {
+                return Err(invalid_inventory());
+            }
+            Some(signalbox_runner_wire::Directive {
+                correlation: OperationCorrelation::Provision(provision.clone()),
+                action: DirectiveAction::Await,
+            })
+        } else {
+            None
+        };
         let action = match resolution {
             RunnerLeaseResumeOutcome::Empty => None,
             RunnerLeaseResumeOutcome::AwaitingDispatch => Some(DirectiveAction::Await),
@@ -601,6 +671,7 @@ impl PostgresRunnerRegistrationService {
                 })
         };
         let mut directives = ReconnectDirectives {
+            workspace_operation: workspace_directive,
             lease: request
                 .inventory
                 .lease
@@ -972,7 +1043,7 @@ pub(crate) fn local_runner_catalog() -> Result<RunnerCatalog, RunnerDomainError>
         [echo_class()?],
         [echo_declaration()?],
         [policy],
-        [],
+        [signalbox_domain::WorkspaceCapability::WorktreePerSession],
         [RunnerSandboxProfile::Ambient],
     )
 }
@@ -4178,6 +4249,67 @@ mod tests {
             service.enroll(request).await.expect("ordinary enrollment"),
             RunnerEnrollmentResponse::Active(_)
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn workspace_resume_rejects_an_unissued_authorization_without_opening_an_epoch() {
+        use signalbox_runner_wire::{ProvisionCorrelation, ProvisionPhase, WorkspaceOperation};
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let RunnerEnrollmentResponse::Active(enrolled) = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("enrollment")
+        else {
+            panic!("active enrollment")
+        };
+        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let before = store
+            .load_connection(enrollment)
+            .await
+            .expect("connection")
+            .expect("current epoch");
+        let failure = service
+            .resume(Resume {
+                request_id: enrolled.request_id,
+                digest_version: DIGEST_VERSION,
+                enrollment_id: enrolled.enrollment_id,
+                runner_id: enrolled.runner_id,
+                authentication_id: enrolled.authentication_id,
+                advertisement: empty_advertisement(),
+                prior_registration_revision: enrolled.registration_revision,
+                inventory: signalbox_runner_wire::ReconnectInventory {
+                    workspace_operation: Some(WorkspaceOperation::Provision {
+                        correlation: ProvisionCorrelation {
+                            authorization_id: identity(2),
+                            session_id: identity(3),
+                            placement_revision: PositiveU64::try_new(1).expect("first placement"),
+                            runner_id: enrolled.runner_id,
+                            registration_revision: enrolled.registration_revision,
+                            repository: None,
+                            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
+                            credential_profile: None,
+                        },
+                        phase: ProvisionPhase::ReadyUnrecorded,
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect_err("unissued workspace authority");
+        assert_eq!(failure.code, RejectionCode::CorrelationMismatch);
+        assert_eq!(
+            store
+                .load_connection(enrollment)
+                .await
+                .expect("retained connection"),
+            Some(before)
+        );
     }
 
     #[tokio::test]
