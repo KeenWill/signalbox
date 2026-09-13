@@ -391,6 +391,7 @@ export function SessionWorkspaceSurface({
     const reopeningCurrentSession = candidate === sessionId
     setOpeningPosition(app.lastLogicalPositions[candidate])
     manualAnchorRef.current = null
+    requestedSelection.current = undefined
     setExpanded(new Set())
     if (!reopeningCurrentSession) {
       setAwaitingSessionId(candidate)

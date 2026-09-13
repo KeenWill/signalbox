@@ -1019,3 +1019,32 @@ test('keeps an explicit non-result event visible and focused in Results mode', a
   await page.reload()
   await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
 })
+
+test('consumes a pending search match when reopening the current session', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  let releaseMatch = () => {}
+  const matchReleased = new Promise<void>((resolve) => {
+    releaseMatch = resolve
+  })
+  let matchRequested = false
+  await page.route('**/api/sessions/*/timeline?**', async (route) => {
+    if (new URL(route.request().url()).searchParams.get('anchor') === 'around') {
+      matchRequested = true
+      await matchReleased
+    }
+    await route.fallback()
+  })
+  await page.goto(`/sessions?session=${sessionId}&workspace=true&around=43`)
+  await expect.poll(() => matchRequested).toBe(true)
+  const session = page.getByRole('textbox', { name: 'Session ID', exact: true })
+  await session.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  releaseMatch()
+  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('row', { name: /43 Turn completed/ })).toHaveAttribute(
+    'aria-selected',
+    'false',
+  )
+  await expect(session).toBeFocused()
+})
