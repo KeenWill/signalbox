@@ -516,6 +516,21 @@ where
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, DaemonToolExecutorError> {
         let session = invocation.correlation().session();
+        if invocation.request().name().as_str() == super::review_diff::NAME {
+            let root = self
+                .resolve_workspace_instruction_root(session)
+                .await
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            let arguments = invocation.request().arguments().clone();
+            let evidence =
+                tokio::task::spawn_blocking(move || super::review_diff::read(&root, &arguments))
+                    .await
+                    .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            self.resolve_workspace_instruction_root(session)
+                .await
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            return Ok(invocation.bind(evidence));
+        }
         if invocation.request().name().as_str() == signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME {
             let authority = match &self.repository_watch {
                 Some(watch) => watch

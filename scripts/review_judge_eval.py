@@ -106,6 +106,15 @@ def prepare_checkout(repository, workspace, head_sha):
     return tree
 
 
+def default_context(case, tree):
+    """Assemble the default judge evidence without sibling projection."""
+    context = {key: case[key] for key in (
+        "id", "head_sha", "base_sha", "pr_title", "pr_scope", "findings", "context",
+    )}
+    context["findings"] = resolve_findings(tree, case["head_sha"], context["findings"])
+    return context
+
+
 class Trial:
     def __init__(self, args, case):
         self.args = args
@@ -130,18 +139,21 @@ class Trial:
 
     def run(self):
         args = self.args
-        agentic = args.template == "review-judgment-agentic"
+        full_context = args.template in ("review-judgment-agentic-full", "review-judgment-agentic-full-no-tools")
+        agentic = full_context or args.template == "review-judgment-agentic"
         result_path = self.directory / "result.json"
         if result_path.exists():
             return json.loads(result_path.read_text())
         source = args.workspace / "review-judge-eval" / args.output.name / self.key
         source.mkdir(parents=True, exist_ok=True)
         tree = prepare_checkout(args.repository, args.workspace, self.case["head_sha"])
-        context = {key: self.case[key] for key in (
-            "id", "head_sha", "base_sha", "pr_title", "pr_scope", "findings", "context",
-        )}
-        context["findings"] = resolve_findings(tree, self.case["head_sha"], context["findings"])
-        if args.sibling_full_text_bytes is not None:
+        default_case = self.case
+        if full_context:
+            default_case = {**self.case, "findings": [
+                {key: value for key, value in finding.items() if key != "source_thread_id"}
+                for finding in self.case["findings"]]}
+        context = default_context(default_case, tree)
+        if args.sibling_full_text_bytes is not None and not full_context:
             context["sibling_context"] = sibling_context(
                 self.case["review_context"], pr=self.case["pr"], head_sha=self.case["head_sha"],
                 finding_ids={finding["finding_id"] for finding in context["findings"]},
@@ -176,12 +188,14 @@ class Trial:
         if agentic:
             retained = retained_context(self.case["review_context"], pr=self.case["pr"],
                 head_sha=self.case["head_sha"], finding_ids={item["finding_id"] for item in context["findings"]},
-                source_thread_ids={item["source_thread_id"] for item in context["findings"] if "source_thread_id" in item})
+                source_thread_ids={item["source_thread_id"] for item in self.case["findings"] if "source_thread_id" in item})
             encoded, digest, synopsis = context_bytes_and_synopsis(retained)
             atomic_json(self.directory / "context-upload.json", upload_context(args.socket, encoded, digest))
             created = self.mutate("create", "create_session_from_template", template_name=args.template)
             tree = prepare_workspace(args.workspace, created["session_id"], tree,
                                      self.case["head_sha"], source / "change.patch", context["context"])
+            if full_context:
+                git(tree, "update-ref", "refs/review/base", self.case["base_sha"])
             minimal = {key: context[key] for key in ("head_sha", "base_sha", "pr_title", "pr_scope", "findings")}
             minimal["siblings"] = synopsis
             prompt = (
@@ -201,6 +215,16 @@ class Trial:
             )
             content = [{"type": "text", "text": prompt}, {"type": "attachment", "digest": digest,
                 "kind": "file", "media_type": "application/json", "display_filename": "review-context.json"}]
+            if full_context:
+                from review_judge_full_context import judgment_prompt
+                prompt = judgment_prompt(context, self.case, digest, CATEGORIES, DECLINE_CLASSES)
+                content[0]["text"] = prompt
+                atomic_json(self.directory / "prompt-composition.json", {
+                    "default_context_sha256": hashlib.sha256(json.dumps(context, ensure_ascii=False).encode()).hexdigest(),
+                    "default_context_bytes": len(json.dumps(context, ensure_ascii=False).encode()),
+                    "prompt_bytes": len(prompt.encode()),
+                    "tool_call_limit": 0 if args.template.endswith("-no-tools") else 16,
+                })
         else:
             created = self.mutate("create", "create_session_from_template", template_name=args.template)
         sid = created["session_id"]

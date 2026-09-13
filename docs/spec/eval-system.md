@@ -26,6 +26,12 @@ call's assistant text as the judgment and retains its entry witnesses and
 per-judgment totals for all reported token-usage axes; any unknown component
 leaves that axis's total unknown.
 
+`review-judgment-agentic-full` and `review-judgment-agentic-full-no-tools`
+inline the unchanged default context builder's output and the sibling helper's
+16,384-byte full-text projection. The templates allow sixteen and zero tool
+requests respectively. Both use the same prompt and terminal-result accounting.
+The prepared checkout retains its base at `refs/review/base` for `read_diff`.
+
 Before submitting agentic input, the harness provisions the session's
 [derived workspace](configuration-and-credentials.md) with a detached `head/`
 checkout, `change.patch`, and `context.txt`. File reads are confined to that

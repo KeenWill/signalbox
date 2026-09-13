@@ -3474,7 +3474,7 @@ where
             {
                 return Ok(());
             }
-            let agentic_judge = review_judge_runtime::is_agentic_judge(&model_repository, session)
+            let agentic_judge = review_judge_runtime::judge_mode(&model_repository, session)
                 .await
                 .map_err(|error| {
                     PostgresProviderToolLoopExecutionError::Model(Box::new(
@@ -3496,15 +3496,11 @@ where
             };
             let catalog = review_judge_runtime::JudgeCatalog {
                 catalog,
-                restricted: agentic_judge,
+                mode: agentic_judge,
             };
-            let automatic_tool_round_limit = if agentic_judge {
-                Some(
-                    automatic_tool_round_limit
-                        .map_or(review_judge_runtime::TOOL_ROUND_LIMIT, |limit| {
-                            limit.min(review_judge_runtime::TOOL_ROUND_LIMIT)
-                        }),
-                )
+            let automatic_tool_round_limit = if let Some(tool_limit) = agentic_judge.tool_limit() {
+                let round_limit = tool_limit as usize + 1;
+                Some(automatic_tool_round_limit.map_or(round_limit, |limit| limit.min(round_limit)))
             } else {
                 automatic_tool_round_limit
             };
