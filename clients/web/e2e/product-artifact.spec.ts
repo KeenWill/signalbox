@@ -122,7 +122,7 @@ for (const viewport of [
     await page.keyboard.press('Escape')
     await expect(pane(page)).toBeHidden()
     await expect(attachment(page)).toBeFocused()
-    await expect(page.getByRole('heading', { name: /00000000-0000/ })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
     expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
   })
 }
@@ -259,7 +259,9 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
   const request = page.waitForRequest('**/api/bootstrap')
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await request
-  await page.getByText('Signalbox', { exact: true }).click()
+  await page
+    .getByRole('navigation', { name: 'Product', exact: true })
+    .click({ position: { x: 1, y: 1 } })
   await expect(page.locator('body')).toBeFocused()
   response.resolve()
   await expect(page.locator('.product-connection')).toHaveCount(0)
