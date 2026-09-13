@@ -320,7 +320,7 @@
         "usagesDigest": "H0opy+PLNeMUOPEPgzvK1+5bO1GFuYIVjfU/jmDShZQ=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
-          "FILE:@@//Cargo.lock 7d3deb6f05c1b220b1694a2f9f31505e9f810965f9ae8e7f5bb0f8f854904d85"
+          "FILE:@@//Cargo.lock 7c0c09fdaa4155fef8cd769046e11551f8f70276921df260c374fd907fecd70b"
         ],
         "generatedRepoSpecs": {
           "rusty_v8_archive": {
