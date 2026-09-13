@@ -925,7 +925,7 @@ for (const level of ['Summary', 'Tools']) {
   })
 }
 
-for (const changed of ['attempt', 'attachments', 'total']) {
+for (const changed of ['attempt', 'attachments', 'total', 'excerpt contents']) {
   test(`rejects an initial expanded event reread with changed ${changed}`, async ({ page }) => {
     await turnApi(page)
     let corrupt = true
@@ -960,7 +960,12 @@ for (const changed of ['attempt', 'attachments', 'total']) {
               body: {
                 ...input.body,
                 attachments: changed === 'attachments' ? input.body.attachments : [],
-                text: changed === 'total' ? text : input.body.text,
+                text:
+                  changed === 'total'
+                    ? text
+                    : changed === 'excerpt contents'
+                      ? { ...input.body.text, text: `!${input.body.text.text.slice(1)}` }
+                      : input.body.text,
               },
             }
       return route.fulfill({
