@@ -44,6 +44,7 @@ impl error::Error for session_metadata::SessionMetadataCorruption {
 pub enum SessionMetadataRepositoryError {
     Database(error::Error),
     CommitAmbiguous(error::Error),
+    InvalidTitleMerge(signalbox_domain::SessionMetadataContentError),
     DifferentCommandKind {
         command_id: signalbox_domain::DurableCommandId,
     },

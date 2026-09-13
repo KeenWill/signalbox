@@ -719,6 +719,8 @@ for (const viewport of [
   test(`repository watch origin at ${viewport.name} size`, async ({ page, browserName }) => {
     await page.setViewportSize(viewport)
     const origin: WebRepositoryWatchProvenance = {
+      head_branch: 'review',
+      base_branch: 'main',
       dispatch_id: '00000000-0000-0000-0000-000000000063',
       action_ordinal: '2',
       repository: 'signalbox/example',

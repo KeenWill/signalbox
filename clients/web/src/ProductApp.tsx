@@ -3,24 +3,38 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import {
+  Activity,
   AlertTriangle,
+  Bell,
+  ChartNoAxesCombined,
   Command,
+  Download,
   FileSearch,
+  GitPullRequest,
+  Home,
   Menu,
+  MessagesSquare,
   Moon,
   PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  Settings,
   Sun,
   X,
 } from 'lucide-react'
 import {
   type CSSProperties,
+  createContext,
+  type ReactNode,
   type RefObject,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArtifactInspector,
   artifactResolutionId,
@@ -86,28 +100,81 @@ const productNavigationCommandIds: Record<ProductRouteId, ProductCommandId> = {
   settings: 'navigate.settings',
 }
 
+const productNavigationIcons = {
+  attention: Bell,
+  sessions: MessagesSquare,
+  search: Search,
+  runners: Activity,
+  reviews: GitPullRequest,
+  imports: Download,
+  usage: ChartNoAxesCombined,
+  settings: Settings,
+}
+
 export function ProductNavigation({
   active,
   context,
   onActivate,
+  collapsed,
 }: {
+  collapsed?: boolean
   active: ProductRouteId
   context: ProductCommandContext
   onActivate?: () => void
 }) {
   const scenarioDisabled = !productCommandAvailable('navigate.scenario', context)
   return (
-    <div className="product-navigation">
-      <div className="brand">
-        <span className="brand-mark">SB</span>
-        <strong>Signalbox</strong>
+    <div className={`product-navigation ${collapsed ? 'navigation-collapsed' : ''}`}>
+      <div className="product-brand-row">
+        <Link
+          className="brand product-brand"
+          to="/$surface"
+          params={{ surface: 'attention' }}
+          aria-label="Signalbox home"
+          aria-disabled={context.navigationLocked || undefined}
+          tabIndex={context.navigationLocked ? -1 : undefined}
+          onClick={(event) => {
+            if (context.navigationLocked) {
+              event.preventDefault()
+              return
+            }
+            if (
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey
+            ) {
+              return
+            }
+            event.preventDefault()
+            onActivate?.()
+            invokeProductCommand('navigate.attention', context)
+          }}
+        >
+          {collapsed ? <Home aria-hidden="true" /> : <strong>Signalbox</strong>}
+        </Link>
+        {collapsed !== undefined && (
+          <button
+            type="button"
+            className="icon-button sidebar-toggle"
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!collapsed}
+            onClick={() => invokeProductCommand('navigation.toggle', context)}
+          >
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </button>
+        )}
       </div>
       <nav aria-label="Product">
         {productRoutes.map((route) => {
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
+          const Icon = productNavigationIcons[route.id]
           return (
             <Link
               key={route.id}
+              aria-label={route.label}
+              title={collapsed ? route.label : undefined}
               to="/$surface"
               params={{ surface: route.id }}
               className={active === route.id ? 'product-link active' : 'product-link'}
@@ -133,7 +200,8 @@ export function ProductNavigation({
                 invokeProductCommand(productNavigationCommandIds[route.id], context)
               }}
             >
-              <span>{route.label}</span>
+              {collapsed && <Icon aria-hidden="true" />}
+              {!collapsed && <span>{route.label}</span>}
             </Link>
           )
         })}
@@ -257,6 +325,92 @@ function CommandPalette({
                 </button>
               ))}
           </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function OpenSessionDialog({
+  context,
+  openerRef,
+  fallbackRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
+}) {
+  const open = useAppSelector((state) => state.app.overlay === 'session-entry')
+  const [sessionId, setSessionId] = useState('')
+  const entryRef = useRef<HTMLInputElement>(null)
+  const submitted = useRef(false)
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content open-session-dialog"
+          aria-describedby="open-session-description"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            entryRef.current?.focus()
+          }}
+          onEscapeKeyDown={(event) => event.stopPropagation()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            setSessionId('')
+            const opener = openerRef.current
+            if (!submitted.current && opener?.isConnected && opener.getClientRects().length > 0) {
+              opener.focus()
+            } else {
+              fallbackRef.current?.focus()
+            }
+            submitted.current = false
+          }}
+        >
+          <div className="dialog-heading">
+            <Dialog.Title>Open session by id</Dialog.Title>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close open session">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <Dialog.Description id="open-session-description">
+            Paste a session identifier.
+          </Dialog.Description>
+          <form
+            className="open-session-command"
+            onSubmit={(event) => {
+              event.preventDefault()
+              if (context.navigationLocked) return
+              submitted.current = true
+              invokeProductCommand('surface.escape', context)
+              invokeProductCommand('session.open', {
+                ...context,
+                sessionId: sessionId.trim().toLowerCase(),
+              })
+            }}
+          >
+            <label htmlFor="palette-session-id">Session ID</label>
+            <input
+              id="palette-session-id"
+              ref={entryRef}
+              value={sessionId}
+              onChange={(event) => setSessionId(event.currentTarget.value.trim())}
+              required
+              pattern="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+              autoComplete="off"
+            />
+            <button type="submit" disabled={context.navigationLocked}>
+              Open session
+            </button>
+          </form>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -423,15 +577,22 @@ function ProductToolbar({
 // hidden aside and focus a Digest input nobody can see.
 const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
 
-function useNarrowInspector(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
+function useMediaQuery(media: string): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(media).matches)
   useEffect(() => {
-    const query = window.matchMedia(INSPECTOR_SHEET_MEDIA)
+    const query = window.matchMedia(media)
     const update = () => setNarrow(query.matches)
     query.addEventListener('change', update)
     return () => query.removeEventListener('change', update)
-  }, [])
+  }, [media])
   return narrow
+}
+
+const SurfaceHeaderTarget = createContext<HTMLDivElement | null>(null)
+
+export function SurfaceHeaderActions({ headerActions }: { headerActions?: ReactNode }) {
+  const target = useContext(SurfaceHeaderTarget)
+  return target && headerActions ? createPortal(headerActions, target) : null
 }
 
 export function ProductApp({
@@ -441,6 +602,7 @@ export function ProductApp({
   surface: ProductRouteId
   search: ProductRouteState
 }) {
+  const [headerTarget, setHeaderTarget] = useState<HTMLDivElement | null>(null)
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
@@ -482,7 +644,8 @@ export function ProductApp({
       dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
     }
   }, [artifactRequest, dispatch])
-  const narrowInspector = useNarrowInspector()
+  const narrowInspector = useMediaQuery(INSPECTOR_SHEET_MEDIA)
+  const narrowNavigation = useMediaQuery('(max-width: 760px)')
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [windowRequest, setWindowRequest] = useState<{
@@ -615,6 +778,21 @@ export function ProductApp({
           ? (anchor) =>
               setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
           : undefined,
+      openSession: (sessionId) => {
+        if (surface === 'sessions') {
+          updateSessionSearch(
+            { ...sessionState, session: sessionId, workspace: true },
+            sessionState.workspace || sessionState.session !== undefined ? 'replace' : 'push',
+          )
+          return
+        }
+        void navigate({
+          to: '/$surface',
+          params: { surface: 'sessions' },
+          search: { session: sessionId, workspace: true },
+        })
+      },
+      sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
         if (path === '/scenario/streaming') {
@@ -638,6 +816,8 @@ export function ProductApp({
       },
     }
   }, [
+    app.layout,
+    narrowNavigation,
     artifactAvailable,
     bootstrap.data,
     bootstrap.isSuccess,
@@ -906,7 +1086,9 @@ export function ProductApp({
     )
 
   const shellStyle = {
-    '--product-navigation-width': `${app.paneSizes.navigation}px`,
+    '--product-navigation-width': app.navigationCollapsed
+      ? '56px'
+      : `${app.paneSizes.navigation}px`,
     '--product-inspector-width': `${app.paneSizes.inspector}px`,
   } as CSSProperties
 
@@ -916,12 +1098,13 @@ export function ProductApp({
       style={shellStyle}
     >
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} context={context} />
+        <ProductNavigation active={surface} context={context} collapsed={app.navigationCollapsed} />
       </aside>
       <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">
           <h1>{title}</h1>
           <div className="product-header-actions">
+            <div className="surface-header-actions" ref={setHeaderTarget} />
             {surface !== 'settings' && !bootstrap.isSuccess && (
               <div className="product-connection">
                 <span
@@ -980,7 +1163,7 @@ export function ProductApp({
             />
           </div>
         </header>
-        {content}
+        <SurfaceHeaderTarget value={headerTarget}>{content}</SurfaceHeaderTarget>
       </main>
       {artifactOpen && !inspectorInSheet && (
         <aside className="product-inspector" aria-label="Inspector">
@@ -994,6 +1177,7 @@ export function ProductApp({
           />
         </aside>
       )}
+      <OpenSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <CommandPalette
         context={context}
         openerRef={paletteOpenerRef}

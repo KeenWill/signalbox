@@ -42,7 +42,7 @@ pub(super) async fn replace_title(
     else {
         return invalid_title();
     };
-    let Ok(mut replacement) =
+    let Ok(replacement) =
         SessionMetadataContent::try_new(Some(request.title.clone()), Vec::new(), Vec::new(), false)
     else {
         return invalid_title();
@@ -68,25 +68,6 @@ pub(super) async fn replace_title(
         }
         Err(_) => return title_unconfirmed(),
     }
-    match repository.load_session_metadata(session).await {
-        Ok(Some(current)) => {
-            let content = current.content();
-            replacement = match SessionMetadataContent::try_new(
-                Some(request.title),
-                content.tags().map(str::to_owned).collect(),
-                content
-                    .attributes()
-                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                    .collect(),
-                content.archived(),
-            ) {
-                Ok(replacement) => replacement,
-                Err(_) => return invalid_title(),
-            };
-        }
-        Ok(None) => {}
-        Err(_) => return title_unconfirmed(),
-    }
     let Ok(request) = ReplaceSessionMetadataRequest::try_new(command, session, replacement) else {
         return invalid_title();
     };
@@ -96,6 +77,7 @@ pub(super) async fn replace_title(
     {
         Ok(ReplaceSessionMetadataOutcome::Recorded(result)) => title_result(&result),
         Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { .. }) => web_input_conflict(),
+        Err(SessionMetadataRepositoryError::InvalidTitleMerge(_)) => invalid_title(),
         Err(_) => title_unconfirmed(),
     }
 }
@@ -115,7 +97,7 @@ fn invalid_title() -> Response {
     application_error(
         StatusCode::BAD_REQUEST,
         "invalid_session_title",
-        "session and command identities must be canonical; title must be nonempty and NUL-free",
+        "session and command identities must be canonical; title must be nonempty, NUL-free, and fit the metadata size limit",
     )
 }
 
@@ -302,6 +284,143 @@ mod tests {
                 .expect("metadata")
                 .content(),
             &later
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn oversized_title_merge_returns_bad_request_without_retaining_changes_or_command() {
+        const INITIAL_TITLE: &str = "a";
+        const OVERSIZED_TITLE: &str = "bb";
+        const FITTING_TITLE: &str = "b";
+        const ATTRIBUTE_KEY: &str = "payload";
+        const PRESERVED_TAG: &str = "retained";
+        const CONFIGURED_MODEL: Uuid = uuid::uuid!("10000000-0000-4000-8000-000000000001");
+        const POOL_CONNECTIONS: u32 = 8;
+        let (_container, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(POOL_CONNECTIONS)
+                .await
+                .expect("PostgreSQL fixture");
+        let models =
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
+                .expect("models");
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(CONFIGURED_MODEL),
+            )),
+        )
+        .prepare(session)
+        .expect("creation");
+        signalbox_persistence::create_session::CreateSessionRepository::new(
+            pool.clone(),
+            models.session_credential_pin(),
+        )
+        .handle(creation)
+        .await
+        .expect("create session");
+        let payload = "x".repeat(
+            SessionMetadataContent::MAX_TOTAL_UTF8_BYTES
+                - INITIAL_TITLE.len()
+                - ATTRIBUTE_KEY.len()
+                - PRESERVED_TAG.len(),
+        );
+        let archived = true;
+        let initial = SessionMetadataContent::try_new(
+            Some(INITIAL_TITLE.into()),
+            vec![PRESERVED_TAG.into()],
+            vec![(ATTRIBUTE_KEY.into(), payload.clone())],
+            archived,
+        )
+        .expect("metadata exactly at the total size limit");
+        let repository = SessionMetadataRepository::new(pool.clone());
+        repository
+            .handle(ReplaceSessionMetadata::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                initial.clone(),
+            ))
+            .await
+            .expect("initial metadata");
+        let title_repository = SessionMetadataRepository::for_title_update(pool.clone());
+        let command = DurableCommandId::from_uuid(Uuid::now_v7());
+        let title_intent =
+            SessionMetadataContent::try_new(Some(OVERSIZED_TITLE.into()), vec![], vec![], false)
+                .expect("standalone title fits");
+        assert!(matches!(
+            title_repository
+                .handle(ReplaceSessionMetadata::new(command, session, title_intent))
+                .await,
+            Err(SessionMetadataRepositoryError::InvalidTitleMerge(
+                signalbox_domain::SessionMetadataContentError::TotalUtf8BytesExceeded
+            ))
+        ));
+        let router = super::super::production_router(
+            None,
+            Some(pool.clone()),
+            None,
+            Some(models),
+            None,
+            None,
+            None,
+        );
+        let response = router
+            .clone()
+            .oneshot(request(session, command, OVERSIZED_TITLE))
+            .await
+            .expect("oversized merge response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body");
+        let error: signalbox_web_contract::WebApiErrorResponse =
+            serde_json::from_slice(&body).expect("JSON error");
+        assert_eq!(error.error.code, "invalid_session_title");
+        assert_eq!(
+            repository
+                .load_session_metadata(session)
+                .await
+                .expect("read unchanged metadata")
+                .expect("metadata")
+                .content(),
+            &initial
+        );
+        assert!(
+            title_repository
+                .load_command(command)
+                .await
+                .expect("read rolled-back command")
+                .is_none()
+        );
+        assert_eq!(
+            router
+                .oneshot(request(session, command, FITTING_TITLE))
+                .await
+                .expect("fitting title response")
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        let expected = SessionMetadataContent::try_new(
+            Some(FITTING_TITLE.into()),
+            vec![PRESERVED_TAG.into()],
+            vec![(ATTRIBUTE_KEY.into(), payload)],
+            archived,
+        )
+        .expect("fitting merged snapshot");
+        assert_eq!(
+            repository
+                .load_session_metadata(session)
+                .await
+                .expect("read renamed metadata")
+                .expect("metadata")
+                .content(),
+            &expected
         );
         pool.close().await;
     }
