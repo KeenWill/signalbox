@@ -215,13 +215,15 @@ function SessionActions({
           >
             Set goal
           </button>
-          <button
-            type="button"
-            disabled={retained !== null || capacityReached}
-            onClick={(event) => choose('clear-goal', event.currentTarget)}
-          >
-            Clear goal
-          </button>
+          {!pendingRequest && (
+            <button
+              type="button"
+              disabled={retained !== null || capacityReached}
+              onClick={(event) => choose('clear-goal', event.currentTarget)}
+            >
+              Clear goal
+            </button>
+          )}
         </div>,
       )}
       {choice && (

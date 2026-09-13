@@ -15,6 +15,7 @@ test('approving a pending request confirms once inline', async ({ page }, testIn
   })
   await openSession(page)
   await expect(page.getByRole('button', { name: 'Cancel turn', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Clear goal', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: 'Approve', exact: true }).click()
   expect(requests).toHaveLength(0)
   await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -105,6 +106,7 @@ test('an idle session does not offer cancel', async ({ page }) => {
   await sessionApi(page)
   await openSession(page)
   await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Clear goal', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel turn', exact: true })).toHaveCount(0)
 })
 
@@ -146,7 +148,8 @@ for (const viewport of [
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     )
-    for (const name of ['Approve', 'Deny', 'Set goal', 'Clear goal']) {
+    await expect(header.getByRole('button', { name: 'Clear goal', exact: true })).toHaveCount(0)
+    for (const name of ['Approve', 'Deny', 'Set goal']) {
       const control = header.getByRole('button', { name, exact: true })
       await expect(control).toBeVisible()
       const bounds = await control.boundingBox()
