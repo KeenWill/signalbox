@@ -1152,6 +1152,11 @@ function ToolSummary({
           {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
           {result && <ToolText label="Output" excerpt={result} />}
           {failure && <ToolText label="Failure" excerpt={failure} />}
+          {evidence?.failure_present && !evidence.failure && (
+            <p className="session-turn-outcome">
+              Failure · {enumLabel(evidence.cause ?? evidence.state)}
+            </p>
+          )}
         </>
       )}
       {needsOutput && output.isPending && <small role="status">Loading output…</small>}

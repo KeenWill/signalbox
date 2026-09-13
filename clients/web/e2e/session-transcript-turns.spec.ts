@@ -770,6 +770,7 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   })
   await expect(chips).toHaveCount(2)
   const slots = transcript.locator('.session-tool-slot')
+  await expect(slots.first().getByText('Failure · Attempt lost on restart')).toBeVisible()
   await slots.first().getByRole('button', { name: 'Read more', exact: true }).click()
   await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
   await expect(
