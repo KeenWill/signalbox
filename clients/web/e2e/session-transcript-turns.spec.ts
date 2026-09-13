@@ -12,6 +12,20 @@ import {
   resultCursor,
 } from './session-detail-fixture'
 
+test('shows a completed assistant response before its turn closure is loaded', async ({
+  page,
+}, testInfo) => {
+  await turnApi(page, undefined, detailItems.slice(0, 4))
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.locator('.session-message-text')).toHaveText([
+    'Inspect the release status and retain the result.',
+    'The release checks passed. Publishing remains unapproved.',
+  ])
+  await expect(transcript.getByText('Turn completed', { exact: true })).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('completed-response.png') })
+})
+
 for (const interleaved of [false, true]) {
   test(`shows final turn text and a tool chip while keeping lifecycle noise closed${interleaved ? ' with interleaved turns' : ''}`, async ({
     page,
