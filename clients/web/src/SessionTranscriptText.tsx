@@ -62,7 +62,6 @@ type EventContinuationState = {
 }
 
 type ContinuedEventState = {
-  ownerTool?: string
   sequence: string
   cursor: WebTimelineDetailContinuation | null
   earlier: { key: string; items: WebSessionTimelineDetailPage['items'] }[]
@@ -245,7 +244,6 @@ function TranscriptWindow({
     Record<string, EventContinuationState>
   >({})
   const [continuedEvents, setContinuedEvents] = useState<Record<string, ContinuedEventState>>({})
-  const [openTools, setOpenTools] = useState<Record<string, string | null>>({})
   const surface = useRef<HTMLElement>(null)
   const commandContext: CommandContext = {
     dispatch,
@@ -468,7 +466,7 @@ function TranscriptWindow({
           turn.events.some((event) => event.address.event_sequence === eventSequence) ||
           turn.messages.length > 0 ||
           turn.result ||
-          turn.tools.length > 0 ||
+          (detail === 'condensed' && turn.tools.length > 0) ||
           turn.warnings.length > 0 ||
           turn.outcome,
       ),
@@ -476,9 +474,11 @@ function TranscriptWindow({
   )
   useEffect(() => {
     toolSegments.current = new Map(
-      turns.flatMap((turn) => turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const)),
+      allTurns.flatMap((turn) =>
+        turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const),
+      ),
     )
-  }, [turns])
+  }, [allTurns])
   const pending = useMemo(
     () =>
       pages?.flatMap((page) =>
@@ -509,15 +509,14 @@ function TranscriptWindow({
     [turns, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
-  const renderContinuation = (page: WebSessionTimelineDetailPage, ownerTool?: string) => {
-    const key = JSON.stringify([continuationSequence(page), page.continuation, ownerTool])
+  const renderContinuation = (page: WebSessionTimelineDetailPage) => {
+    const key = JSON.stringify([continuationSequence(page), page.continuation])
     return (
       <ContinuedEvent
         adoptToolPage={adoptToolPage}
         key={key}
         sessionId={sessionId}
         page={page}
-        ownerTool={ownerTool}
         limits={limits}
         state={continuedEvents[key]}
         onChange={(state) =>
@@ -548,12 +547,6 @@ function TranscriptWindow({
           )
         : current,
     )
-    const loadedSegments = new Set(allTurns.map((turn) => turn.id))
-    setOpenTools((current) =>
-      Object.keys(current).some((id) => !loadedSegments.has(id))
-        ? Object.fromEntries(Object.entries(current).filter(([id]) => loadedSegments.has(id)))
-        : current,
-    )
 
     setEventContinuations((current) =>
       Object.keys(current).some((sequence) => !loadedEvents.has(sequence))
@@ -571,7 +564,6 @@ function TranscriptWindow({
       const sequences = new Set(
         segments.flatMap((segment) => segment.events.map((event) => event.address.event_sequence)),
       )
-      const segmentIds = new Set(segments.map((segment) => segment.id))
       setContinuedEvents((current) =>
         Object.fromEntries(
           Object.entries(current).filter(([, state]) => !sequences.has(state.sequence)),
@@ -581,9 +573,6 @@ function TranscriptWindow({
         Object.fromEntries(
           Object.entries(current).filter(([sequence]) => !sequences.has(sequence)),
         ),
-      )
-      setOpenTools((current) =>
-        Object.fromEntries(Object.entries(current).filter(([id]) => !segmentIds.has(id))),
       )
     },
     [allTurns],
@@ -610,7 +599,6 @@ function TranscriptWindow({
     setEventContinuations({})
     setContinuedEvents({})
     setToolPages({})
-    setOpenTools({})
   }, [detail])
   useEffect(
     () =>
@@ -675,7 +663,8 @@ function TranscriptWindow({
                   (detail === 'full' ||
                     turnModes[turn.turnId ?? turn.id] === 'full' ||
                     item.address.event_sequence === eventSequence)) ||
-                isVisibleTurnEvent(turn, item),
+                (isVisibleTurnEvent(turn, item) &&
+                  (item.body.type !== 'tool_batch' || detail === 'condensed')),
             ),
           ),
       )
@@ -800,7 +789,8 @@ function TranscriptWindow({
                       (turn) =>
                         (turn.events.includes(item) &&
                           (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
-                        isVisibleTurnEvent(turn, item),
+                        (isVisibleTurnEvent(turn, item) &&
+                          (item.body.type !== 'tool_batch' || detail === 'condensed')),
                     ),
                   ),
               ),
@@ -861,17 +851,6 @@ function TranscriptWindow({
                 limits={limits}
                 target={eventSequence}
                 renderContinuation={renderContinuation}
-                openTool={openTools[turn.id] ?? null}
-                onOpenTool={(tool) => {
-                  const closed = openTools[turn.id]
-                  setOpenTools((current) => ({ ...current, [turn.id]: tool }))
-                  if (closed)
-                    setContinuedEvents((current) =>
-                      Object.fromEntries(
-                        Object.entries(current).filter(([, state]) => state.ownerTool !== closed),
-                      ),
-                    )
-                }}
                 eventContinuations={eventContinuations}
                 onEventContinuation={(sequence, state) =>
                   setEventContinuations((current) => ({ ...current, [sequence]: state }))
@@ -904,8 +883,6 @@ function TurnContent({
   limits,
   target,
   renderContinuation,
-  openTool,
-  onOpenTool,
   eventContinuations,
   onEventContinuation,
   onExpand,
@@ -919,14 +896,11 @@ function TurnContent({
   sessionId: string
   limits: SessionTranscriptLimits
   target?: string
-  renderContinuation: (page: WebSessionTimelineDetailPage, ownerTool?: string) => ReactNode
-  openTool: string | null
-  onOpenTool: (tool: string | null) => void
+  renderContinuation: (page: WebSessionTimelineDetailPage) => ReactNode
   eventContinuations: Readonly<Record<string, EventContinuationState>>
   onEventContinuation: (sequence: string, state: EventContinuationState) => void
   onExpand: (mode: DetailMode) => void
 }) {
-  const tool = turn.tools.find((entry) => toolEvidenceKey(entry) === openTool)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
     return page?.continuation ? renderContinuation(page) : null
@@ -950,7 +924,7 @@ function TurnContent({
             ))
         )
       })
-      .map((page) => renderContinuation(page, toolEvidenceKey(tool)))
+      .map(renderContinuation)
   const events = turn.events.filter(
     (event, index) =>
       turn.events.findIndex(
@@ -992,44 +966,34 @@ function TurnContent({
           Open turn details
         </button>
       </header>
-      {turnSummaryParts(turn).map((part) =>
-        part.kind === 'message' ? (
-          <div
-            key={conversationEntryKey(part.item)}
-            data-event-sequence={part.item.address.event_sequence}
-          >
-            <BodyText body={part.item.body} />
-            {more(part.item.address.event_sequence)}
-          </div>
-        ) : (
-          <section
-            className="session-tool-chips"
-            aria-label="Tools used"
-            key={part.tools[0] ? toolEvidenceKey(part.tools[0]) : undefined}
-          >
-            {part.tools.map((entry) => (
-              <button
-                type="button"
-                key={toolEvidenceKey(entry)}
-                aria-expanded={
-                  detail === 'condensed' ? undefined : openTool === toolEvidenceKey(entry)
-                }
-                aria-label={
-                  detail === 'condensed' ? `Open turn details for ${entry.tool_name}` : undefined
-                }
-                onClick={() =>
-                  detail === 'condensed'
-                    ? onExpand('full')
-                    : onOpenTool(
-                        openTool === toolEvidenceKey(entry) ? null : toolEvidenceKey(entry),
-                      )
-                }
-              >
-                {entry.tool_name}
-              </button>
-            ))}
-            {detail === 'condensed' &&
-              part.tools.map((entry) => (
+      {turnSummaryParts(turn)
+        .filter((part) => detail === 'condensed' || part.kind === 'message')
+        .map((part) =>
+          part.kind === 'message' ? (
+            <div
+              key={conversationEntryKey(part.item)}
+              data-event-sequence={part.item.address.event_sequence}
+            >
+              <BodyText body={part.item.body} />
+              {more(part.item.address.event_sequence)}
+            </div>
+          ) : (
+            <section
+              className="session-tool-chips"
+              aria-label="Tools used"
+              key={part.tools[0] ? toolEvidenceKey(part.tools[0]) : undefined}
+            >
+              {part.tools.map((entry) => (
+                <button
+                  type="button"
+                  key={toolEvidenceKey(entry)}
+                  aria-label={`Open turn details for ${entry.tool_name}`}
+                  onClick={() => onExpand('full')}
+                >
+                  {entry.tool_name}
+                </button>
+              ))}
+              {part.tools.map((entry) => (
                 <div className="session-tool-slot" key={toolEvidenceKey(entry)}>
                   <ToolSummary
                     tool={entry}
@@ -1041,45 +1005,33 @@ function TurnContent({
                   {moreTool(entry)}
                 </div>
               ))}
-            {detail === 'results' &&
-              tool &&
-              part.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)) && (
-                <div className="session-tool-slot">
-                  <ToolSummary
-                    tool={tool}
-                    detailPages={detailPages}
+              {detailPages
+                .filter(
+                  (page) =>
+                    advancesToolMember(page) &&
+                    turn.events.some(
+                      (event) =>
+                        event.address.event_sequence === continuationSequence(page) &&
+                        event.body.type === 'tool_batch' &&
+                        event.body.tools.some((entry) =>
+                          part.tools.some(
+                            (tool) => toolEvidenceKey(tool) === toolEvidenceKey(entry),
+                          ),
+                        ),
+                    ),
+                )
+                .map((page) => (
+                  <MoreTools
+                    key={JSON.stringify(page.continuation)}
                     sessionId={sessionId}
+                    page={page}
                     limits={limits}
-                    renderTool={renderTool}
+                    adoptToolPage={adoptToolPage}
                   />
-                  {moreTool(tool)}
-                </div>
-              )}
-            {detailPages
-              .filter(
-                (page) =>
-                  advancesToolMember(page) &&
-                  turn.events.some(
-                    (event) =>
-                      event.address.event_sequence === continuationSequence(page) &&
-                      event.body.type === 'tool_batch' &&
-                      event.body.tools.some((entry) =>
-                        part.tools.some((tool) => toolEvidenceKey(tool) === toolEvidenceKey(entry)),
-                      ),
-                  ),
-              )
-              .map((page) => (
-                <MoreTools
-                  key={JSON.stringify(page.continuation)}
-                  sessionId={sessionId}
-                  page={page}
-                  limits={limits}
-                  adoptToolPage={adoptToolPage}
-                />
-              ))}
-          </section>
-        ),
-      )}
+                ))}
+            </section>
+          ),
+        )}
       {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>
   )
@@ -1373,7 +1325,6 @@ function ContinuedEvent({
   sessionId,
   page,
   limits,
-  ownerTool,
   state,
   onChange,
 }: {
@@ -1381,7 +1332,6 @@ function ContinuedEvent({
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
-  ownerTool?: string
   state?: ContinuedEventState
   onChange: (state?: ContinuedEventState) => void
 }) {
@@ -1391,7 +1341,6 @@ function ContinuedEvent({
         type="button"
         onClick={() =>
           onChange({
-            ownerTool,
             sequence: page.items.at(-1)?.address.event_sequence ?? continuationSequence(page),
             cursor: page.continuation ?? null,
             earlier: [],
@@ -1491,7 +1440,6 @@ function ContinuedEventReader({
             if (detail.data) {
               const items = detail.data.items
               onChange({
-                ownerTool: state.ownerTool,
                 sequence,
                 earlier: [...earlier, { key: JSON.stringify(cursor), items }],
                 previous: detail.data,
