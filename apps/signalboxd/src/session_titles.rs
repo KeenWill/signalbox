@@ -397,7 +397,9 @@ fn normalize_title(text: &str) -> Option<String> {
         .take(TITLE_WORDS)
         .collect::<Vec<_>>()
         .join(" ");
-    (!title.is_empty()).then_some(title)
+    (!title.is_empty()
+        && title.len() <= signalbox_domain::SessionMetadataContent::MAX_TOTAL_UTF8_BYTES)
+        .then_some(title)
 }
 
 #[cfg(test)]
@@ -458,5 +460,12 @@ mod tests {
                 "{response:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_single_word_title_cannot_exceed_the_metadata_byte_limit() {
+        let oversized =
+            "界".repeat(signalbox_domain::SessionMetadataContent::MAX_TOTAL_UTF8_BYTES / 3 + 1);
+        assert!(normalize_title(&oversized).is_none());
     }
 }
