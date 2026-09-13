@@ -674,7 +674,9 @@ test('searches a session from its URL and can return to all sessions', async ({ 
   await expect(page).not.toHaveURL(/session=/)
 })
 
-test('keeps an oversized query rejected when clearing its session filter', async ({ page }) => {
+test('keeps an oversized query rejected after clearing its session filter and reloading', async ({
+  page,
+}) => {
   await useSearchFixture(page)
   let requests = 0
   await page.route('**/api/search?**', (route) => {
@@ -685,7 +687,13 @@ test('keeps an oversized query rejected when clearing its session filter', async
   await expect(page.getByRole('alert')).toContainText('Check your search.')
   await page.getByRole('button', { name: 'Search all sessions' }).click()
   await expect(page).not.toHaveURL(/session=/)
+  await page.reload()
   await expect(page.getByRole('alert')).toContainText('Check your search.')
   await expect(page.getByRole('heading', { name: '2 results' })).toHaveCount(0)
   expect(requests).toBe(0)
+  await page.getByRole('textbox', { name: 'Search text' }).fill('release')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(requests).toBe(1)
 })

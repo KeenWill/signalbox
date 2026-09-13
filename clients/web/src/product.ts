@@ -805,7 +805,10 @@ export const readProductSearchState = (
   const session = text('session')
   return {
     q: boundedQuery.text || undefined,
-    ...(boundedQuery.overflow || (query !== undefined && q === undefined && query !== '')
+    ...(value.queryParameterIsValid === false ||
+    value.queryParameterIsValid === 'false' ||
+    boundedQuery.overflow ||
+    (query !== undefined && q === undefined && query !== '')
       ? { queryParameterIsValid: false as const }
       : {}),
     session: session?.slice(0, 45),
