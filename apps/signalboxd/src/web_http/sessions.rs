@@ -383,6 +383,29 @@ mod tests {
         assert_eq!(summary.session, session);
         assert!(summary.archived);
         assert_eq!(summary.title_summary.as_deref(), Some("Archived review"));
+        let expected = session_catalog_summary_dto(summary).expect("catalog DTO");
+        let response = router(pool.clone(), "version = 1\n")
+            .oneshot(
+                Request::get(format!("/api/sessions/{}", session.into_uuid()))
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .expect("descriptor request"),
+            )
+            .await
+            .expect("descriptor response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let descriptor: signalbox_web_contract::WebSessionTimelineDescriptor =
+            serde_json::from_slice(
+                &to_bytes(
+                    response.into_body(),
+                    signalbox_web_contract::MAX_JSON_BODY_BYTES,
+                )
+                .await
+                .expect("descriptor body"),
+            )
+            .expect("descriptor");
+        assert_eq!(descriptor.title_summary, expected.title_summary);
+        assert_eq!(descriptor.last_activity, expected.last_activity);
         assert!(
             repository
                 .summary(SessionId::from_uuid(Uuid::now_v7()))
@@ -391,5 +414,145 @@ mod tests {
                 .is_none()
         );
         pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn descriptor_attention_failures_return_classified_projection_errors() {
+        use signalbox_domain::{
+            CreateSession, DirectModelSelection, ModelSelectionRequest,
+            SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance,
+            TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            attention::{AttentionRepository, AutomaticResumeAttemptBounds},
+            session_timeline::SessionTimelineRepository,
+        };
+        use tracing::instrument::WithSubscriber as _;
+
+        const POOL_CONNECTIONS: u32 = 4;
+        const CONFIGURED_MODEL: Uuid = uuid::uuid!("10000000-0000-4000-8000-000000000001");
+        let (_timeline_database, timeline_pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(POOL_CONNECTIONS)
+                .await
+                .expect("timeline database");
+        let (_attention_database, attention_pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(POOL_CONNECTIONS)
+                .await
+                .expect("attention database");
+        let models =
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
+                .expect("model fixture");
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(CONFIGURED_MODEL),
+            )),
+        )
+        .prepare(session)
+        .expect("creation");
+        CreateSessionRepository::new(timeline_pool.clone(), models.session_credential_pin())
+            .handle(creation.clone())
+            .await
+            .expect("existing timeline session");
+
+        enum AttentionFault {
+            MissingSummary,
+            CorruptRow,
+            ClosedPool,
+        }
+        struct Case {
+            fault: AttentionFault,
+            class: &'static str,
+            cause: &'static str,
+        }
+        for case in [
+            Case {
+                fault: AttentionFault::MissingSummary,
+                class: "fail_closed_corruption",
+                cause: "catalog summary for existing session",
+            },
+            Case {
+                fault: AttentionFault::CorruptRow,
+                class: "fail_closed_corruption",
+                cause: "missing operator attention fact_kind",
+            },
+            Case {
+                fault: AttentionFault::ClosedPool,
+                class: "infrastructure",
+                cause: "attention database failure",
+            },
+        ] {
+            match case.fault {
+                AttentionFault::MissingSummary => {}
+                AttentionFault::CorruptRow => {
+                    CreateSessionRepository::new(
+                        attention_pool.clone(),
+                        models.session_credential_pin(),
+                    )
+                    .handle(creation.clone())
+                    .await
+                    .expect("attention session");
+                    sqlx::raw_sql(
+                        "ALTER TABLE operator_attention_change DISABLE TRIGGER USER;
+                                   DELETE FROM operator_attention_change;
+                                   ALTER TABLE operator_attention_change ENABLE TRIGGER USER;",
+                    )
+                    .execute(&attention_pool)
+                    .await
+                    .expect("corrupt isolated attention fixture");
+                }
+                AttentionFault::ClosedPool => attention_pool.close().await,
+            }
+            let state = super::super::WebApiState {
+                pool: Some(timeline_pool.clone()),
+                timeline: Some(SessionTimelineRepository::new(timeline_pool.clone())),
+                attention: Some(AttentionRepository::new(
+                    attention_pool.clone(),
+                    AutomaticResumeAttemptBounds::unbounded(),
+                )),
+                snapshot_reader_budget: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1))),
+                live: None,
+                search: None,
+                usage: None,
+                model_configuration: None,
+                shutdown: None,
+                monitor: None,
+                eligibility_nudge: None,
+            };
+            let output = tempfile::NamedTempFile::new().expect("capture attention failure");
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::ERROR)
+                .with_writer(output.reopen().expect("capture writer"))
+                .finish();
+            let response = super::super::timeline::session_descriptor(
+                None,
+                axum::extract::State(state),
+                axum::extract::Path(session.into_uuid().to_string()),
+            )
+            .with_subscriber(subscriber)
+            .await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = to_bytes(
+                response.into_body(),
+                signalbox_web_contract::MAX_JSON_BODY_BYTES,
+            )
+            .await
+            .expect("error body");
+            let error: signalbox_web_contract::WebApiErrorResponse =
+                serde_json::from_slice(&body).expect("projection error");
+            assert_eq!(error.error.code, "attention_projection_failed");
+            let log = std::fs::read_to_string(output.path()).expect("captured diagnostic");
+            assert!(log.contains(case.class), "failure class retained: {log}");
+            assert!(log.contains(case.cause), "failure cause retained: {log}");
+        }
+        timeline_pool.close().await;
     }
 }

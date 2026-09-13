@@ -2,6 +2,46 @@
 
 # root: types-2
 
+## WebSearchResultSource
+
+```rust
+pub enum WebSearchResultSource {
+    Session {
+        session_id: WebSessionId,
+    },
+    AcceptedInput {
+        accepted_input_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    SteeringInput {
+        accepted_input_id: WebUuid,
+        source_turn_id: WebUuid,
+    },
+    TurnTranscriptEntry {
+        semantic_entry_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    SessionTranscriptEntry {
+        semantic_entry_id: WebUuid,
+    },
+    ToolRequest {
+        tool_request_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    ToolAttempt {
+        tool_attempt_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    Attachment {
+        attachment_id: WebUuid,
+    },
+    DerivedArtifact {
+        artifact_id: WebUuid,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSearchHighlight
 
 ```rust

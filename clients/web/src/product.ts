@@ -23,7 +23,9 @@ import {
   type WebSessionTimelineDetailPage,
   type WebSubmitInputRequest,
   type WebTimelineDetailContinuation,
+  type WebUsageSummary,
 } from './generated/web-contract.mjs'
+import { HttpSearchUsageSource, type UsageFilters } from './search-usage/model'
 import { hasConversationContent } from './session-timeline/conversation'
 import { validateDetailContinuation } from './session-timeline/model'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
@@ -82,7 +84,7 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
   },
   usage: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#994 search and usage reads',
     facts: ['usage aggregation reads'],
   },
@@ -588,7 +590,7 @@ const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
   }
 }
 
-const readBoundedJson = async (
+export const readBoundedJson = async (
   response: Response,
   maximumBytes: number = MAX_PRODUCT_JSON_BYTES,
 ): Promise<unknown> => {
@@ -870,6 +872,15 @@ const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractB
 }
 
 export class SameOriginProductTransport implements ProductTransport {
+  private usageSource: HttpSearchUsageSource | undefined
+
+  async usageSummary(filters: UsageFilters, signal?: AbortSignal): Promise<WebUsageSummary> {
+    const source =
+      this.usageSource ?? (await HttpSearchUsageSource.connect(fetch.bind(globalThis), signal))
+    this.usageSource = source
+    return source.usageSummary(filters, signal)
+  }
+
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await request('/api/bootstrap', {
       headers: { accept: 'application/json' },
