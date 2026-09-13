@@ -53,9 +53,9 @@ impl CredentialInvocationProcesses {
         self
     }
 
-    pub(crate) async fn submit_title(&self, task: crate::web_http::SessionTitleTask) -> bool {
+    pub(crate) fn submit_title(&self, task: crate::web_http::SessionTitleTask) -> bool {
         match &self.title_tasks {
-            Some(tasks) => tasks.send(task).await.is_ok(),
+            Some(tasks) => tasks.try_send(task).is_ok(),
             None => false,
         }
     }
@@ -421,15 +421,11 @@ mod tests {
             CredentialInvocationProcesses::new(pool, nudge).with_session_title_tasks(tasks);
         let (started, ready) = tokio::sync::oneshot::channel();
         let (held, mut ended) = tokio::sync::oneshot::channel::<()>();
-        assert!(
-            processes
-                .submit_title(Box::pin(async move {
-                    started.send(()).expect("fixture observes execution");
-                    std::future::pending::<()>().await;
-                    drop(held);
-                }))
-                .await
-        );
+        assert!(processes.submit_title(Box::pin(async move {
+            started.send(()).expect("fixture observes execution");
+            std::future::pending::<()>().await;
+            drop(held);
+        })));
         let mut runtime_tasks = tokio::task::JoinSet::new();
         runtime_tasks.spawn(pending.recv().await.expect("runtime receives title task"));
         ready.await.expect("generation started");
@@ -576,6 +572,38 @@ mod tests {
         ).bind(session.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(abandoned, (true, true));
         read_pool.close().await;
+        let (tasks, queued) = tokio::sync::mpsc::channel(1);
+        let full_processes = CredentialInvocationProcesses::new(pool.clone(), nudge.clone())
+            .with_session_title_tasks(tasks);
+        assert!(full_processes.submit_title(Box::pin(async {})));
+        let full_titles = crate::session_titles::SessionTitles::new(
+            pool.clone(),
+            models.clone(),
+            crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
+            full_processes.clone(),
+        );
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            full_titles.start_initial(session, turn),
+        )
+        .await?;
+        assert_eq!(queued.len(), 1, "the full handoff did not need to drain");
+        assert_eq!(
+            *full_processes
+                .pending_titles
+                .lock()
+                .expect("deferred title"),
+            BTreeMap::from([(session, turn)])
+        );
+        let released: bool = sqlx::query_scalar(
+            "SELECT bool_and(title.abandoned AND title.state_kind = 'terminal' AND reservation.released_at IS NOT NULL)
+             FROM session_title_model_call title JOIN credential_invocation_reservation reservation USING (model_call_id)
+             WHERE title.session_id = $1 AND title.initial_for_turn IS NOT NULL"
+        ).bind(session.into_uuid()).fetch_one(&pool).await?;
+        assert!(
+            released,
+            "a full handoff releases the unsent claim and reservation for deferred retry"
+        );
         let repository = SessionTitleRepository::new(pool.clone());
         let mut occupying = SessionTitleCall {
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),

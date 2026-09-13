@@ -525,7 +525,8 @@ disconnects or cancels. Dismissing a pending suggestion keeps its row’s Sugges
 action unavailable until the request settles, including across catalog paging or
 workspace navigation. Recovery after guard loss aborts and drains all title
 work. At most four title tasks run at once; recovery prepares each conversation
-inside an admitted task without blocking reservation reconciliation.
+inside an admitted task without blocking reservation reconciliation. A full
+initial-title handoff defers work instead of waiting for title execution.
 Conversation-read and credential-read failures abandon unsent title claims.
 Title calls record their target, credentials, send boundary, completion, and
 reported token axes as session-level `session_title` usage evidence. Runtime
