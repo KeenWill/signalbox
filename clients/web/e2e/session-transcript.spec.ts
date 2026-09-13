@@ -1011,14 +1011,14 @@ test('keeps a terminal result reachable when its repeated arguments are hidden',
   )
 })
 
-for (const [itemLimit, byteLimit, expectedReads, retry] of [
-  [1, 65536, 1, false],
-  [10, 65536, 10, false],
-  [128, 1024, 7, false],
-  [9, 65536, 9, true],
-  [128, 1024, 7, true],
+for (const [itemLimit, byteLimit, expectedReads, retry, freshGesture] of [
+  [1, 65536, 1, false, false],
+  [10, 65536, 10, false, false],
+  [128, 1024, 7, false, false],
+  [9, 65536, 17, true, true],
+  [128, 1024, 7, true, false],
 ] as const) {
-  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${retry ? ' across failed retries' : ''}`, async ({
+  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${retry ? ' across failed retries' : ''}${freshGesture ? ' and restarts on a fresh edge gesture' : ''}`, async ({
     page,
   }) => {
     const reads: URL[] = []
@@ -1101,15 +1101,25 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
     })
     await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
     const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     if (retry) {
-      for (const count of [1, 2]) {
-        await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
-        expect(failed).toHaveLength(count)
-        expect(reads).toHaveLength(expectedReads - 1)
-        await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
-        if (count === 1) await expect.poll(() => failed.length).toBe(2)
-      }
+      await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+      expect(failed).toHaveLength(1)
+      const readsBeforeFailure = reads.length
+      await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
+      await expect.poll(() => failed.length).toBe(2)
+      await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+      expect(reads).toHaveLength(readsBeforeFailure)
       expect(failed[1]).toBe(failed[0])
+      if (freshGesture) {
+        const beforeGesture = headers.length
+        await transcript.hover()
+        await page.mouse.wheel(0, -900)
+        await expect.poll(() => headers.length).toBeGreaterThan(beforeGesture)
+        expect(headers[beforeGesture]?.searchParams.get('max_items')).toBe('8')
+      } else {
+        await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
+      }
     }
     await expect.poll(() => reads.length).toBe(expectedReads)
     await expect(surface).toHaveAttribute('aria-busy', 'false')
@@ -1127,7 +1137,6 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
     ).toBeVisible()
     expect(reads).toHaveLength(expectedReads)
     expect(reads.length * 128).toBeLessThanOrEqual(byteLimit)
-    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     const beforeGesture = headers.length
     await transcript.hover()
     await page.mouse.wheel(0, -900)
