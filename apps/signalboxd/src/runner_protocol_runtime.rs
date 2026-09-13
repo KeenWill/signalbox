@@ -300,6 +300,7 @@ impl PostgresRunnerRegistrationService {
                         .store
                         .propagate_connection_loss_session(loss, *session)
                         .await?;
+                    self.dispatch.changed();
                     if let Some(nudge) = &self.eligibility_nudge
                         && nudge.nudge(*session)
                             == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity

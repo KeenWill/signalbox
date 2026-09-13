@@ -64,6 +64,12 @@ impl RunnerProtocolStore {
             .decode_stored_placement_in(&mut transaction, &row)
             .await?;
         let (_, placement, _, grant, interrupted) = stored.into_parts();
+        if matches!(
+            placement.state(),
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        ) {
+            return Ok(None);
+        }
         let Some((enrollment, registration)) = registration else {
             return if placement.state() == &SessionRunnerPlacementState::Unpinned {
                 Ok(None)
