@@ -2,6 +2,57 @@
 
 # root: types-2
 
+## WebSearchHighlight
+
+```rust
+pub struct WebSearchHighlight {
+    pub start_byte: u32,
+    pub end_byte: u32,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSearchProjectionId
+
+```rust
+pub struct WebSearchProjectionId(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebSearchProjectionId {
+    #[must_use]
+    pub fn from_nonzero(value: nonzero::NonZeroU64) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebSearchProjectionId {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
+## WebSearchCursor
+
+```rust
+pub struct WebSearchCursor {
+    pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSearchResult
+
+```rust
+pub struct WebSearchResult {
+    pub session_id: WebSessionId,
+    pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
+    pub source: WebSearchResultSource,
+    pub content_class: WebSearchContentClass,
+    pub snippet: string::String,
+    pub highlights: vec::Vec<WebSearchHighlight>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSearchPage
 
 ```rust

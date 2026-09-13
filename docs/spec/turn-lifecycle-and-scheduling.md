@@ -3,6 +3,12 @@
 This subsystem turns accepted inputs into turns, activates at most one turn per
 session at a time, drives it, and recovers it after a crash.
 
+The same-origin JSON route `POST /api/sessions/{session_id}/cancel` accepts a
+durable command ID, the expected active turn ID, and a successor message. It
+invokes the stop command's interrupt treatment with session defaults and parent
+alone scope, sharing the tool-dispatch gate. A 204 acknowledges the recorded
+command; refusals retain the application error code.
+
 ## Overview
 
 A turn is one durable logical request for one conversational outcome, made from

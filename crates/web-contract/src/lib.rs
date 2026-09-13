@@ -180,6 +180,58 @@ pub struct WebSubmitInputRequest {
     pub message: String,
 }
 
+/// Stops the named turn by accepting a successor message with session defaults.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebCancelTurnRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+    /// Active turn observed when the action was chosen.
+    pub expected_active_turn_id: String,
+    /// User message for the immediate successor turn.
+    pub message: String,
+}
+
+/// A durable human decision for the request named by the route.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebApprovalRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+    /// Human approval or denial.
+    pub decision: WebApprovalDecision,
+    /// Optional denial explanation.
+    pub note: Option<String>,
+}
+
+/// Human decisions admitted by the ordinary tool decision command.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebApprovalDecision {
+    /// Permit this request.
+    Approve,
+    /// Refuse this request.
+    Deny,
+}
+
+/// Attaches a goal through the ordinary user goal command.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebGoalRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+    /// Immutable statement of work.
+    pub statement: String,
+}
+
+/// Identity of a durable session action with no additional payload.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionActionRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+}
+
 /// Creates an interactive session using the named template's defaults.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3078,6 +3130,26 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSubmitInputRequest",
             decoder: "decodeWebSubmitInputRequest",
             schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebCancelTurnRequest",
+            decoder: "decodeWebCancelTurnRequest",
+            schema: canonical_schema(schemars::schema_for!(WebCancelTurnRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebApprovalRequest",
+            decoder: "decodeWebApprovalRequest",
+            schema: canonical_schema(schemars::schema_for!(WebApprovalRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebGoalRequest",
+            decoder: "decodeWebGoalRequest",
+            schema: canonical_schema(schemars::schema_for!(WebGoalRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebSessionActionRequest",
+            decoder: "decodeWebSessionActionRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSessionActionRequest).to_value()),
         },
         ContractSchema {
             name: "WebCreateSessionRequest",
