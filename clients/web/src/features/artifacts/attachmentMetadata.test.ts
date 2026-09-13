@@ -22,6 +22,7 @@ describe('attachment descriptor media types', () => {
     'image/png',
     'application/vnd.example+json',
     'text/plain; charset=utf-8',
+    'text/plain; charset=utf-8   ',
     'text/plain; charset="utf-8"',
   ])('preserves MIME label %s', (label) => {
     expect(attachmentDescriptorMediaType(label)).toBe(label)
