@@ -15,7 +15,7 @@ import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey } from './session-timeline/conversation'
-import type { SessionWindowAnchor } from './session-timeline/model'
+import { initialDetailFacts, type SessionWindowAnchor } from './session-timeline/model'
 import {
   TRANSCRIPT_RETAINED_WINDOWS,
   TRANSCRIPT_WINDOW_BYTES,
@@ -826,7 +826,7 @@ function TurnContent({
                 <div className="session-tool-slot" key={toolEvidenceKey(entry)}>
                   <ToolSummary
                     tool={entry}
-                    turn={turn}
+                    detailPages={detailPages}
                     sessionId={sessionId}
                     limits={limits}
                     renderTool={renderTool}
@@ -840,7 +840,7 @@ function TurnContent({
                 <div className="session-tool-slot">
                   <ToolSummary
                     tool={tool}
-                    turn={turn}
+                    detailPages={detailPages}
                     sessionId={sessionId}
                     limits={limits}
                     renderTool={renderTool}
@@ -858,23 +858,25 @@ function TurnContent({
 
 function ToolSummary({
   tool,
-  turn,
+  detailPages,
   sessionId,
   limits,
   renderTool,
 }: {
   tool: WebTimelineToolAttempt
-  turn: TranscriptTurn
+  detailPages: readonly WebSessionTimelineDetailPage[]
   sessionId: string
   limits: SessionTranscriptLimits
   renderTool?: SessionTranscriptTextProps['renderTool']
 }) {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
-  const event = turn.events.findLast(
-    (item) =>
-      item.body.type === 'tool_batch' &&
-      item.body.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)),
-  )
+  const event = detailPages
+    .flatMap((page) => page.items)
+    .findLast(
+      (item) =>
+        item.body.type === 'tool_batch' &&
+        item.body.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)),
+    )
   const member =
     event?.body.type === 'tool_batch'
       ? (event.body.projected_member_index ?? 0) +
@@ -962,9 +964,9 @@ function EventDetail({
   const element = useRef<HTMLDivElement>(null)
   const detail = useQuery({
     queryKey: ['production', 'transcript-event', sessionId, turnId, sequence, cursor, limits],
-    queryFn: ({ signal }) =>
-      turnId
-        ? readTurnTranscript(
+    queryFn: async ({ signal }) => {
+      const page = turnId
+        ? await readTurnTranscript(
             sessionId,
             turnId,
             cursor ?? { type: 'more_at', address: event.address },
@@ -972,7 +974,7 @@ function EventDetail({
             signal,
             continuation?.previous,
           )
-        : readSessionTranscript(
+        : await readSessionTranscript(
             sessionId,
             sequence,
             sequence,
@@ -980,7 +982,16 @@ function EventDetail({
             limits,
             signal,
             continuation?.previous,
-          ),
+          )
+      const item = page.items[0]
+      if (
+        cursor?.type !== 'more_body' &&
+        item &&
+        initialDetailFacts(item) !== initialDetailFacts(event)
+      )
+        throw new TypeError('Expanded event changed its retained immutable facts')
+      return page
+    },
     gcTime: 0,
     initialData: continuation?.current?.page,
     staleTime: continuation?.current ? Number.POSITIVE_INFINITY : 0,

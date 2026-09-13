@@ -357,9 +357,10 @@ test('All details retains earlier message chunks through continuation failures a
 }) => {
   await turnApi(page)
   let failLastChunk = true
-  await page.route('**/turns/*/timeline-detail?**', (route) => {
+  await page.route('**/timeline-detail?**', (route) => {
     const url = new URL(route.request().url())
-    if (url.searchParams.get('cursor_address') !== '1') return route.fallback()
+    if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '1')
+      return route.fallback()
     const offset = url.searchParams.get('cursor_offset') ?? '0'
     if (offset === '2' && failLastChunk) return route.fulfill({ status: 503, body: '' })
     const input = detailItems[0]
@@ -863,3 +864,170 @@ for (const level of ['Summary', 'Tools']) {
     }
   })
 }
+
+for (const level of ['Summary', 'Tools']) {
+  test(`reads interleaved tool output from its terminal event in ${level}`, async ({
+    page,
+  }, testInfo) => {
+    const input = detailItems[0]
+    const tool = detailItems[1]
+    if (input?.body.type !== 'user_input' || tool?.body.type !== 'tool_batch')
+      throw new Error('Fixture missing')
+    const proposal = {
+      ...tool,
+      body: {
+        ...tool.body,
+        tools: tool.body.tools.map((tool) => ({
+          ...tool,
+          evidence: { type: 'request_only' as const },
+        })),
+      },
+    }
+    const entries = [
+      input,
+      proposal,
+      {
+        ...input,
+        address: { event_sequence: '3' },
+        body: { ...input.body, turn_id: '00000000-0000-0000-0000-000000000126' },
+      },
+      { ...tool, address: { event_sequence: '4' } },
+    ]
+    await turnApi(page, undefined, entries)
+    const addresses: string[] = []
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.searchParams.get('first') === '2' && !url.searchParams.has('cursor_field'))
+        return route.fulfill({ json: detailPage([proposal]) })
+      if (url.searchParams.get('cursor_field') !== 'tool_result') return route.fallback()
+      const address = url.searchParams.get('cursor_address') ?? ''
+      addresses.push(address)
+      return address === '4' ? route.fallback() : route.fulfill({ status: 400, body: '' })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    if (level === 'Summary')
+      await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+    const summary = transcript.getByRole('region', { name: 'exec_command details', exact: true })
+    await expect(summary.getByRole('region', { name: 'Output', exact: true })).toContainText(
+      'passed',
+    )
+    expect(addresses).toEqual(['4'])
+    await page.screenshot({ path: testInfo.outputPath('terminal-tool-output.png') })
+  })
+}
+
+for (const changed of ['attempt', 'attachments', 'total']) {
+  test(`rejects an initial expanded event reread with changed ${changed}`, async ({ page }) => {
+    await turnApi(page)
+    let corrupt = true
+    const sequence = changed === 'attempt' ? '2' : '1'
+    await page.route('**/turns/*/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if (!corrupt || url.searchParams.get('cursor_address') !== sequence) return route.fallback()
+      const input = detailItems[0]
+      const batch = detailItems[1]
+      if (input?.body.type !== 'user_input' || batch?.body.type !== 'tool_batch')
+        throw new Error('Fixture missing')
+      const text = detailExcerpt('Contradictory expanded message.')
+      const item =
+        changed === 'attempt'
+          ? {
+              ...batch,
+              body: {
+                ...batch.body,
+                tools: batch.body.tools.map((tool) => ({
+                  ...tool,
+                  evidence:
+                    tool.evidence.type === 'physical_attempt'
+                      ? { ...tool.evidence, attempt_id: '00000000-0000-0000-0000-000000000999' }
+                      : tool.evidence,
+                })),
+              },
+            }
+          : {
+              ...input,
+              projected_body_bytes:
+                changed === 'total' ? 128 + Number(text.total_bytes) : input.projected_body_bytes,
+              body: {
+                ...input.body,
+                attachments: changed === 'attachments' ? input.body.attachments : [],
+                text: changed === 'total' ? text : input.body.text,
+              },
+            }
+      return route.fulfill({
+        json: detailPage(
+          [item],
+          changed === 'attempt'
+            ? {
+                type: 'more_body',
+                body: {
+                  address: batch.address,
+                  field: 'tool_result',
+                  member_index: 0,
+                  offset_bytes: '0',
+                },
+              }
+            : null,
+        ),
+      })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: 'All details', exact: true }).check()
+    const event = page
+      .getByRole('region', { name: 'Session transcript', exact: true })
+      .locator(`[data-event-sequence="${sequence}"]`)
+    await expect(event.getByRole('alert')).toContainText('Details could not be loaded.')
+    await expect(event.locator('.session-message-text, .session-tool-entry')).toHaveCount(0)
+    corrupt = false
+    await event.getByRole('button', { name: 'Retry details', exact: true }).click()
+    await expect(event.getByRole('alert')).toHaveCount(0)
+    await expect(event).toContainText(
+      changed === 'attempt' ? 'release status' : 'Inspect the release status',
+    )
+  })
+}
+
+test('accepts a longer expanded excerpt with the same retained immutable facts', async ({
+  page,
+}) => {
+  await turnApi(page)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.includes('/turns/') || url.searchParams.get('first') !== '1')
+      return route.fallback()
+    const input = detailItems[0]
+    if (input?.body.type !== 'user_input') throw new Error('Fixture missing')
+    const continuation = {
+      address: input.address,
+      field: 'input_text' as const,
+      member_index: 0,
+      offset_bytes: '7',
+    }
+    return route.fulfill({
+      json: detailPage(
+        [
+          {
+            ...input,
+            projected_body_bytes: 135,
+            body: {
+              ...input.body,
+              attachments: [],
+              text: { ...input.body.text, text: 'Inspect', continuation },
+            },
+          },
+        ],
+        { type: 'more_body', body: continuation },
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Inspect', { exact: true })).toBeVisible()
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await expect(
+    transcript.getByText('Inspect the release status and retain the result.', { exact: true }),
+  ).toBeVisible()
+  await expect(transcript.getByRole('alert')).toHaveCount(0)
+})
