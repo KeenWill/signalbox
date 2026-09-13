@@ -12,6 +12,7 @@ use signalbox_model_runtime::{
     TerminalEvidence, TokenUsage,
 };
 use signalbox_persistence::session_titles::{SessionTitleCall, SessionTitleRepository};
+use signalbox_web_contract::MAX_WEB_SESSION_TITLE_UTF8_BYTES as TITLE_MAX_UTF8_BYTES;
 use std::sync::Arc;
 
 use crate::{HubModelConfiguration, model_catalog_runtime::ModelRuntimeFactory};
@@ -21,8 +22,6 @@ const TITLE_PROMPT: &str = "Name this conversation in three to six words. Use pl
 const TITLE_WORDS: usize = 6;
 /// Short titles reserve only a small part of the model's context for output.
 const TITLE_MAX_OUTPUT_TOKENS: u32 = 256;
-/// Keeps short generated names and their JSON envelope within browser response limits.
-const TITLE_MAX_UTF8_BYTES: usize = 256;
 
 #[derive(Clone)]
 pub(crate) struct SessionTitles {

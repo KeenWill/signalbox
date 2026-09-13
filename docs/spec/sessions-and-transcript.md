@@ -519,11 +519,12 @@ titles must fit the complete preserved metadata snapshot before being accepted.
 Initial-title installation and terminal call evidence commit atomically.
 `POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
 `{ "title": "..." }` without saving; accepting a suggestion uses the metadata
-PATCH route. Title calls record their target, credentials, send boundary,
-completion, and reported token axes as session-level `session_title` usage
-evidence. They use ordinary credential-pool admission and invocation capacity; a
-terminal report naming another call leaves usage unreported. Startup closes
-abandoned title calls and releases their initial claims and unregistered
+PATCH route. Generation continues through settlement if the requesting browser
+disconnects or cancels. Title calls record their target, credentials, send
+boundary, completion, and reported token axes as session-level `session_title`
+usage evidence. They use ordinary credential-pool admission and invocation
+capacity; a terminal report naming another call leaves usage unreported. Startup
+closes abandoned title calls and releases their initial claims and unregistered
 invocation reservations. Settlement retries once before abandoning the call.
 Failed title cleanup remains registered with periodic invocation recovery until
 it succeeds; a later completed turn can claim after abandonment. Title requests
