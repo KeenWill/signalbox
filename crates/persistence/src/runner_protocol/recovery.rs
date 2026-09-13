@@ -114,7 +114,7 @@ impl RunnerProtocolStore {
             "SELECT EXISTS (
                 SELECT 1 FROM runner_current_lease_event AS head
                 JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
-                WHERE event.state_kind IN ('offered', 'claimed'))",
+                WHERE event.state_kind = 'claimed')",
         )
         .fetch_one(&self.pool)
         .await?)
