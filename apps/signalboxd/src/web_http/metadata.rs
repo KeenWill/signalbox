@@ -77,13 +77,11 @@ async fn await_title_generation(
     + 'static,
 ) -> Result<Option<String>, crate::session_titles::TitleError> {
     let (completed, result) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let _ = tasks
-            .send(Box::pin(async move {
-                let _ = completed.send(generation.await);
-            }))
-            .await;
-    });
+    tasks
+        .try_send(Box::pin(async move {
+            let _ = completed.send(generation.await);
+        }))
+        .map_err(|_| crate::session_titles::TitleError::Generation)?;
     result
         .await
         .unwrap_or(Err(crate::session_titles::TitleError::Generation))
@@ -203,39 +201,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_suggestion_waiting_for_handoff_still_reaches_settlement() {
-        use std::future::Future as _;
-
+    async fn saturated_suggestion_handoff_is_rejected_without_a_detached_waiter() {
         let (tasks, mut pending) = tokio::sync::mpsc::channel::<super::super::SessionTitleTask>(1);
         tasks.try_send(Box::pin(async {})).expect("full handoff");
         let (settled, settlement) = tokio::sync::oneshot::channel();
-        let mut request = Box::pin(await_title_generation(tasks, async move {
-            settled.send(()).expect("fixture observes settlement");
-            Ok(None)
-        }));
+        assert!(matches!(
+            await_title_generation(tasks, async move {
+                settled.send(()).expect("fixture observes settlement");
+                Ok(None)
+            })
+            .await,
+            Err(crate::session_titles::TitleError::Generation)
+        ));
         assert!(
-            request
-                .as_mut()
-                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-                .is_pending()
+            settlement.await.is_err(),
+            "rejected generation is dropped before it starts"
         );
-        drop(request);
         pending.recv().await.expect("buffered task").await;
-        let mut runtime_tasks = tokio::task::JoinSet::new();
-        runtime_tasks.spawn(
-            tokio::time::timeout(std::time::Duration::from_secs(5), pending.recv())
-                .await
-                .expect("cancelled request retains its handoff")
-                .expect("runtime receives suggestion"),
+        assert!(
+            pending.recv().await.is_none(),
+            "saturation leaves no detached handoff waiter"
         );
-        settlement
-            .await
-            .expect("suggestion settles after cancellation");
-        runtime_tasks
-            .join_next()
-            .await
-            .expect("runtime owns generation")
-            .expect("generation completes");
     }
 
     #[tokio::test]
