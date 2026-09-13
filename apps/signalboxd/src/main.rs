@@ -2115,6 +2115,15 @@ async fn run_hub_incarnation(
     let startup = migrate_scan_then_schedule(
         async {
             install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
+            signalbox_persistence::session_titles::SessionTitleRepository::new(pool.clone())
+                .abandon_incomplete()
+                .await
+                .map_err(|_| {
+                    erase_startup_database_cause(
+                        RuntimePhase::StartupScan,
+                        SanitizedStartupCause::Static("session_title_recovery_failed"),
+                    )
+                })?;
             invocation_processes.recover().await.map_err(|_| {
                 erase_startup_database_cause(
                     RuntimePhase::StartupScan,

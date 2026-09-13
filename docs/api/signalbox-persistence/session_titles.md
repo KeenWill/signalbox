@@ -29,6 +29,7 @@ impl session_titles::SessionTitleRepository {
         call: &mut session_titles::SessionTitleCall,
         pools: &model_execution::CredentialPoolRuntimeCatalog,
     ) -> result::Result<bool, model_execution::ModelCallRepositoryError>;
+    pub async fn abandon_incomplete(&self) -> result::Result<(), error::Error>;
     pub async fn conversation(
         &self,
         session: signalbox_domain::SessionId,
