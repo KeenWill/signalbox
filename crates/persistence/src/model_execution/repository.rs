@@ -703,6 +703,29 @@ impl PostgresModelCallRepository {
         .await
     }
 
+    /// Counts every durable tool request in a turn, including rejected proposals.
+    /// This count includes requests outside the rendered compaction frontier.
+    pub async fn turn_tool_request_count(
+        &self,
+        session: SessionId,
+        turn: signalbox_domain::TurnId,
+    ) -> Result<u64, ModelCallRepositoryError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tool_request WHERE session_id = $1 AND turn_id = $2",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| ModelCallCorruption::Inconsistent("tool request count").into())
+    }
+
+    /// Derives current-session reads from this repository's exact database.
+    pub fn session_repository(&self) -> crate::session::SessionRepository {
+        crate::session::SessionRepository::new(self.pool.clone())
+    }
+
     /// Derives tool-loop storage from this repository's exact database and
     /// continuation configuration.
     pub fn tool_loop_repository(&self) -> crate::tool_loop::PostgresToolLoopRepository {

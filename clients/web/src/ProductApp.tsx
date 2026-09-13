@@ -42,6 +42,7 @@ import {
 } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext } from './commands'
+import { Field } from './Field'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { loadRetainedCommand } from './imports/retainedCommand'
@@ -123,7 +124,6 @@ export function ProductNavigation({
   context: ProductCommandContext
   onActivate?: () => void
 }) {
-  const scenarioDisabled = !productCommandAvailable('navigate.scenario', context)
   return (
     <div className={`product-navigation ${collapsed ? 'navigation-collapsed' : ''}`}>
       <div className="product-brand-row">
@@ -207,22 +207,6 @@ export function ProductNavigation({
           )
         })}
       </nav>
-      <Link
-        className="scenario-entry"
-        to="/scenario/$scenarioId"
-        params={{ scenarioId: 'streaming' }}
-        aria-disabled={scenarioDisabled || undefined}
-        tabIndex={scenarioDisabled ? -1 : undefined}
-        onClick={(event) => {
-          if (scenarioDisabled) {
-            event.preventDefault()
-            return
-          }
-          onActivate?.()
-        }}
-      >
-        Scenario studio <span aria-hidden="true">↗</span>
-      </Link>
     </div>
   )
 }
@@ -398,8 +382,8 @@ function OpenSessionDialog({
               })
             }}
           >
-            <label htmlFor="palette-session-id">Session ID</label>
-            <input
+            <Field
+              label="Session ID"
               id="palette-session-id"
               ref={entryRef}
               value={sessionId}
@@ -789,10 +773,6 @@ export function ProductApp({
       sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
-        if (path === '/scenario/streaming') {
-          void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } })
-          return
-        }
         void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })

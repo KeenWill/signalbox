@@ -56,7 +56,20 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
     'unpriced',
   )
   await expect(page.getByRole('region', { name: 'Recent turn costs' })).toContainText('partial')
-  await expect(page.getByRole('link')).toHaveCount(0)
+  await expect(page.getByRole('link')).toHaveCount(1)
+  const attention = page.getByRole('region', { name: 'Attention row' })
+  await expect(attention.getByRole('button', { name: /unpriced/ })).toBeVisible()
+  await expect(attention.getByRole('link', { name: 'Example session' })).toBeEnabled()
+  await expect(attention.getByRole('link', { name: 'Example session' })).toHaveAttribute(
+    'href',
+    `/sessions?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&workspace=true`,
+  )
+  await attention.getByRole('button', { name: 'Preview example session' }).click()
+  await expect(attention.getByRole('button', { name: 'Preview example session' })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+
   const session = page.getByRole('region', { name: 'Session cost', exact: true })
   const toggle = session.getByRole('button')
   const pricing = session.getByText(/Reported · Metered cost · rates-2026-08-a/)
@@ -76,6 +89,22 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await toggle.click()
   await page.setViewportSize({ width: 1280, height: 844 })
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
+  for (const width of [1280, 761, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    const sessionBox = await attention.getByRole('link', { name: 'Example session' }).boundingBox()
+    const costBox = await attention.getByRole('button', { name: /unpriced/ }).boundingBox()
+    if (!sessionBox || !costBox)
+      throw new Error('The session action and cost display must be visible')
+    if (width > 1259) expect(costBox.x).toBeGreaterThanOrEqual(sessionBox.x + sessionBox.width)
+    else expect(costBox.y).toBeGreaterThanOrEqual(sessionBox.y + sessionBox.height)
+    await attention.getByRole('button', { name: /unpriced/ }).click()
+    await expect(attention.getByText(/Reported · Metered cost · rates-2026-08-a/)).toBeVisible()
+    expect(await attention.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true,
+    )
+    await attention.screenshot({ path: testInfo.outputPath(`attention-cost-${width}.png`) })
+    await attention.getByRole('button', { name: /unpriced/ }).click()
+  }
   expect(requests.filter((url) => url.pathname === '/api/bootstrap')).toHaveLength(1)
   expect(
     requests
@@ -271,4 +300,37 @@ test('never presents cached scenario usage as server usage during failed reads',
   await expect(page.getByRole('alert')).toContainText('Usage could not load')
   await expect(rows).toHaveAttribute('data-total-loaded', '0')
   await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
+})
+
+test('distinguishes equal Attention costs by session in button navigation', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const otherSessionId = '00000000-0000-0000-0000-000000000995'
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/summary')
+      return route.fulfill({ json: { groups: [], truncated: false } })
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto('/src/search-usage/preview.html?preview=attention-costs')
+  const first = page.getByRole('button', {
+    name: `Cost for session ${SEARCH_USAGE_SCENARIO_SESSION_ID}: $0`,
+    exact: true,
+  })
+  const second = page.getByRole('button', {
+    name: `Cost for session ${otherSessionId}: $0`,
+    exact: true,
+  })
+  await expect(first).toHaveText('$0')
+  await expect(second).toHaveText('$0')
+  await first.focus()
+  await page.keyboard.press('Enter')
+  await expect(first).toHaveAttribute('aria-expanded', 'true')
+  await expect(second).toHaveAttribute('aria-expanded', 'false')
+  await page.keyboard.press('Tab')
+  await expect(second).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(second).toHaveAttribute('aria-expanded', 'true')
 })

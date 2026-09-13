@@ -2,6 +2,27 @@
 
 # root: types-2
 
+## WebSearchPage
+
+```rust
+pub struct WebSearchPage {
+    pub results: vec::Vec<WebSearchResult>,
+    pub continuation: option::Option<WebSearchCursor>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageCallKind
+
+```rust
+pub enum WebUsageCallKind {
+    ModelCall,
+    ApprovalJudge,
+    ContextCompaction,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebUsageProvenance
 
 ```rust
