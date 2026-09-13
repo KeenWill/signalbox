@@ -1674,36 +1674,39 @@ where
         let mut receive_buffer = Vec::new();
         let mut lease_changes = service.lease_changes();
         let mut sent_lease = None;
-        let mut shutdown_requested = false;
         loop {
-        if shutdown_requested && sent_lease.is_none() {
-            if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
-                let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
-                write_message(&mut writer, Message::LeaseOffer(offer)).await?;
-                sent_lease = Some(identity);
-            } else {
-                if transition_or_reject_not_current(
-                    &service,
-                    context,
-                    &mut writer,
-                    RunnerInboundFrameKind::Shutdown,
-                    context.epoch,
-                    RunnerConnectionTransition::DaemonShutdown,
-                ).await? {
-                    write_message(&mut writer, Message::Shutdown(Shutdown {
-                        connection_epoch: context.epoch,
-                        reason: ShutdownReason::DaemonShutdown,
-                    })).await?;
-                }
-                return Ok(());
-            }
-        }
         tokio::select! {
             biased;
-            changed = shutdown.changed(), if !shutdown_requested => {
+            changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    shutdown_requested = true;
-                    continue;
+                    let outcome = service.transition_connection(
+                        context.enrollment,
+                        context.epoch,
+                        RunnerConnectionTransition::DaemonShutdown,
+                    ).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?;
+                    match outcome {
+                        RunnerConnectionTransitionOutcome::Stale { .. } => {
+                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::Shutdown, context.epoch).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(snapshot)
+                            if snapshot.cause() == RunnerConnectionCause::EnrollmentRevoked => {
+                            write_rejected(&mut writer, RunnerRegistrationFailure::new(
+                                RunnerInboundFrameKind::Shutdown,
+                                AvailableCorrelation::ConnectionEpoch(context.epoch),
+                                RejectionCode::EnrollmentRevoked,
+                            )).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(snapshot)
+                            if snapshot.state() == RunnerConnectionState::Shutdown
+                                && snapshot.cause() == RunnerConnectionCause::DaemonShutdown => {
+                            write_message(&mut writer, Message::Shutdown(Shutdown {
+                                connection_epoch: context.epoch,
+                                reason: ShutdownReason::DaemonShutdown,
+                            })).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(_) => {}
+                    }
+                    return Ok(());
                 }
             }
             frame = read_frame_buffered(&mut reader, &mut receive_buffer) => {
@@ -1804,10 +1807,7 @@ where
                     }
                     Message::Result(result) => {
                         match service.record_tool_result(context.enrollment, context.epoch, result).await {
-                            Ok(recorded) => {
-                                write_message(&mut writer, Message::ResultRecorded(recorded)).await?;
-                                sent_lease = None;
-                            },
+                            Ok(recorded) => write_message(&mut writer, Message::ResultRecorded(recorded)).await?,
                             Err(failure) => {
                                 terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::Result, context.epoch, failure).await?;
                                 return Ok(());
