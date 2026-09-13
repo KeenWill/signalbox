@@ -313,39 +313,45 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         .bind(fixture.session.into_uuid())
         .execute(&mut *held)
         .await?;
-    let first_titles = titles.clone();
-    let first = tokio::spawn(async move {
-        first_titles
-            .finish_generated(
-                command,
-                call.call,
-                Some("Database indexing work".to_owned()),
-                usage,
-            )
-            .await
-    });
-    let second_titles = titles.clone();
-    let second = tokio::spawn(async move {
-        second_titles
-            .finish_generated(
-                command,
-                call.call,
-                Some("Database indexing work".to_owned()),
-                usage,
-            )
-            .await
-    });
+    let mut settlements = Vec::new();
+    let mut settlement_backends = Vec::<i32>::new();
+    for _ in 0..2 {
+        let settlement_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await?;
+        settlement_backends.push(
+            sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&settlement_pool)
+                .await?,
+        );
+        let settlement_titles = SessionTitleRepository::new(settlement_pool);
+        settlements.push(tokio::spawn(async move {
+            settlement_titles
+                .finish_generated(
+                    command,
+                    call.call,
+                    Some("Database indexing work".to_owned()),
+                    usage,
+                )
+                .await
+        }));
+    }
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")
-                .fetch_one(&pool).await?;
-            if waiting >= 2 { break Ok::<_, sqlx::Error>(()); }
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = ANY($1) AND wait_event_type = 'Lock'")
+                .bind(&settlement_backends).fetch_one(&pool).await?;
+            if waiting == 2 { break Ok::<_, sqlx::Error>(()); }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }).await??;
     held.commit().await?;
-    assert_eq!(first.await??, Some("Database indexing work".to_owned()));
-    assert_eq!(second.await??, Some("Database indexing work".to_owned()));
+    for settlement in settlements {
+        assert_eq!(
+            settlement.await??,
+            Some("Database indexing work".to_owned())
+        );
+    }
     let snapshot = metadata
         .load_session_metadata(fixture.session)
         .await?

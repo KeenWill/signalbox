@@ -203,11 +203,17 @@ async fn title_context_reads_a_bounded_prefix_from_an_imported_seed() -> Result<
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn title_context_skips_empty_imported_entries() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let source = concat!(
-        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Database indexing\"}}\n",
-        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"\"}}"
-    );
-    let conversation = imported(0x180, 0x280, source);
+    let mut entries = vec![
+        serde_json::json!({"type":"user","message":{"role":"user","content":"Database indexing"}})
+            .to_string(),
+    ];
+    entries.extend(std::iter::repeat_n(
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":""}})
+            .to_string(),
+        512,
+    ));
+    let source = entries.join("\n");
+    let conversation = imported(0x180, 0x280, &source);
     ImportedConversationStore::resolve_or_insert_with_drop_facts(
         &mut ImportedConversationRepository::new(pool.clone()),
         conversation.clone(),

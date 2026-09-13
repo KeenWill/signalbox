@@ -189,13 +189,13 @@ impl SessionTitleRepository {
                ON imported.imported_conversation_id = entry.imported_conversation_id
               AND imported.imported_transcript_entry_id = entry.imported_transcript_entry_id
               AND imported.content_kind = 1
-             WHERE (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) IS NOT NULL
-                OR imported.content_encoding IS NOT NULL)
+             WHERE (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) <> ''
+                OR octet_length(imported.content_encoding) > $5)
              ORDER BY member.member_position DESC, part.position DESC NULLS LAST
              LIMIT $2")
             .bind(sources).bind(max_utf8_bytes)
             .bind(max_utf8_bytes.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
-            .bind(entries).fetch(&mut *tx);
+            .bind(entries).bind(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES).fetch(&mut *tx);
         let mut remaining = usize::try_from(max_utf8_bytes).unwrap_or_default();
         let mut parts = Vec::new();
         while remaining > 0 {
