@@ -530,10 +530,10 @@ initial-title handoff defers work instead of waiting for title execution.
 Conversation-read and credential-read failures abandon unsent title claims.
 Title calls record their target, credentials, send boundary, completion, and
 reported token axes as session-level `session_title` usage evidence. Runtime
-validation uses the selectable model and retains its mapped fast target. Title
-calls use ordinary credential-pool admission and invocation capacity. Initial
-work without an available title runtime, contention, and transient preparation
-failures remain with periodic invocation recovery until admission or
+validation uses the serving model and preserves request-controlled fast mode.
+Title calls use ordinary credential-pool admission and invocation capacity.
+Initial work without an available title runtime, contention, and transient
+preparation failures remain with periodic invocation recovery until admission or
 ineligibility, using the current model catalog at admission; a terminal report
 naming another call leaves usage unreported. Startup closes abandoned title
 calls and releases their initial claims and unregistered invocation
