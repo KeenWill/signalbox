@@ -164,7 +164,7 @@ impl SessionTitleRepository {
             return Ok(String::new());
         };
         let mut rows = sqlx::query(
-            "SELECT LEFT(COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value), $2) AS value,
+            "SELECT LEFT(COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value), $2) AS value,
                     substring(imported.content_encoding FROM 1 FOR $3) AS content_encoding
              FROM context_frontier_member AS member
              JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
@@ -175,7 +175,7 @@ impl SessionTitleRepository {
               AND imported.imported_transcript_entry_id = entry.imported_transcript_entry_id
               AND imported.content_kind = 1
              WHERE member.owning_session_id = $1 AND member.context_frontier_id = $4
-               AND (COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value) IS NOT NULL
+               AND (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) IS NOT NULL
                 OR imported.content_encoding IS NOT NULL)
              ORDER BY member.member_position DESC, part.position DESC NULLS LAST")
             .bind(session.into_uuid()).bind(max_utf8_bytes)
