@@ -2562,7 +2562,7 @@ pub struct WebUsageCall {
     pub call_kind: WebUsageCallKind,
     pub call_id: WebUuid,
     pub session_id: WebSessionId,
-    /// Owning turn, present-but-null exactly for context compaction.
+    /// Owning turn, present-but-null for context compaction and session title calls.
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub turn_id: Option<WebUuid>,

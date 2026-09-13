@@ -8170,7 +8170,7 @@ const schemas = {
           "turn_id": {
             "anyOf": [
               {
-                "description": "Owning turn, present-but-null exactly for context compaction.",
+                "description": "Owning turn, present-but-null for context compaction and session title calls.",
                 "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
                 "type": "string"
               },
