@@ -33,13 +33,17 @@ if (root)
                 ? [jpegDescriptor]
                 : location.search.includes('offscreen') || location.search.includes('label')
                   ? [fallbackDescriptor]
-                  : [imageDescriptor, fallbackDescriptor]
+                  : location.search.includes('uppercase')
+                    ? [imageDescriptor]
+                    : [imageDescriptor, fallbackDescriptor]
               ).map((descriptor) => ({
                 blob_id: descriptor.digest,
                 length_bytes: descriptor.byte_length,
                 media_type: location.search.includes('label')
                   ? 'garbage'
-                  : descriptor.declared_media_type,
+                  : location.search.includes('uppercase')
+                    ? descriptor.declared_media_type.toUpperCase()
+                    : descriptor.declared_media_type,
               }))}
             />
           </div>

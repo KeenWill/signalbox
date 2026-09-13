@@ -297,3 +297,32 @@ test('restores focus to the image preview control after closing details', async 
   await page.keyboard.press('Escape')
   await expect(control).toBeFocused()
 })
+
+test('labels uppercase image MIME types as images in previews and details', async ({ page }) => {
+  const descriptor = {
+    ...imageAttachment,
+    declared_media_type: 'IMAGE/PNG',
+    available_views: imageAttachment.available_views.map((view) => {
+      const url = new URL(view.content_url, 'http://localhost')
+      if (url.searchParams.has('media_type')) url.searchParams.set('media_type', 'IMAGE/PNG')
+      return {
+        ...view,
+        media_type: view.kind === 'download' ? 'IMAGE/PNG' : view.media_type,
+        content_url: `${url.pathname}${url.search}`,
+      }
+    }),
+  }
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: preview, contentType: 'image/png' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html?uppercase')
+  await expect(page.getByRole('img', { name: 'Preview of Image', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /Image · IMAGE\/PNG/ }).click()
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await expect(pane.getByRole('article', { name: 'Artifact Image', exact: true })).toBeVisible()
+  await expect(pane.getByRole('img', { name: 'Preview of Image', exact: true })).toBeVisible()
+})

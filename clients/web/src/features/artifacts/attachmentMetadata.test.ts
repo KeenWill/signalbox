@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { attachmentTypeLabel } from '../../ArtifactInspector'
 import { attachmentDescriptorMediaType } from './attachmentMetadata'
 
 describe('attachment descriptor media types', () => {
@@ -16,4 +17,14 @@ describe('attachment descriptor media types', () => {
   ])('preserves MIME label %s', (label) => {
     expect(attachmentDescriptorMediaType(label)).toBe(label)
   })
+})
+
+it.each([
+  ['IMAGE/PNG', 'Image'],
+  ['Audio/ogg', 'Audio'],
+  ['VIDEO/MP4', 'Video'],
+  ['APPLICATION/PDF', 'PDF'],
+  ['TEXT/PLAIN', 'Text file'],
+])('labels MIME type %s case-insensitively', (mediaType, label) => {
+  expect(attachmentTypeLabel(mediaType)).toBe(label)
 })
