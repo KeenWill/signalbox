@@ -167,12 +167,12 @@ function SessionActions({
             note: choice === 'deny' && /[^ \t\n\v\f\r]/.test(text) ? text : null,
           },
         }
-      } else if (choice === 'cancel' && chosenTurn && text.trim()) {
+      } else if (choice === 'cancel' && chosenTurn && text.length > 0) {
         action = {
           kind: 'cancel',
           input: { command_id, expected_active_turn_id: chosenTurn, message: text },
         }
-      } else if (choice === 'set-goal' && text.trim()) {
+      } else if (choice === 'set-goal' && text.length > 0) {
         action = { kind: 'set-goal', input: { command_id, statement: text } }
       } else if (choice === 'clear-goal') {
         action = { kind: 'clear-goal', input: { command_id } }
@@ -282,7 +282,7 @@ function SessionActions({
             disabled={
               sending ||
               capacityReached ||
-              (!retained && (choice === 'set-goal' || choice === 'cancel') && !text.trim())
+              (!retained && (choice === 'set-goal' || choice === 'cancel') && text.length === 0)
             }
           >
             {sending ? 'Sending…' : retained ? 'Retry same action' : 'Confirm'}

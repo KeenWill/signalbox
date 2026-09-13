@@ -104,6 +104,21 @@ test('goal retry keeps its original command and statement without randomUUID', a
   expect(requests[1]).toEqual(requests[0])
 })
 
+test('a whitespace-only goal is submitted exactly', async ({ page }) => {
+  await sessionApi(page)
+  const requests: unknown[] = []
+  await page.route(`**/api/sessions/${sessionId}/goal`, (route) => {
+    requests.push(route.request().postDataJSON())
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page.getByRole('button', { name: 'Set goal', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Goal', exact: true }).fill(' \n')
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+  expect(requests).toEqual([{ command_id: expect.any(String), statement: ' \n' }])
+})
+
 test('cancel retains its successor and identity across navigation', async ({ page }, testInfo) => {
   await sessionApi(page, true)
   const requests: unknown[] = []
@@ -135,6 +150,23 @@ test('cancel retains its successor and identity across navigation', async ({ pag
       message: successorMessage,
     },
     requests[0],
+  ])
+})
+
+test('a whitespace-only cancellation successor is submitted exactly', async ({ page }) => {
+  await sessionApi(page, true)
+  const requests: unknown[] = []
+  await page.route(`**/api/sessions/${sessionId}/cancel`, (route) => {
+    requests.push(route.request().postDataJSON())
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  await page.getByRole('button', { name: 'Cancel turn', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message to continue with' }).fill(' \n')
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+  expect(requests).toEqual([
+    { command_id: expect.any(String), expected_active_turn_id: turnId, message: ' \n' },
   ])
 })
 
