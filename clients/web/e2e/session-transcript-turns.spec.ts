@@ -1,3 +1,4 @@
+import type { WebSessionTimelineWindow } from '../src/generated/web-contract.mjs'
 import { transcriptFixture } from '../src/session-timeline/transcript.fixture'
 import { retriedToolItems, turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
@@ -275,4 +276,65 @@ test('keeps a failed physical attempt inspectable after the same request succeed
     'The release checks passed. Publishing remains unapproved.',
   ])
   await page.screenshot({ path: testInfo.outputPath('retried-tool.png') })
+})
+
+test('keeps the retained turn row and open tool when earlier history is prepended', async ({
+  page,
+}) => {
+  const input = detailItems[0]
+  const tool = detailItems[1]
+  if (input?.body.type !== 'user_input' || !tool) throw new Error('Fixture missing')
+  const entries = Array.from({ length: 16 }, (_, index) => {
+    const address = { event_sequence: String(index + 1) }
+    if (index === 8) return { ...tool, address }
+    const text = detailExcerpt(`Message ${index + 1}`)
+    return {
+      ...input,
+      address,
+      projected_body_bytes: 128 + Number(text.total_bytes),
+      body: { ...input.body, text, attachments: [] },
+    }
+  })
+  await turnApi(page, undefined, entries)
+  let release = () => {}
+  const olderReady = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/timeline?**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('anchor') === 'before') await olderReady
+    const window = transcriptFixture(url, 16) as WebSessionTimelineWindow
+    const items = window.items.map((item) => {
+      const kind = item.address.event_sequence === '9' ? tool.kind : item.kind
+      return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+    })
+    return route.fulfill({
+      json: {
+        ...window,
+        items,
+        projected_structured_bytes: items.reduce(
+          (sum, item) => sum + item.projected_structured_bytes,
+          0,
+        ),
+      },
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chip = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  await chip.click()
+  await expect(transcript.locator('[data-turn-id]')).toHaveCount(1)
+  const row = await transcript.locator('[data-turn-id]').first().elementHandle()
+  if (!row) throw new Error('Retained row missing')
+  await transcript.evaluate((element) => {
+    element.scrollTop = 0
+    element.dispatchEvent(new Event('scroll'))
+  })
+  release()
+  await expect(transcript.locator('[data-turn-id]')).toHaveCount(2)
+  expect(await row.evaluate((element) => element.isConnected)).toBe(true)
+  await expect(chip).toHaveAttribute('aria-expanded', 'true')
+  await expect(
+    transcript.getByRole('region', { name: 'exec_command details', exact: true }),
+  ).toContainText('release status')
 })

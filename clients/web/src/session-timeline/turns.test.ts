@@ -278,3 +278,16 @@ it('retains distinct physical attempts of one request across interleaved segment
     'message',
   ])
 })
+
+it('keeps retained turn segments unchanged when an earlier window shares the turn', () => {
+  const input = detailItems[0]
+  if (!input) throw new Error('Input fixture missing')
+  const retained = detailItems.map((item) => ({
+    ...item,
+    address: { event_sequence: String(Number(item.address.event_sequence) + 1) },
+  }))
+  const before = groupTranscriptTurns(retained, new Set(['2']))
+  const after = groupTranscriptTurns([input, ...retained], new Set(['1', '2']))
+  expect(after.map((turn) => turn.id)).toEqual([`${before[0]?.turnId}:1`, before[0]?.id])
+  expect(after[1]).toEqual(before[0])
+})

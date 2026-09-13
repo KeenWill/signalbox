@@ -192,9 +192,19 @@ function TranscriptWindow({
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],
   )
+  const windowStarts = useMemo(
+    () =>
+      new Set(
+        pages?.flatMap((page) => {
+          const first = page.details.flatMap((detail) => detail.items)[0]
+          return first ? [first.address.event_sequence] : []
+        }) ?? [],
+      ),
+    [pages],
+  )
   const turns = useMemo(
     () =>
-      groupTranscriptTurns(entries).filter(
+      groupTranscriptTurns(entries, windowStarts).filter(
         (turn) =>
           turn.messages.length > 0 ||
           turn.result ||
@@ -202,7 +212,7 @@ function TranscriptWindow({
           turn.warnings.length > 0 ||
           turn.outcome,
       ),
-    [entries],
+    [entries, windowStarts],
   )
   const pending = useMemo(
     () =>
