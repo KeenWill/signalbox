@@ -200,7 +200,7 @@ export function ProductNavigation({
                 invokeProductCommand(productNavigationCommandIds[route.id], context)
               }}
             >
-              <Icon aria-hidden="true" />
+              {collapsed && <Icon aria-hidden="true" />}
               {!collapsed && <span>{route.label}</span>}
             </Link>
           )
