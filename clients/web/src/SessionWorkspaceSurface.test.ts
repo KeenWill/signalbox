@@ -70,6 +70,17 @@ describe('Session Workspace projection', () => {
     ])
   })
 
+  it('retains an explicit match filtered out of Results mode', () => {
+    const hidden = {
+      address: { event_sequence: '46' },
+      kind: 'session_created',
+      projected_structured_bytes: 96,
+    } as const
+    const items = [...fixture.items, hidden]
+    expect(visibleSessionItems(items, 'results', '46')).toContain(hidden)
+    expect(visibleSessionItems(items, 'results')).not.toContain(hidden)
+  })
+
   it('uses one stable cache entry for every request for a session', () => {
     expect(sessionWorkspaceQueryKey(fixture.session_id)).toEqual([
       'production',
