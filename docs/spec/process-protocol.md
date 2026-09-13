@@ -258,6 +258,18 @@ record. The alias catalog read reports current deployment configuration, not
 durable session state; an existing session keeps its frozen selection when the
 catalog changes.
 
+`create_session`, `create_session_from_template`, and `commission_session`
+accept optional `runner_placement` with an explicit selector, working-directory
+choice, nullable credential profile, workspace requirement, sandbox profile, and
+permission overrides. Creation validates a present request against the active
+registration under enrollment and registration locks held through commit;
+unavailable axes or unadmitted overrides return `invalid_request` without
+claiming the command. Creation atomically retains the exact request as unpinned,
+visible through `read_runner_status`; absence remains absence. Placement
+participates in durable replay equality, and replay precedes current
+registration admission. The CLI `create --runner-placement JSON` accepts the
+same object for direct and template creation.
+
 A metadata request that violates shape, uniqueness, or byte bounds is a
 malformed frame, refused before application construction; a request that exceeds
 a configured tag, attribute, required-tag, or page-size limit is

@@ -808,6 +808,7 @@ pub(crate) async fn create_alias_session_with(
         .request(
             1,
             ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id: command()?,
                 initial_model_selection: ModelSelection::Alias { alias_id },
                 model_settings: ModelSettingsOverlay::inherit_all(),

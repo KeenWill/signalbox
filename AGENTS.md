@@ -35,10 +35,9 @@ the owner and lives outside the daemon unless the task says otherwise. Removing
 a mechanism the behavior does not need is a better change than adding one. List
 what you chose not to build.
 
-In review, a finding that a mechanism can be removed is valid. A finding that
-asks for a guard, handler, or check the task does not name is declined ("not
-enforced; deferred") unless the gap corrupts stored data or breaks a committed
-contract.
+A finding that asks for a guard, handler, or check the task does not name is
+declined ("not enforced; deferred") unless the gap corrupts stored data or
+breaks a committed contract.
 
 ## Pre-alpha compatibility
 
@@ -68,7 +67,7 @@ something gets a fix for the breakage.
 
 ## Web client
 
-Web client contributions follow the
+Every change under `clients/web` follows the
 [web client guidelines](clients/web/GUIDELINES.md).
 
 ## Public-source hygiene
@@ -77,6 +76,8 @@ Code, documentation, commit messages, pull-request text, and branch names cite
 only public sources. Do not include or allude to non-public material of any
 organization. Public open-source work may be cited regardless of publisher. The
 owner's private repositories may be named as provenance, not cited as rules.
+Commit messages and pull-request bodies do not name local coordination paths,
+brief or census files, session URLs, or session trailers.
 
 ## Working on a change
 
@@ -105,8 +106,6 @@ owner's private repositories may be named as provenance, not cited as rules.
 - Name tests for the behavior they enforce.
 - Update directly affected documentation in the implementing pull request. Do
   not reword, restructure, or reformat unrelated text.
-- Do not add `Co-Authored-By`, session, or URL trailers to commits or
-  pull-request text.
 
 ## Pull requests
 
@@ -117,23 +116,21 @@ owner's private repositories may be named as provenance, not cited as rules.
 - Reply to every review comment in its thread: name the fixing commit, or state
   why the finding is declined. Accept a bot finding only when it names a false
   statement (a claim the code or the page's own text contradicts), a broken link
-  or cross-reference, a contradiction within the pull request's own files,
-  undecided material presented as committed, a failing gating check, a defect in
-  the pull request's own behavior, or a mechanism the task does not need.
-  Decline everything else in one line and resolve the thread: restorations of
-  inventories the code already owns (producer lists, lock orders, dispatch
-  correlations, admission-rule lists), constants, grammars, conventions, hedges,
-  tone, and new content. Reviewers reward building less.
+  or cross-reference, a contradiction within the change, undecided material
+  presented as committed, a failing gating check, or a defect in the change's
+  own behavior. Decline everything else in one line and resolve the thread:
+  restorations of inventories the code already owns (producer lists, lock
+  orders, dispatch correlations, admission-rule lists), constants, grammars,
+  conventions, hedges, tone, and new content. Reviewers reward building less.
 - Request bot review after validation passes, never while a review is pending.
   Limit bot review to five waves per pull request.
 - Stacks: each pull request targets the branch below it and is reviewed against
   that base. Check that a base branch still exists before stacking on it; when a
-  base merges, retarget or rebase the rest. Open pull requests early. Each push
-  triggers a full re-review. Push each validated fix batch as soon as it is
-  ready, and merge the base forward only when the pull request is conflicting or
-  about to merge. Do not force-push or rewrite a shared branch unless it is
-  necessary and safe, and preserve owner-authored and externally added commits.
-  Tell the owner before replacing an open stack with a rewrite.
+  base merges, retarget the rest. Open pull requests early. Each push triggers a
+  full re-review. Push each validated fix batch as soon as it is ready. Merge
+  the base forward only when the pull request is conflicting or about to merge;
+  run targeted validation only and push the merge-forward as soon as it
+  validates. Never rebase, squash, or force-push a pushed branch.
 
 ## Validation
 

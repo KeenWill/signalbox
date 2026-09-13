@@ -30,6 +30,13 @@ struct Candidate {
     event: Vec<u8>,
     sessions: Vec<Uuid>,
     activation: bool,
+    released_at: OffsetDateTime,
+}
+
+#[derive(sqlx::FromRow)]
+struct CooldownReview {
+    event_id: Uuid,
+    event: Vec<u8>,
 }
 
 impl RepoWatchStore {
@@ -54,6 +61,13 @@ impl RepoWatchStore {
         Codec: crate::SessionCommandCodec,
     {
         use crate::dispatch::EvaluationError;
+        if self
+            .observer_evaluation_paused(repository)
+            .await
+            .map_err(EvaluationError::Store)?
+        {
+            return Ok(false);
+        }
         let rows: Vec<Candidate> = sqlx::query_as(
             "WITH latest AS (
                SELECT DISTINCT ON (e.pull_request_number) d.* FROM dispatch_ledger d JOIN gh_readable_event e USING(event_id)
@@ -62,6 +76,7 @@ impl RepoWatchStore {
                ORDER BY e.pull_request_number, d.issued_at DESC, d.dispatch_ref DESC, d.action_ordinal
              )
              SELECT d.dispatch_ref, d.event_id, COALESCE(d.activation_event,d.retry_event,e.normalized_payload) AS event, d.activation_event IS NOT NULL AS activation,
+               (SELECT max(a.singleton_released_at) FROM dispatch_ledger a WHERE a.dispatch_ref=d.dispatch_ref AND a.command_kind='create_session') AS released_at,
                ARRAY(SELECT a.created_session_id FROM dispatch_ledger a WHERE a.dispatch_ref=d.dispatch_ref AND a.command_kind='create_session' AND a.created_session_id IS NOT NULL) AS sessions
              FROM latest d JOIN gh_readable_event e USING(event_id)
              WHERE e.pull_request_number IS NOT NULL AND d.status='applied'
@@ -78,9 +93,6 @@ impl RepoWatchStore {
                     .await
                     .map_err(|error| EvaluationError::Store(StoreError::Lifecycle(error)))?;
             }
-            if pushed {
-                continue;
-            }
             let previous = crate::event_decode::event(
                 signalbox_session_ownership::RepoWatchEventId::from_uuid(candidate.event_id),
                 &candidate.event,
@@ -93,16 +105,28 @@ impl RepoWatchStore {
             let Some(observation) = baseline.observation.as_ref() else {
                 continue;
             };
-            let Some(event) = reevaluation_event(
-                rule,
-                &previous,
-                observation.state().pull_requests(),
-                if candidate.activation {
-                    MatchSource::Activation
-                } else {
-                    MatchSource::ProviderEvent
-                },
-            ) else {
+            let deferred = self
+                .cooldown_review(rule, &candidate, observation.state().pull_requests())
+                .await
+                .map_err(EvaluationError::Store)?;
+            let match_source = if deferred.is_some() || !candidate.activation {
+                MatchSource::ProviderEvent
+            } else {
+                MatchSource::Activation
+            };
+            let event = deferred.or_else(|| {
+                (!pushed)
+                    .then(|| {
+                        reevaluation_event(
+                            rule,
+                            &previous,
+                            observation.state().pull_requests(),
+                            match_source,
+                        )
+                    })
+                    .flatten()
+            });
+            let Some(event) = event else {
                 continue;
             };
             let key =
@@ -113,11 +137,7 @@ impl RepoWatchStore {
                 event: serde_json::to_vec(&crate::normalized_event_payload(&event))
                     .map_err(|_| EvaluationError::Store(StoreError::InvalidRetainedEvent))?,
                 rule: rule.clone(),
-                source: if candidate.activation {
-                    MatchSource::Activation
-                } else {
-                    MatchSource::ProviderEvent
-                },
+                source: match_source,
             };
             let batch = crate::plan_rule_commands(rule, &event, ids, factory)
                 .map_err(EvaluationError::Plan)?;
@@ -159,6 +179,50 @@ impl RepoWatchStore {
             }
         }
         Ok(false)
+    }
+
+    async fn cooldown_review(
+        &self,
+        rule: &RepoWatchRule,
+        candidate: &Candidate,
+        current: &[RepoWatchPullRequestState],
+    ) -> Result<Option<RepoWatchEvent>, StoreError> {
+        let reviews: Vec<CooldownReview> = sqlx::query_as(
+            "SELECT incoming.event_id, incoming.normalized_payload AS event
+             FROM gh_readable_event incoming
+             JOIN gh_readable_event initial ON initial.event_id=$1
+             JOIN rule_evaluation_cursor cursor ON cursor.repository=incoming.repository
+               AND cursor.rule_id=$2 AND cursor.rule_revision=$3
+             WHERE incoming.repository=initial.repository
+               AND incoming.pull_request_number=initial.pull_request_number
+               AND incoming.event_kind='review_submitted'
+               AND incoming.recorded_at >= $4
+               AND EXTRACT(EPOCH FROM (incoming.recorded_at-$4::timestamptz)) < $5
+               AND incoming.repository_event_ordinal > initial.repository_event_ordinal
+               AND incoming.repository_event_ordinal <= cursor.event_ordinal
+             ORDER BY incoming.repository_event_ordinal DESC",
+        )
+        .bind(candidate.event_id)
+        .bind(rule.id().as_str())
+        .bind(Decimal::from(rule.version().get()))
+        .bind(candidate.released_at)
+        .bind(Decimal::from(rule.cooldown().as_secs()))
+        .fetch_all(&self.pool)
+        .await?;
+        for review in reviews {
+            let Some(event) = crate::event_decode::event(
+                signalbox_session_ownership::RepoWatchEventId::from_uuid(review.event_id),
+                &review.event,
+            ) else {
+                continue;
+            };
+            if let Some(event) =
+                reevaluation_event(rule, &event, current, MatchSource::ProviderEvent)
+            {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) async fn retry_still_due(

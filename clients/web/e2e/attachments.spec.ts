@@ -85,7 +85,7 @@ for (const width of [790, 1440]) {
       (preferences) => {
         localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify(preferences))
       },
-      { ...defaultBrowserPreferences, paneSizes: { navigation: 360, inspector: 480 } },
+      { ...defaultBrowserPreferences, paneSizes: { navigation: 360 } },
     )
     await page.setViewportSize({ width, height: 900 })
     await page.goto('/scenario/attachments')

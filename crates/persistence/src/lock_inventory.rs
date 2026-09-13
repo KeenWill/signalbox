@@ -801,6 +801,11 @@ pub(crate) const RUNNER_ENROLLMENT: &str = "SELECT enrollment_id
               WHERE enrollment_id = $1
               FOR UPDATE";
 
+pub(crate) const RUNNER_CREATION_ENROLLMENT: &str = "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE state_kind = 'active'
+              FOR UPDATE";
+
 pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
                FROM runner_credential_grant
               WHERE session_id = $1

@@ -4374,8 +4374,34 @@ fn stored_registration_identity(
         .unwrap_or((None, None))
 }
 
+pub(crate) async fn insert_created_placement(
+    connection: &mut PgConnection,
+    session: SessionId,
+    request: SessionRunnerPlacementRequest,
+) -> Result<(), RunnerProtocolStoreError> {
+    let placement = SessionRunnerPlacement::new(session, request);
+    insert_placement_record(
+        connection,
+        1,
+        "created",
+        &placement,
+        (None, None),
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement (session_id, event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(session.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 async fn insert_placement_record(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut PgConnection,
     event_ordinal: u64,
     event_kind: &str,
     placement: &SessionRunnerPlacement,
@@ -4467,7 +4493,7 @@ async fn insert_placement_record(
             .grant_lineage
             .map(|lineage| Decimal::from(lineage.revision.get())),
     )
-    .execute(&mut **transaction)
+    .execute(&mut *transaction)
     .await?;
     for tool in state.tools {
         sqlx::query(
@@ -4479,7 +4505,7 @@ async fn insert_placement_record(
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
         .bind(state.runner_required_tools.contains(tool))
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await?;
     }
     for (tool, permission) in permission_overrides {
@@ -4492,7 +4518,7 @@ async fn insert_placement_record(
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
         .bind(encode_permission_override(permission))
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await?;
     }
     Ok(())
@@ -6705,6 +6731,38 @@ fn placement_loss_fence_runner(placement: &SessionRunnerPlacement) -> Option<Run
             Some(lost.pinned().runner)
         }
     }
+}
+
+pub(crate) async fn validate_creation_placement(
+    connection: &mut PgConnection,
+    catalog: &RunnerCatalog,
+    request: &SessionRunnerPlacementRequest,
+) -> Result<(), RunnerProtocolStoreError> {
+    let enrollment: Uuid = sqlx::query_scalar(crate::lock_inventory::RUNNER_CREATION_ENROLLMENT)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::SelectorMismatch,
+        ))?;
+    let revision: Decimal = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+        .bind(enrollment)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::SelectorMismatch,
+        ))?;
+    let registration = load_registration_in(
+        connection,
+        runner_enrollment_id(enrollment),
+        decode_registration_revision(revision)?,
+        None,
+        catalog,
+    )
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    request
+        .validate_registration(registration.registration())
+        .map_err(RunnerProtocolStoreError::Domain)
 }
 
 async fn lock_runner_placement_loss_baseline(
