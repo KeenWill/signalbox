@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
@@ -13,6 +13,7 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
+import { renameSession } from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
@@ -79,10 +80,115 @@ const SessionTitle = ({
   return (
     <>
       <span className="catalog-title-text">
-        {savedTitle || automatic.data?.text || `Session ${summary.session_id}`}
+        {savedTitle ||
+          automatic.data?.text ||
+          (summary.repository_watch?.pull_request
+            ? `PR #${summary.repository_watch.pull_request}`
+            : `Session ${summary.session_id}`)}
       </span>
       {truncated && <span className="catalog-title-truncated">Truncated</span>}
     </>
+  )
+}
+
+const SessionMetadata = ({
+  summary,
+  canRename,
+}: {
+  summary: SessionSummary
+  canRename: boolean
+}) => {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const intent = useRef<{ command_id: string; title: string } | null>(null)
+  const renameButton = useRef<HTMLButtonElement>(null)
+  const titleInput = useRef<HTMLInputElement>(null)
+  const returnRenameFocus = useRef(false)
+  useEffect(() => {
+    if (editing) titleInput.current?.focus()
+    else if (returnRenameFocus.current) {
+      returnRenameFocus.current = false
+      renameButton.current?.focus()
+    }
+  }, [editing])
+  const provenance = summary.repository_watch
+  const repositoryUrl = provenance
+    ? `https://github.com/${provenance.repository.split('/').map(encodeURIComponent).join('/')}`
+    : undefined
+  const pullRequestUrl = provenance?.pull_request
+    ? `${repositoryUrl}/pull/${encodeURIComponent(provenance.pull_request)}`
+    : undefined
+  const close = () => {
+    returnRenameFocus.current = true
+    setEditing(false)
+  }
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    if (saving || !title.trim()) return
+    if (intent.current?.title !== title) intent.current = { command_id: crypto.randomUUID(), title }
+    setSaving(true)
+    setError(null)
+    try {
+      await renameSession(summary.session_id, intent.current)
+      await queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
+      close()
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Rename failed. Try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <div className="catalog-metadata">
+      {provenance && (
+        <>
+          <a className="state-chip" href={pullRequestUrl ?? repositoryUrl}>
+            {provenance.pull_request ? `PR #${provenance.pull_request}` : provenance.repository}
+          </a>
+          <a className="state-chip" href={pullRequestUrl ?? repositoryUrl}>
+            {enumLabel(provenance.event_kind)}
+          </a>
+        </>
+      )}
+      <button
+        type="button"
+        ref={renameButton}
+        aria-label={`Rename session ${summary.session_id}`}
+        onClick={() => {
+          setTitle(summary.title_truncated ? '' : (summary.title_summary ?? ''))
+          setError(null)
+          intent.current = null
+          setEditing(true)
+        }}
+        disabled={editing || !canRename}
+      >
+        Rename
+      </button>
+      {editing && (
+        <form className="catalog-rename" onSubmit={save}>
+          <label>
+            Session title
+            <input
+              ref={titleInput}
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              disabled={saving}
+              required
+            />
+          </label>
+          <button type="submit" disabled={saving || !title.trim()}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" disabled={saving} onClick={close}>
+            Cancel
+          </button>
+          {error && <p role="alert">{error}</p>}
+        </form>
+      )}
+    </div>
   )
 }
 
@@ -456,6 +562,10 @@ export function SessionCatalogSurface({
                       </time>
                       <ArrowRight aria-hidden="true" />
                     </button>
+                    <SessionMetadata
+                      summary={summary}
+                      canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
+                    />
                   </li>
                 ))}
               </ol>

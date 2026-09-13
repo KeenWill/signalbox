@@ -87,3 +87,38 @@
 .catalog-title-truncated {
   flex-shrink: 0;
 }
+
+.catalog-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--product-space);
+  padding: 0 var(--product-space) var(--product-space);
+}
+
+.catalog-metadata > button {
+  margin-left: auto;
+}
+
+.catalog-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--product-space);
+  width: 100%;
+}
+
+.catalog-rename label {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.catalog-rename input {
+  width: 100%;
+  min-width: 0;
+}
+
+.catalog-rename [role="alert"] {
+  width: 100%;
+}

@@ -656,7 +656,7 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect.soft(page).toHaveScreenshot('catalog-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  const row = page.locator('.catalog-list li').first().getByRole('button')
+  const row = page.getByRole('button', { name: /Release verification/ })
   const bounds = await row.boundingBox()
   const arrow = await row.locator('svg').boundingBox()
   expect(
@@ -683,7 +683,7 @@ test('catalog keyboard selection opens a session', async ({ page }) => {
   await page.goto('/sessions')
   await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeVisible()
   await page.keyboard.press('j')
-  await expect(page.locator('.catalog-list li').first().getByRole('button')).toBeFocused()
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeFocused()
   await page.keyboard.press('j')
   await page.keyboard.press('Enter')
   await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
@@ -846,4 +846,112 @@ test('keeps untitled session fallbacks without the detail capability', async ({ 
     page.getByRole('button', { name: new RegExp(`Session ${firstSessionId}`) }),
   ).toBeVisible()
   expect(timelineReads).toBe(0)
+})
+
+test('renames a session and reads back the saved catalog title', async ({ page }) => {
+  await useCatalogFixture(page)
+  let title = firstPage.summaries[0].title_summary as string
+  const requests: Array<{ command_id: string; title: string }> = []
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: {
+        ...firstPage,
+        summaries: firstPage.summaries.map((row, index) =>
+          index === 0 ? { ...row, title_summary: title } : row,
+        ),
+      },
+    }),
+  )
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    expect(route.request().method()).toBe('PATCH')
+    requests.push(route.request().postDataJSON())
+    title = requests.at(-1)?.title ?? title
+    await route.fulfill({ status: 204 })
+  })
+  await page.goto('/sessions')
+  const rename = page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
+  await rename.click()
+  const input = page.getByRole('textbox', { name: 'Session title', exact: true })
+  await expect(input).toBeFocused()
+  await input.fill('Ship the release')
+  await input.press('Enter')
+  await expect(page.getByRole('button', { name: /Ship the release/ })).toBeVisible()
+  await expect(rename).toBeFocused()
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.command_id).toMatch(/^[0-9a-f-]{36}$/)
+  await page.reload()
+  await expect(page.getByRole('button', { name: /Ship the release/ })).toBeVisible()
+})
+
+test('retries a failed rename with the same intent and can cancel editing', async ({ page }) => {
+  await useCatalogFixture(page)
+  const requests: unknown[] = []
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    requests.push(route.request().postDataJSON())
+    await route.abort('failed')
+  })
+  await page.goto('/sessions')
+  const rename = page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
+  await rename.click()
+  await page.getByRole('textbox', { name: 'Session title', exact: true }).fill('Retry this title')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  await expect(page.getByRole('alert')).toBeVisible()
+  expect(requests[1]).toEqual(requests[0])
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(rename).toBeFocused()
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
+})
+
+test('links catalog pull request and trigger chips and retains a PR title fallback', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline_detail: false },
+      },
+    }),
+  )
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: {
+        ...firstPage,
+        continuation: null,
+        total: '1',
+        summaries: [
+          {
+            ...firstPage.summaries[0],
+            title_summary: null,
+            repository_watch: {
+              repository: 'signalbox/example',
+              pull_request: '81',
+              event_kind: 'review_submitted',
+              head_branch: 'review',
+              base_branch: 'main',
+              action_ordinal: '2',
+              dispatch_id: '00000000-0000-0000-0000-000000000063',
+              event_id: '00000000-0000-0000-0000-000000000064',
+              rule_id: 'review-response',
+              rule_revision: '3',
+            },
+          },
+        ],
+      },
+    }),
+  )
+  await page.goto('/sessions')
+  await expect(page.getByRole('button', { name: /PR #81/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'PR #81', exact: true })).toHaveAttribute(
+    'href',
+    'https://github.com/signalbox/example/pull/81',
+  )
+  await expect(page.getByRole('link', { name: 'Review submitted', exact: true })).toHaveAttribute(
+    'href',
+    'https://github.com/signalbox/example/pull/81',
+  )
 })
