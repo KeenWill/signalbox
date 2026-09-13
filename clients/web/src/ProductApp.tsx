@@ -467,6 +467,12 @@ export function ProductApp({
   const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
     surfaceEscapeRef.current = handler
   }, [])
+  const registerTranscriptUnwind = useCallback((handler: () => boolean) => {
+    surfaceEscapeRef.current = handler
+    return () => {
+      if (surfaceEscapeRef.current === handler) surfaceEscapeRef.current = null
+    }
+  }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const artifactRequest = artifactInspectorState.request
@@ -589,6 +595,7 @@ export function ProductApp({
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
       unwindSurface: () => {
+        if (surfaceEscapeRef.current?.()) return true
         if (surface === 'sessions' && (sessionState.workspace || sessionState.session)) {
           updateSessionSearch(
             { ...sessionState, workspace: undefined, session: undefined },
@@ -596,7 +603,7 @@ export function ProductApp({
           )
           return true
         }
-        return surfaceEscapeRef.current?.() ?? false
+        return false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow:
@@ -808,6 +815,7 @@ export function ProductApp({
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
         focusEntry={sessionState.session === undefined}
+        registerTranscriptUnwind={registerTranscriptUnwind}
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         onTimelineIds={updateTimelineIds}

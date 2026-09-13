@@ -732,6 +732,7 @@ function EventDetail({
 }) {
   const sequence = event.address.event_sequence
   const [cursor, setCursor] = useState<WebTimelineDetailContinuation | null>(null)
+  const [earlier, setEarlier] = useState<{ key: string; item: WebSessionTimelineDetail }[]>([])
   const previous = useRef<WebSessionTimelineDetailPage | undefined>(undefined)
   const element = useRef<HTMLDivElement>(null)
   const detail = useQuery({
@@ -776,6 +777,22 @@ function EventDetail({
           {enumLabel(event.kind)}
         </a>
       </header>
+      {[...earlier, ...(matches ? [{ key: JSON.stringify(cursor), item }] : [])].map(
+        ({ key, item }) => (
+          <div key={key}>
+            {item.body.type === 'tool_batch' && renderTool ? (
+              item.body.tools.map((tool) => (
+                <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
+              ))
+            ) : (
+              <BodyText body={item.body} />
+            )}
+            {!['user_input', 'model_call', 'tool_batch'].includes(item.body.type) && (
+              <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
+            )}
+          </div>
+        ),
+      )}
       {detail.isPending ? (
         <p role="status">Loading details…</p>
       ) : detail.isError || !matches ? (
@@ -786,29 +803,18 @@ function EventDetail({
           </button>
         </p>
       ) : (
-        <>
-          {item.body.type === 'tool_batch' && renderTool ? (
-            item.body.tools.map((tool) => (
-              <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
-            ))
-          ) : (
-            <BodyText body={item.body} />
-          )}
-          {!['user_input', 'model_call', 'tool_batch'].includes(item.body.type) && (
-            <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
-          )}
-          {next && (
-            <button
-              type="button"
-              onClick={() => {
-                previous.current = detail.data
-                setCursor(next)
-              }}
-            >
-              Continue reading
-            </button>
-          )}
-        </>
+        next && (
+          <button
+            type="button"
+            onClick={() => {
+              setEarlier((chunks) => [...chunks, { key: JSON.stringify(cursor), item }])
+              previous.current = detail.data
+              setCursor(next)
+            }}
+          >
+            Continue reading
+          </button>
+        )
       )}
     </div>
   )
@@ -832,6 +838,9 @@ function ContinuedEvent({
 }) {
   const [open, setOpen] = useState(false)
   const [cursor, setCursor] = useState(page.continuation ?? null)
+  const [earlier, setEarlier] = useState<
+    { key: string; items: WebSessionTimelineDetailPage['items'] }[]
+  >([])
   const previous = useRef(page)
   const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
@@ -866,9 +875,16 @@ function ContinuedEvent({
           </button>
         </p>
       )}
-      {detail.data?.items.map((item) => (
-        <div key={conversationEntryKey(item)}>
-          <BodyText body={item.body} />
+      {[
+        ...earlier,
+        ...(detail.data ? [{ key: JSON.stringify(cursor), items: detail.data.items }] : []),
+      ].map(({ key, items }) => (
+        <div key={key}>
+          {items.map((item) => (
+            <div key={conversationEntryKey(item)}>
+              <BodyText body={item.body} />
+            </div>
+          ))}
         </div>
       ))}
       {detail.data?.continuation && (
@@ -876,6 +892,8 @@ function ContinuedEvent({
           type="button"
           onClick={() => {
             if (detail.data) {
+              const items = detail.data.items
+              setEarlier((chunks) => [...chunks, { key: JSON.stringify(cursor), items }])
               previous.current = detail.data
               setCursor(detail.data.continuation ?? null)
             }
@@ -888,6 +906,7 @@ function ContinuedEvent({
         type="button"
         onClick={() => {
           setOpen(false)
+          setEarlier([])
           setCursor(page.continuation ?? null)
           previous.current = page
         }}

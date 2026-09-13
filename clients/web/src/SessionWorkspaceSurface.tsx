@@ -117,6 +117,7 @@ export function SessionWorkspaceSurface({
   focusEntry,
   onSessionOpen,
   onReturnToCatalog,
+  registerTranscriptUnwind,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -130,6 +131,7 @@ export function SessionWorkspaceSurface({
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
   onReturnToCatalog: () => void
+  registerTranscriptUnwind?: (handler: () => boolean) => () => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -654,6 +656,7 @@ export function SessionWorkspaceSurface({
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
+                registerUnwind={registerTranscriptUnwind}
                 anchor={displayedSession.anchor}
                 sessionId={sessionId ?? ''}
                 first={

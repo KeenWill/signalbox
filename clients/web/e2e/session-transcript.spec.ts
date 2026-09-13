@@ -128,7 +128,7 @@ for (const [maximumItems, internal] of [
   })
 }
 
-test('opens the next excerpt directly and closes its expanded text', async ({ page }) => {
+test('retains explicitly continued excerpts until details close', async ({ page }) => {
   const offsets: string[] = []
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
@@ -145,12 +145,12 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
       const offset = url.searchParams.get('cursor_offset') ?? '0'
       offsets.push(offset)
       const continuation =
-        offset === '0'
+        offset !== '2'
           ? {
               address: { event_sequence: '100000' },
               field: 'input_text',
               member_index: 0,
-              offset_bytes: '1',
+              offset_bytes: String(Number(offset) + 1),
             }
           : null
       return route.fulfill({
@@ -164,9 +164,9 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
             body: {
               ...item.body,
               text: {
-                text: offset === '0' ? 'a' : 'b',
+                text: offset === '0' ? 'a' : offset === '1' ? 'b' : 'c',
                 offset_bytes: offset,
-                total_bytes: '2',
+                total_bytes: '3',
                 continuation,
               },
             },
@@ -184,8 +184,14 @@ test('opens the next excerpt directly and closes its expanded text', async ({ pa
   })
   await expect(continuation.getByText('b', { exact: true })).toBeVisible()
   expect(offsets).toEqual(['0', '1'])
+  await continuation.getByRole('button', { name: 'Continue reading' }).click()
+  await expect(continuation.locator('.session-message-text')).toHaveText(['b', 'c'])
+  await expect(transcript.getByText('a', { exact: true })).toBeVisible()
+  expect(offsets).toEqual(['0', '1', '2'])
   await continuation.getByRole('button', { name: 'Close details' }).click()
   await expect(continuation).toHaveCount(0)
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await expect(continuation.locator('.session-message-text')).toHaveText(['b'])
 })
 
 for (const hiddenTail of [false, true]) {
