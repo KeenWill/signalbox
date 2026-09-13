@@ -81,6 +81,57 @@ pub struct WebSubmitInputRequest {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebCancelTurnRequest
+
+```rust
+pub struct WebCancelTurnRequest {
+    pub command_id: string::String,
+    pub expected_active_turn_id: string::String,
+    pub message: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebApprovalRequest
+
+```rust
+pub struct WebApprovalRequest {
+    pub command_id: string::String,
+    pub decision: WebApprovalDecision,
+    pub note: option::Option<string::String>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebApprovalDecision
+
+```rust
+pub enum WebApprovalDecision {
+    Approve,
+    Deny,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebGoalRequest
+
+```rust
+pub struct WebGoalRequest {
+    pub command_id: string::String,
+    pub statement: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSessionActionRequest
+
+```rust
+pub struct WebSessionActionRequest {
+    pub command_id: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebCreateSessionRequest
 
 ```rust
@@ -1907,80 +1958,4 @@ pub enum WebSearchContentClass {
     DerivedTextArtifact,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchResultSource
-
-```rust
-pub enum WebSearchResultSource {
-    Session {
-        session_id: WebSessionId,
-    },
-    AcceptedInput {
-        accepted_input_id: WebUuid,
-        turn_id: WebUuid,
-    },
-    SteeringInput {
-        accepted_input_id: WebUuid,
-        source_turn_id: WebUuid,
-    },
-    TurnTranscriptEntry {
-        semantic_entry_id: WebUuid,
-        turn_id: WebUuid,
-    },
-    SessionTranscriptEntry {
-        semantic_entry_id: WebUuid,
-    },
-    ToolRequest {
-        tool_request_id: WebUuid,
-        turn_id: WebUuid,
-    },
-    ToolAttempt {
-        tool_attempt_id: WebUuid,
-        turn_id: WebUuid,
-    },
-    Attachment {
-        attachment_id: WebUuid,
-    },
-    DerivedArtifact {
-        artifact_id: WebUuid,
-    },
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchHighlight
-
-```rust
-pub struct WebSearchHighlight {
-    pub start_byte: u32,
-    pub end_byte: u32,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchProjectionId
-
-```rust
-pub struct WebSearchProjectionId(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebSearchProjectionId {
-    #[must_use]
-    pub fn from_nonzero(value: nonzero::NonZeroU64) -> Self;
-}
-impl<'de> de::Deserialize<'de> for WebSearchProjectionId {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
-    where
-        D: de::Deserializer<'de>;
-}
-```
-
-## WebSearchCursor
-
-```rust
-pub struct WebSearchCursor {
-    pub address: WebTimelineAddress,
-    pub projection_id: WebSearchProjectionId,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

@@ -226,6 +226,7 @@ pub(crate) async fn commission_fleet(
             .request(
                 u64::try_from(index + 2)?,
                 ClientRequest::CommissionSession {
+                    runner_placement: None,
                     command_id: command()?,
                     template_name: String::from("merge-forward"),
                     fence: CommissionedSessionFence::Branch {
@@ -304,6 +305,7 @@ pub(crate) async fn commission_fleet_control(
         .request(
             1,
             ClientRequest::CommissionSession {
+                runner_placement: None,
                 command_id: command()?,
                 template_name: String::from("merge-forward"),
                 fence: CommissionedSessionFence::Branch {

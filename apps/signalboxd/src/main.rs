@@ -2094,7 +2094,7 @@ async fn run_hub_incarnation(
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
-    let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
+    let runner_service = match PostgresRunnerRegistrationService::local(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
             let failure = erase_startup_cause(
@@ -2736,6 +2736,7 @@ async fn run_hub_incarnation(
     };
     let web_http_runtime = web_http_listener
         .into_runtime(process_runtime.monitor(), eligibility_nudge.clone())
+        .with_tool_dispatch_gate(tool_dispatch_gate.clone())
         .with_configuration_reload(configuration_reload.clone());
     let runner_recovery = runner_service
         .recovery_store()

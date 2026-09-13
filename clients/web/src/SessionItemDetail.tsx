@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
+import { ToolResultMedia } from './features/tools/ToolResultMedia'
 import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
@@ -193,6 +194,7 @@ const ToolAttemptDetail = ({
       {includeText && physical?.failure && (
         <TextDetail label="Tool failure" excerpt={physical.failure} />
       )}
+      {includeText && <ToolResultMedia media={physical?.result_media_reference} />}
     </article>
   )
 }

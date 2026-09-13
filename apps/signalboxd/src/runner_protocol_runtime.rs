@@ -3,10 +3,12 @@
 use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use rustix::process::geteuid;
-use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge};
+use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge, ToolCatalog as _};
 use signalbox_domain::{
     CredentialProfileName, CredentialProfilePolicy, RunnerAuthenticationId, RunnerCapabilityClass,
-    RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId,
+    RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerId, RunnerSandboxProfile,
+    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    ToolAdmissibleLoci, ToolEffectClass, ToolName,
 };
 use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
@@ -40,7 +42,7 @@ const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 64;
-const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
+const RUNNER_CREDENTIAL_PROFILE: &str = "github-runner";
 
 mod recovery;
 
@@ -167,11 +169,11 @@ impl PostgresRunnerRegistrationService {
         self.store.clone()
     }
 
-    /// Composes the registration-only catalog admitted by this daemon slice.
-    pub fn registration_only(pool: PgPool) -> Result<Self, RunnerDomainError> {
+    /// Composes the local runner catalog and its admitted echo capability class.
+    pub fn local(pool: PgPool) -> Result<Self, RunnerDomainError> {
         Ok(Self::new(
-            RunnerProtocolStore::new(pool, registration_only_catalog()?),
-            std::iter::empty(),
+            RunnerProtocolStore::new(pool, local_runner_catalog()?),
+            [echo_class()?],
         ))
     }
 
@@ -684,10 +686,46 @@ fn log_connection_transition(
     }
 }
 
-pub(crate) fn registration_only_catalog() -> Result<RunnerCatalog, RunnerDomainError> {
-    let profile = CredentialProfileName::try_new(REGISTRATION_ONLY_CREDENTIAL_PROFILE.to_owned())?;
+pub(crate) fn local_runner_catalog() -> Result<RunnerCatalog, RunnerDomainError> {
+    let profile = CredentialProfileName::try_new(RUNNER_CREDENTIAL_PROFILE.to_owned())?;
     let policy = CredentialProfilePolicy::try_new(profile, [])?;
-    RunnerCatalog::try_new([], [], [policy], [], [])
+    RunnerCatalog::try_new(
+        [echo_class()?],
+        [echo_declaration()?],
+        [policy],
+        [],
+        [RunnerSandboxProfile::Ambient],
+    )
+}
+
+fn echo_class() -> Result<RunnerCapabilityClass, RunnerDomainError> {
+    RunnerCapabilityClass::try_new("echo".to_owned())
+}
+
+fn echo_declaration() -> Result<RunnerToolDeclaration, RunnerDomainError> {
+    let (catalog, _) = signalbox_tools_basic::EchoTool::try_new()
+        .map_err(|_| RunnerDomainError::InvalidState)?
+        .into_parts();
+    let name = ToolName::try_new(signalbox_tools_basic::ECHO_NAME.to_owned())
+        .map_err(|_| RunnerDomainError::InvalidName)?;
+    let definition = catalog
+        .definition(&name)
+        .ok_or(RunnerDomainError::InvalidState)?;
+    if definition.effect_class() != ToolEffectClass::EffectFree {
+        return Err(RunnerDomainError::InvalidState);
+    }
+    Ok(RunnerToolDeclaration::new(
+        definition.name().clone(),
+        RunnerToolModelDefinition::try_new(
+            definition.description().to_owned(),
+            definition.input_schema().as_str().to_owned(),
+        )?,
+        definition.permission_default(),
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::DaemonOrRunner {
+            selector: RunnerSelector::CapabilityClass(echo_class()?),
+        },
+    ))
 }
 
 impl RunnerRegistrationService for PostgresRunnerRegistrationService {
@@ -2458,10 +2496,9 @@ mod tests {
     }
 
     fn configured_advertisement() -> signalbox_runner_wire::Advertisement {
-        let profile = signalbox_runner_wire::ProfileName::try_new(
-            REGISTRATION_ONLY_CREDENTIAL_PROFILE.to_owned(),
-        )
-        .expect("the configured credential profile is checked");
+        let profile =
+            signalbox_runner_wire::ProfileName::try_new(RUNNER_CREDENTIAL_PROFILE.to_owned())
+                .expect("the configured credential profile is checked");
         signalbox_runner_wire::Advertisement {
             default_working_directory: None,
             capability_classes: Vec::new(),
@@ -2506,8 +2543,150 @@ mod tests {
             .expect("the registration-only catalog is internally consistent")
     }
 
+    fn local_advertisement() -> signalbox_runner_wire::Advertisement {
+        signalbox_runner_wire::Advertisement {
+            capability_classes: vec![
+                signalbox_runner_wire::CapabilityName::try_new("echo".to_owned())
+                    .expect("shipped class"),
+            ],
+            tools: vec![
+                signalbox_runner_wire::WireToolName::try_new(
+                    signalbox_tools_basic::ECHO_NAME.to_owned(),
+                )
+                .expect("shipped tool"),
+            ],
+            sandbox_profiles: vec![signalbox_runner_wire::SandboxProfile::Ambient],
+            ..empty_advertisement()
+        }
+    }
+
+    fn local_enrollment() -> signalbox_domain::RunnerEnrollment {
+        signalbox_domain::RunnerEnrollment::new(
+            RunnerEnrollmentId::from_uuid(uuid::Uuid::now_v7()),
+            RunnerId::from_uuid(uuid::Uuid::now_v7()),
+            RunnerAuthenticationId::from_uuid(uuid::Uuid::now_v7()),
+            [echo_class().expect("shipped class")],
+        )
+    }
+
+    #[test]
+    fn local_catalog_registers_the_exact_daemon_echo_definition() {
+        let enrollment = local_enrollment();
+        let registered = enrollment
+            .register(
+                local_advertisement()
+                    .try_into_domain()
+                    .expect("valid advertisement"),
+                &local_runner_catalog().expect("compiled catalog"),
+            )
+            .expect("local catalog admits echo and ambient");
+        let (daemon, _) = signalbox_tools_basic::EchoTool::try_new()
+            .expect("daemon echo")
+            .into_parts();
+        let definitions = daemon.definitions();
+        let [definition] = definitions.as_ref() else {
+            panic!("echo has one definition")
+        };
+        let tools = registered.tools().collect::<Vec<_>>();
+        let [runner] = tools.as_slice() else {
+            panic!("one runner tool is registered")
+        };
+        assert_eq!(runner.name(), definition.name());
+        assert_eq!(runner.model().description(), definition.description());
+        assert_eq!(
+            runner.model().input_schema().as_str(),
+            definition.input_schema().as_str()
+        );
+        assert_eq!(runner.permission(), definition.permission_default());
+        assert_eq!(definition.effect_class(), ToolEffectClass::EffectFree);
+        assert_eq!(runner.effect(), RunnerToolEffectClass::Pure);
+        assert_eq!(
+            runner.loci(),
+            &ToolAdmissibleLoci::DaemonOrRunner {
+                selector: RunnerSelector::CapabilityClass(echo_class().expect("class"))
+            }
+        );
+        assert!(registered.supports_sandbox(RunnerSandboxProfile::Ambient));
+        assert_eq!(
+            registered
+                .classes()
+                .map(|class| class.as_str())
+                .collect::<Vec<_>>(),
+            ["echo"]
+        );
+        assert_eq!(registered.workspaces().count(), 0);
+    }
+
+    #[test]
+    fn local_catalog_rejects_each_disallowed_claim_without_advancing_registration() {
+        let mut disallowed_class = local_advertisement();
+        disallowed_class.capability_classes = vec![
+            signalbox_runner_wire::CapabilityName::try_new("uncompiled".to_owned())
+                .expect("well-formed unavailable class"),
+        ];
+        let mut daemon_only = local_advertisement();
+        daemon_only.tools = vec![
+            signalbox_runner_wire::WireToolName::try_new(
+                signalbox_tools_basic::CURRENT_TIME_NAME.to_owned(),
+            )
+            .expect("daemon-only tool"),
+        ];
+        let mut disallowed_sandbox = local_advertisement();
+        disallowed_sandbox.sandbox_profiles =
+            vec![signalbox_runner_wire::SandboxProfile::WorkspaceRestricted];
+        let mut missing_class = local_advertisement();
+        missing_class.capability_classes.clear();
+        let echo =
+            ToolName::try_new(signalbox_tools_basic::ECHO_NAME.to_owned()).expect("echo name");
+        let cases = [
+            (
+                disallowed_class,
+                RunnerDomainError::CapabilityClassNotAllowed(
+                    RunnerCapabilityClass::try_new("uncompiled".to_owned())
+                        .expect("unavailable class"),
+                ),
+            ),
+            (
+                daemon_only,
+                RunnerDomainError::ToolUndeclared(
+                    ToolName::try_new(signalbox_tools_basic::CURRENT_TIME_NAME.to_owned())
+                        .expect("daemon-only name"),
+                ),
+            ),
+            (
+                disallowed_sandbox,
+                RunnerDomainError::SandboxProfileNotAllowed(
+                    RunnerSandboxProfile::WorkspaceRestricted,
+                ),
+            ),
+            (missing_class, RunnerDomainError::ToolLocusNotAllowed(echo)),
+        ];
+        let catalog = local_runner_catalog().expect("compiled catalog");
+        for (advertisement, expected) in cases {
+            let enrollment = local_enrollment();
+            let error = enrollment
+                .register(
+                    advertisement.try_into_domain().expect("well-formed claim"),
+                    &catalog,
+                )
+                .expect_err("whole registration is refused");
+            assert_eq!(error, expected);
+            assert_eq!(enrollment.last_issued_registration_revision(), None);
+            assert!(
+                enrollment
+                    .register(
+                        local_advertisement()
+                            .try_into_domain()
+                            .expect("valid advertisement"),
+                        &catalog
+                    )
+                    .is_ok()
+            );
+        }
+    }
+
     fn configured_catalog() -> RunnerCatalog {
-        registration_only_catalog()
+        local_runner_catalog()
             .expect("the configured registration-only catalog is internally consistent")
     }
 

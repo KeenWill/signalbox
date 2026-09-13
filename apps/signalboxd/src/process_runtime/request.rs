@@ -628,6 +628,7 @@ where
             system_prompt,
             placement,
             lifecycle,
+            runner_placement,
         } => {
             Box::pin(async move {
                 handle_create_session(
@@ -641,6 +642,7 @@ where
                         system_prompt,
                         placement,
                         lifecycle,
+                        runner_placement,
                     },
                     services,
                 )
@@ -653,6 +655,7 @@ where
             template_name,
             placement,
             lifecycle,
+            runner_placement,
         } => {
             Box::pin(async move {
                 handle_create_session_from_template(
@@ -664,6 +667,7 @@ where
                         template_name,
                         placement,
                         lifecycle,
+                        runner_placement,
                     },
                     services,
                 )
@@ -850,6 +854,7 @@ where
             fence,
             statement,
             content,
+            runner_placement,
         } => {
             Box::pin(async move {
                 Box::pin(handle_commission_session(
@@ -862,6 +867,7 @@ where
                         fence,
                         statement,
                         content,
+                        runner_placement,
                     },
                     services,
                 ))

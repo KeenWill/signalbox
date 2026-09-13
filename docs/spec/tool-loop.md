@@ -44,6 +44,11 @@ snapshot. When a user disagrees with a judge denial, the
 proposal of the same command; each delegate denial admits at most one override
 ever, and a second command is rejected.
 
+`POST /api/sessions/{session_id}/approvals/{request_id}` accepts a durable
+command ID, an `approve` or `deny` decision, and an optional denial note through
+the same decision service. The same-origin JSON gate applies; a 204 acknowledges
+the recorded decision, and refusals retain their application error code.
+
 The daemon composes one process-lifetime immutable registry from the implemented
 tool families in `apps/signalboxd/src/daemon_tools/`: basic, blob-read, web,
 code-host, workspace, conversation, plan, session-delegation, goal-declaration,

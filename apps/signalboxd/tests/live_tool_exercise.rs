@@ -1180,6 +1180,7 @@ async fn decide_tool_request(
 async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUuid> {
     connection
         .send(ClientRequest::CreateSession {
+            runner_placement: None,
             command_id: command()?,
             initial_model_selection: ModelSelection::Alias {
                 alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(SMOKE_ALIAS)),

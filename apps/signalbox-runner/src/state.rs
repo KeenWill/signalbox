@@ -17,12 +17,14 @@ use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{CanonicalUuid, Digest, PositiveU64};
 use uuid::Uuid;
 
+use crate::journal::Journal;
+
 const STATE_DOCUMENT_VERSION: u64 = 1;
 const ROOT_MODE: u32 = 0o700;
-const STATE_MODE: u32 = 0o600;
-const PERMISSION_MASK: u32 = 0o7777;
+pub(crate) const STATE_MODE: u32 = 0o600;
+pub(crate) const PERMISSION_MASK: u32 = 0o7777;
 const STATE_FILE: &str = "enrollment-state.json";
-const MAX_STATE_BYTES: u64 = 16 * 1024;
+pub(crate) const MAX_STATE_BYTES: u64 = 16 * 1024;
 
 /// Authority carried by the daemon-issued enrollment receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -173,6 +175,10 @@ pub enum StateResource {
     StateDocument,
     /// Single-use replacement document used for atomic publication.
     TemporaryDocument,
+    /// Current private operation journal.
+    Journal,
+    /// Single-use replacement journal used for atomic publication.
+    TemporaryJournal,
 }
 
 impl fmt::Display for StateResource {
@@ -182,6 +188,8 @@ impl fmt::Display for StateResource {
             Self::RootParent => "runner state root parent",
             Self::StateDocument => "runner state document",
             Self::TemporaryDocument => "runner temporary state document",
+            Self::Journal => "runner operation journal",
+            Self::TemporaryJournal => "runner temporary operation journal",
         })
     }
 }
@@ -216,7 +224,7 @@ impl fmt::Display for StateOperation {
     }
 }
 
-/// Typed fail-closed durable enrollment-state error.
+/// Typed fail-closed error for documents in the durable runner state root.
 #[derive(Debug)]
 pub enum RunnerStateError {
     /// The configured root was not an absolute path with a final component.
@@ -306,6 +314,7 @@ impl Error for RunnerStateError {
 pub struct RunnerStateRoot {
     directory: File,
     state: RunnerState,
+    journal: Journal,
 }
 
 impl RunnerStateRoot {
@@ -359,7 +368,7 @@ impl RunnerStateRoot {
                     source,
                 });
             }
-        };
+        }
 
         let path_metadata = fs::symlink_metadata(path).map_err(|source| RunnerStateError::Io {
             operation: StateOperation::Inspect,
@@ -409,19 +418,23 @@ impl RunnerStateRoot {
             }
         })?;
 
-        let state = match openat(
+        let (state, journal) = match openat(
             &directory,
             STATE_FILE,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
-            Ok(descriptor) => read_state(File::from(descriptor), effective_user)?,
+            Ok(descriptor) => (
+                read_state(File::from(descriptor), effective_user)?,
+                Journal::open(&directory)?,
+            ),
             Err(rustix::io::Errno::NOENT) => {
+                let journal = Journal::initialize(&directory)?;
                 let state = RunnerState::Pristine {
                     request_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
                 };
                 write_state(&directory, &state)?;
-                state
+                (state, journal)
             }
             Err(error) => {
                 return Err(RunnerStateError::Io {
@@ -431,12 +444,21 @@ impl RunnerStateRoot {
                 });
             }
         };
-        Ok(Self { directory, state })
+        Ok(Self {
+            directory,
+            state,
+            journal,
+        })
     }
 
     /// Borrows the exact current in-memory copy of fsynced state.
     pub const fn state(&self) -> &RunnerState {
         &self.state
+    }
+
+    /// Projects the replayed durable journal into the next resume inventory.
+    pub fn reconnect_inventory(&self) -> signalbox_runner_wire::ReconnectInventory {
+        self.journal.reconnect_inventory()
     }
 
     /// Atomically fsyncs the first exact daemon-issued receipt.
@@ -538,7 +560,44 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
     };
     let mut encoded = serde_json::to_vec(&document).map_err(|_| RunnerStateError::CorruptState)?;
     encoded.push(b'\n');
-    let temporary_name = format!(".enrollment-state-{}.tmp", Uuid::now_v7());
+    write_document(directory, DocumentKind::Enrollment, &encoded)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DocumentKind {
+    Enrollment,
+    Journal,
+}
+
+impl DocumentKind {
+    pub(crate) const fn file_name(self) -> &'static str {
+        match self {
+            Self::Enrollment => STATE_FILE,
+            Self::Journal => "operation-journal.json",
+        }
+    }
+
+    const fn resource(self) -> StateResource {
+        match self {
+            Self::Enrollment => StateResource::StateDocument,
+            Self::Journal => StateResource::Journal,
+        }
+    }
+
+    const fn temporary_resource(self) -> StateResource {
+        match self {
+            Self::Enrollment => StateResource::TemporaryDocument,
+            Self::Journal => StateResource::TemporaryJournal,
+        }
+    }
+}
+
+pub(crate) fn write_document(
+    directory: &File,
+    kind: DocumentKind,
+    encoded: &[u8],
+) -> Result<(), RunnerStateError> {
+    let temporary_name = format!(".{}-{}.tmp", kind.file_name(), Uuid::now_v7());
     let descriptor = openat(
         directory,
         temporary_name.as_str(),
@@ -547,28 +606,28 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
     )
     .map_err(|error| RunnerStateError::Io {
         operation: StateOperation::Create,
-        resource: StateResource::TemporaryDocument,
+        resource: kind.temporary_resource(),
         source: rustix_error(error),
     })?;
     rustix::fs::fchmod(&descriptor, Mode::RUSR | Mode::WUSR).map_err(|error| {
         RunnerStateError::Io {
             operation: StateOperation::ConfigurePermissions,
-            resource: StateResource::TemporaryDocument,
+            resource: kind.temporary_resource(),
             source: rustix_error(error),
         }
     })?;
     let mut temporary = File::from(descriptor);
     let prepared = (|| {
         temporary
-            .write_all(&encoded)
+            .write_all(encoded)
             .map_err(|source| RunnerStateError::Io {
                 operation: StateOperation::Write,
-                resource: StateResource::TemporaryDocument,
+                resource: kind.temporary_resource(),
                 source,
             })?;
         temporary.sync_all().map_err(|source| RunnerStateError::Io {
             operation: StateOperation::Sync,
-            resource: StateResource::TemporaryDocument,
+            resource: kind.temporary_resource(),
             source,
         })
     })();
@@ -576,11 +635,16 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
         let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
         return Err(error);
     }
-    if let Err(error) = renameat(directory, temporary_name.as_str(), directory, STATE_FILE) {
+    if let Err(error) = renameat(
+        directory,
+        temporary_name.as_str(),
+        directory,
+        kind.file_name(),
+    ) {
         let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
         return Err(RunnerStateError::Io {
             operation: StateOperation::Rename,
-            resource: StateResource::StateDocument,
+            resource: kind.resource(),
             source: rustix_error(error),
         });
     }
@@ -658,6 +722,21 @@ mod tests {
         let reopened = RunnerStateRoot::open(&path).expect("the private root reopens");
 
         assert_eq!(reopened.state().request_id(), request_id);
+    }
+
+    #[test]
+    fn precreated_empty_private_root_is_initialized() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        fs::create_dir(&path).expect("the provisioned root is created");
+        fs::set_permissions(&path, fs::Permissions::from_mode(ROOT_MODE))
+            .expect("the provisioned root is owner-private");
+
+        let root = RunnerStateRoot::open(&path).expect("the provisioned root is initialized");
+
+        assert!(matches!(root.state(), RunnerState::Pristine { .. }));
+        assert!(path.join(STATE_FILE).is_file());
+        assert!(path.join(DocumentKind::Journal.file_name()).is_file());
     }
 
     #[test]
