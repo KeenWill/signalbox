@@ -556,8 +556,10 @@ Generated titles are at most 256 UTF-8 bytes. Bootstrap advertises runtime
 availability through `capabilities.session_title_generation`, including startup
 availability of the selected effective adapter and sufficient prompt room. The
 catalog refreshes this availability on window focus. Unconfigured title
-generation clears deferred work. Title conversation SQL limits candidate rows to
-the input byte budget after compaction projection.
+generation clears deferred work. Title conversation SQL limits projected
+membership and nonempty payload rows to the input byte budget, newest first.
+Completed-turn dispatch retains identifiers; title preparation runs inside an
+admitted task.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

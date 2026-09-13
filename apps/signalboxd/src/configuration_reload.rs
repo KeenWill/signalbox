@@ -309,15 +309,14 @@ impl ConfigurationReload {
         self
     }
 
-    pub(crate) fn queue_initial_title(
+    pub(crate) fn start_initial_title(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
     ) {
-        if self.catalogs().models.session_title_selection().is_none() {
-            return;
-        }
-        if let Some(processes) = &self.title_invocation_processes {
+        if self.catalogs().models.session_title_selection().is_some()
+            && let Some(processes) = &self.title_invocation_processes
+        {
             processes.retain_initial_title(session, turn);
         }
     }
