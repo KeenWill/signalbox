@@ -110,6 +110,16 @@ const jsonCase = (
   }
 }
 export const jsonExamples = [
+  ...['1.0', '1e3', '-0', '9007199254740993'].map((raw, index) => {
+    const entry = jsonCase(`json_scalar_${index}`, {}, {})
+    entry.raw = raw
+    if (entry.tool.evidence.type === 'physical_attempt')
+      entry.tool = {
+        ...entry.tool,
+        evidence: { ...entry.tool.evidence, result: toolExcerpt(raw) },
+      }
+    return entry
+  }),
   jsonCase('json_array_integer', {}, []),
   jsonCase('json_array_overflow', {}, []),
   jsonCase('json_array_multiline', {}, ['a\n'.repeat(40)]),

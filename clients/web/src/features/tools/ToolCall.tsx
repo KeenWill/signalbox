@@ -199,8 +199,8 @@ function PresentedExcerpt({ excerpt, label }: { excerpt: WebTimelineTextExcerpt;
         <small>Open Raw for the original text</small>
       </section>
     )
-  } catch {
-    return /^\s*[[{"]/u.test(excerpt.text) ? (
+  } catch (error) {
+    return error instanceof RangeError || /^\s*[[{"]/u.test(excerpt.text) ? (
       <p>{label} details available in Raw</p>
     ) : (
       <TextPreview text={excerpt.text} label={label} />

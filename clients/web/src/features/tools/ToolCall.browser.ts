@@ -71,6 +71,10 @@ for (const example of jsonExamples) {
     await expect(tool.locator('pre')).toHaveCount(0)
     expect((await tool.textContent())?.length).toBeLessThan(6000)
     expect(await tool.locator('dt').count()).toBeLessThanOrEqual(32)
+    if (example.name.startsWith('json_scalar_')) {
+      await expect(tool).toContainText('Output details available in Raw')
+      await expect(tool.getByRole('region', { name: 'Output', exact: true })).toHaveCount(0)
+    }
     if (['json_array_integer', 'json_array_overflow'].includes(example.name)) {
       await expect(tool).toContainText('Output details available in Raw')
       await expect(tool).not.toContainText('9007199254740992')
