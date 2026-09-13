@@ -146,7 +146,7 @@ fn pull_request_payload(state: &RepoWatchPullRequestState) -> Value {
                 "outcome": checks_outcome_storage(suite.outcome()),
             }))
             .collect::<Vec<_>>(),
-        "required_check_failure": state.required_check_failure(),
+        "required_check_conclusions": state.required_check_conclusions().map(|values| values.iter().map(|value| check_conclusion_storage(*value)).collect::<Vec<_>>()),
         "completed_check_runs": state
             .completed_check_runs()
             .iter()
@@ -212,7 +212,7 @@ const fn checks_outcome_storage(value: ChecksOutcome) -> &'static str {
     }
 }
 
-const fn check_conclusion_storage(value: CheckConclusion) -> &'static str {
+pub(crate) const fn check_conclusion_storage(value: CheckConclusion) -> &'static str {
     match value {
         CheckConclusion::Success => "success",
         CheckConclusion::Failure => "failure",

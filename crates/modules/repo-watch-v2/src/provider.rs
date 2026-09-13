@@ -874,10 +874,12 @@ async fn fetch_pull(
             ((Vec::new(), Vec::new()), Vec::new(), Vec::new(), Vec::new())
         };
     let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
-        required_check_failure: if lifecycle == RepoWatchPullRequestLifecycle::Open {
+        required_check_conclusions: if lifecycle == RepoWatchPullRequestLifecycle::Open {
             Some(crate::required_checks::fetch(io, repository, number, context.head_sha()).await?)
         } else {
-            previous.and_then(RepoWatchPullRequestState::required_check_failure)
+            previous
+                .and_then(RepoWatchPullRequestState::required_check_conclusions)
+                .map(<[CheckConclusion]>::to_vec)
         },
         context,
         lifecycle,
@@ -1402,7 +1404,7 @@ mod tests {
                         .to_owned(),
                 )
                 .map_err(|_| ObservationError::InvalidResponse)?,
-                failed: false,
+                conclusions: vec![],
                 after: None,
             })
         }

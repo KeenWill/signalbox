@@ -19,7 +19,7 @@ fn review_and_thread(
         NonZeroU64::new(review).expect("fixture review"),
     )));
     let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
-        required_check_failure: None,
+        required_check_conclusions: None,
         context: pull.context().clone(),
         lifecycle: pull.lifecycle(),
         mergeable_state: pull.mergeable_state(),

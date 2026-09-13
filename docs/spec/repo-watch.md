@@ -296,12 +296,15 @@ without a durably completed configured push, repository watch retries that rule
 and pull request after its cooldown while the latest observed matching condition
 remains: a conflicting merge, unresolved review threads, or failing required
 checks. Required-check failures use GitHub’s classification for that pull
-request and observed head. Non-required failures and checks whose required
-status has not been observed do not admit retries or activation catch-up.
-Provider events match independently of this retry condition. Retries use the
-current pull-request context, retain their preceding dispatch and evaluated
-event context, and pass through the existing singleton and dispatch admission
-limits; they do not create GitHub change events.
+request and observed head. Activation conclusion predicates exclude non-required
+failures and retain the specific conclusions of required checks. Required
+failures also contribute the aggregate `failure` conclusion. Non-required
+failures and checks whose required status has not been observed do not admit
+retries or activation catch-up. Provider events match independently of this
+retry condition. Retries use the current pull-request context, retain their
+preceding dispatch and evaluated event context, and pass through the existing
+singleton and dispatch admission limits; they do not create GitHub change
+events.
 
 An ordinary dispatch closes nonsticky after its turn ends and no accepted work
 remains. The closure rechecks that condition under the session lock; a goal,
