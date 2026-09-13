@@ -114,23 +114,31 @@ export const pruneExpandedSessionItems = (
 
 const sessionCostLabel = (summary: WebUsageSummary): string => {
   if (summary.truncated) return 'Cost incomplete'
-  let total = 0n
+  const totals = { real: 0n, metered_equivalent: 0n }
+  const labels = new Set<string>()
   let scale = 0
-  let equivalent = false
   for (const group of summary.groups) {
     if (group.cost.status === 'unavailable') return 'Cost unavailable'
     const [whole, fraction = ''] = group.cost.amount_usd.split('.')
     if (fraction.length > scale) {
-      total *= 10n ** BigInt(fraction.length - scale)
+      totals.real *= 10n ** BigInt(fraction.length - scale)
+      totals.metered_equivalent *= 10n ** BigInt(fraction.length - scale)
       scale = fraction.length
     }
-    total += BigInt(`${whole}${fraction}`) * 10n ** BigInt(scale - fraction.length)
-    equivalent ||= group.cost.label === 'metered_equivalent'
+    totals[group.cost.label] +=
+      BigInt(`${whole}${fraction}`) * 10n ** BigInt(scale - fraction.length)
+    labels.add(group.cost.label)
   }
   const divisor = 10n ** BigInt(Math.max(scale - 2, 0))
-  const cents = scale > 2 ? (total + divisor / 2n) / divisor : total * 10n ** BigInt(2 - scale)
-  const dollars = `$${new Intl.NumberFormat('en-US').format(cents / 100n)}.${(cents % 100n).toString().padStart(2, '0')}`
-  return equivalent ? `${dollars} equivalent` : dollars
+  const dollars = (total: bigint): string => {
+    const cents = scale > 2 ? (total + divisor / 2n) / divisor : total * 10n ** BigInt(2 - scale)
+    return `$${new Intl.NumberFormat('en-US').format(cents / 100n)}.${(cents % 100n).toString().padStart(2, '0')}`
+  }
+  const parts = []
+  if (labels.has('real') || labels.size === 0) parts.push(dollars(totals.real))
+  if (labels.has('metered_equivalent'))
+    parts.push(`${dollars(totals.metered_equivalent)} equivalent`)
+  return parts.join(' + ')
 }
 
 export function SessionWorkspaceSurface({

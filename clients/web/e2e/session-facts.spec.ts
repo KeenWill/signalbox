@@ -96,10 +96,16 @@ for (const example of [
     text: 'Cost unavailable',
   },
   {
-    name: 'equivalent',
+    name: 'mixed real and equivalent subtotals',
     groups: [group('2'), group('1', 'metered_equivalent')],
     truncated: false,
-    text: '$3.00 equivalent',
+    text: '$2.00 + $1.00 equivalent',
+  },
+  {
+    name: 'equivalent-only subtotal',
+    groups: [group('1.001', 'metered_equivalent'), group('2.134', 'metered_equivalent')],
+    truncated: false,
+    text: '$3.14 equivalent',
   },
 ])
   test(`cost handles ${example.name}`, async ({ page }) => {
