@@ -5,7 +5,7 @@ import {
   detailTurnId,
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
-import { groupTranscriptTurns, toolContinuationSequence, turnSummaryParts } from './turns'
+import { groupTranscriptTurns, toolContinuations, turnSummaryParts } from './turns'
 
 it('groups final text, user messages, and repeated tool evidence under the durable turn identity', () => {
   const turns = groupTranscriptTurns([
@@ -89,13 +89,33 @@ it('retains an unsuccessful turn outcome without a completed assistant response'
   expect(turn?.outcome).toEqual(failure)
 })
 
-it('continues merged result text at the event that supplied its excerpt', () => {
+it('retains every continuation from merged tool evidence', () => {
   const proposal = detailItems[1]
   const result = toolResultItem()
-  if (!proposal || result.body.type !== 'tool_batch') throw new Error('tool fixture missing')
+  if (proposal?.body.type !== 'tool_batch' || result.body.type !== 'tool_batch')
+    throw new Error('tool fixture missing')
+  const proposed = proposal.body.tools[0]
   const tool = result.body.tools[0]
-  if (tool?.evidence.type !== 'physical_attempt' || !tool.evidence.result)
+  if (!proposed?.arguments || tool?.evidence.type !== 'physical_attempt' || !tool.evidence.result)
     throw new Error('result fixture missing')
+  const argumentsContinuation = {
+    address: { event_sequence: '2' },
+    field: 'tool_arguments' as const,
+    member_index: 0,
+    offset_bytes: '10',
+  }
+  const continuedProposal = {
+    ...proposal,
+    body: {
+      ...proposal.body,
+      tools: [
+        {
+          ...proposed,
+          arguments: { ...proposed.arguments, continuation: argumentsContinuation },
+        },
+      ],
+    },
+  }
   const continued = {
     ...tool,
     evidence: {
@@ -112,11 +132,14 @@ it('continues merged result text at the event that supplied its excerpt', () => 
     },
   }
   const turn = groupTranscriptTurns([
-    proposal,
+    continuedProposal,
     { ...result, address: { event_sequence: '6' }, body: { ...result.body, tools: [continued] } },
   ])[0]
   if (!turn?.tools[0]) throw new Error('grouped tool fixture missing')
-  expect(toolContinuationSequence(turn, turn.tools[0])).toBe('6')
+  expect(toolContinuations(turn.tools[0])).toEqual([
+    { field: 'arguments', continuation: argumentsContinuation },
+    { field: 'output', continuation: continued.evidence.result?.continuation },
+  ])
 })
 
 it('retains provider failures in event order without treating them as terminal outcomes', () => {
@@ -177,4 +200,25 @@ it('keeps an intervening turn input before the earlier turn response', () => {
   expect(turns[0]?.id).not.toBe(turns[2]?.id)
   expect(turns[0]?.result).toBeUndefined()
   expect(turns[2]?.result?.address.event_sequence).toBe('5')
+})
+
+it('merges repeated tool evidence into the first interleaved turn segment', () => {
+  const proposal = detailItems[1]
+  const input = detailItems[0]
+  const result = toolResultItem()
+  if (proposal?.body.type !== 'tool_batch' || input?.body.type !== 'user_input')
+    throw new Error('interleaved tool fixture missing')
+  const turns = groupTranscriptTurns([
+    proposal,
+    {
+      ...input,
+      address: { event_sequence: '3' },
+      body: { ...input.body, turn_id: '00000000-0000-0000-0000-000000000126' },
+    },
+    { ...result, address: { event_sequence: '4' } },
+  ])
+  expect(turns.map((turn) => turn.tools.length)).toEqual([1, 0, 0])
+  expect(turns[0]?.tools[0]?.evidence).toMatchObject({
+    result: { text: '{"release":"ready","checks":"passed"}' },
+  })
 })

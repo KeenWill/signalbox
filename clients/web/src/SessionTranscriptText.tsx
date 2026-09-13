@@ -16,7 +16,7 @@ import { TRANSCRIPT_RETAINED_WINDOWS, TranscriptWindowReader } from './session-t
 import {
   groupTranscriptTurns,
   type TranscriptTurn,
-  toolContinuationSequence,
+  toolContinuations,
   turnSummaryParts,
 } from './session-timeline/turns'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
@@ -400,7 +400,26 @@ function TurnSummary({
             {tool && part.tools.some((entry) => entry.request_id === tool.request_id) && (
               <div className="session-tool-slot">
                 {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-                {more(toolContinuationSequence(turn, tool))}
+                {toolContinuations(tool).map(({ field, continuation }) => {
+                  const page = detailPages.find((candidate) => {
+                    const cursor = candidate.continuation
+                    return (
+                      cursor?.type === 'more_body' &&
+                      cursor.body.address.event_sequence === continuation.address.event_sequence &&
+                      cursor.body.field === continuation.field &&
+                      cursor.body.member_index === continuation.member_index &&
+                      cursor.body.offset_bytes === continuation.offset_bytes
+                    )
+                  })
+                  return page ? (
+                    <ContinuedEvent
+                      key={`${field}:${continuation.address.event_sequence}:${continuation.member_index}:${continuation.offset_bytes}`}
+                      sessionId={sessionId}
+                      page={page}
+                      limits={limits}
+                    />
+                  ) : null
+                })}
               </div>
             )}
           </section>
