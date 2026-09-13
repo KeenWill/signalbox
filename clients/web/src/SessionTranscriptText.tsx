@@ -711,7 +711,13 @@ function TranscriptWindow({
                     turnModes[turn.turnId ?? turn.id] === 'full' ||
                     item.address.event_sequence === eventSequence)) ||
                 (isVisibleTurnEvent(turn, item) &&
-                  (item.body.type !== 'tool_batch' || detail === 'condensed')),
+                  (item.body.type !== 'tool_batch' ||
+                    detail === 'condensed' ||
+                    item.body.tools.some(
+                      (tool) =>
+                        tool.evidence.type === 'physical_attempt' &&
+                        tool.evidence.result_media_reference != null,
+                    ))),
             ),
           ),
       )
@@ -869,7 +875,13 @@ function TranscriptWindow({
                         (turn.events.includes(item) &&
                           (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
                         (isVisibleTurnEvent(turn, item) &&
-                          (item.body.type !== 'tool_batch' || detail === 'condensed')),
+                          (item.body.type !== 'tool_batch' ||
+                            detail === 'condensed' ||
+                            item.body.tools.some(
+                              (tool) =>
+                                tool.evidence.type === 'physical_attempt' &&
+                                tool.evidence.result_media_reference != null,
+                            ))),
                     ),
                   ),
               ),
