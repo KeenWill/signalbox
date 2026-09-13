@@ -86,9 +86,11 @@ relationships and their cascade are owned by
 parent's wait, the wake turn, and their scheduling.
 
 The daemon runtime acquires the single-daemon guard owned by
-[process-protocol](process-protocol.md), migrates, completes the startup scan,
-then binds its sockets and starts admission, dispatch, scheduling, and the
-watchdog together.
+[process-protocol](process-protocol.md), migrates, binds the runner socket in
+recovery-only mode, reconciles retained runner execution, and completes the
+startup scan. It then initializes configured blob stores, binds the process
+socket, and starts ordinary runner enrollment, process admission, dispatch,
+scheduling, and the watchdog together.
 
 ## Design decisions
 
