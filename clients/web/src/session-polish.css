@@ -3,6 +3,9 @@
   padding: var(--product-space);
   overflow: auto;
 }
+.surface-body.session-workspace-surface:has(> .session-composer) {
+  grid-template-rows: minmax(18rem, 1fr) auto;
+}
 .surface-body.session-workspace-surface > .session-workspace {
   display: flex;
   flex-direction: column;

@@ -1,5 +1,12 @@
 import { expect, test } from './fontTest'
-import { excerpt, openSession, sessionApi, sessionId, turnId } from './session-fixture'
+import {
+  excerpt,
+  initialMessage,
+  openSession,
+  sessionApi,
+  sessionId,
+  turnId,
+} from './session-fixture'
 
 test('composer fits an unchanged draft after the window narrows and widens', async ({ page }) => {
   const errors: string[] = []
@@ -21,18 +28,35 @@ test('composer fits an unchanged draft after the window narrows and widens', asy
   expect(errors).toEqual([])
 })
 
-test('a short viewport can scroll to the complete delivery status', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 160 })
-  await sessionApi(page, true)
-  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
-  const status = page.getByRole('form', { name: 'Message composer' }).getByRole('status')
-  await expect(status).toHaveText('Wait for the current turn to finish · Running')
-  await page.mouse.move(200, 140)
-  await page.mouse.wheel(0, 500)
-  await expect(status).toBeInViewport({ ratio: 1 })
-})
-
 for (const width of [1440, 390]) {
+  test(`a short viewport can reach the header, conversation, and delivery status at ${width}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 160 })
+    await sessionApi(page, true)
+    await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+    const status = page.getByRole('form', { name: 'Message composer' }).getByRole('status')
+    await expect(status).toHaveText('Wait for the current turn to finish · Running')
+    await page.screenshot({ path: testInfo.outputPath(`session-short-${width}.png`) })
+    const latest = page.getByRole('button', { name: 'Latest', exact: true })
+    await latest.click()
+    await expect(latest).toBeInViewport({ ratio: 1 })
+    await page.getByText('Session details', { exact: true }).click()
+    await page.keyboard.press('Escape')
+    const message = page
+      .getByRole('region', { name: 'Conversation', exact: true })
+      .getByText(initialMessage)
+    await message.scrollIntoViewIfNeeded()
+    await expect(message).toBeInViewport({ ratio: 1 })
+    await page.getByRole('region', { name: 'Session workspace', exact: true }).hover({
+      position: { x: 2, y: 2 },
+    })
+    await expect(async () => {
+      await page.mouse.wheel(0, 500)
+      await expect(status).toBeInViewport({ ratio: 1, timeout: 500 })
+    }).toPass()
+  })
+
   test(`long conversation keeps its header and composer visible at ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
     await sessionApi(page)
