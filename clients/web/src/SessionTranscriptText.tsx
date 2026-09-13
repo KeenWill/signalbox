@@ -656,13 +656,13 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
       {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
       {evidence?.result && <ToolText label="Output" excerpt={evidence.result} />}
       {evidence?.failure && <ToolText label="Failure" excerpt={evidence.failure} />}
-      {evidence &&
-        (evidence.state === 'known_failed' || evidence.failure_present) &&
-        !evidence.failure && (
-          <p className="session-turn-outcome">
-            Failure · {enumLabel(evidence.cause ?? evidence.state)}
-          </p>
-        )}
+      {evidence && !evidence.result && !evidence.failure && (
+        <p className="session-turn-outcome">
+          {evidence.state === 'known_failed' || evidence.failure_present
+            ? `Failure · ${enumLabel(evidence.cause ?? evidence.state)}`
+            : enumLabel(evidence.state)}
+        </p>
+      )}
       {[tool.arguments, evidence?.result, evidence?.failure].some(
         (excerpt) => excerpt && (excerpt.offset_bytes !== '0' || excerpt.continuation != null),
       ) && <small>Excerpt · more text available</small>}

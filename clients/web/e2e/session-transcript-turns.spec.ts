@@ -850,7 +850,7 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   expect(problems).toEqual([])
 })
 
-test('identifies a failed physical attempt without detail text after a successful retry', async ({
+test('identifies payload-free physical attempt states after a successful retry', async ({
   page,
 }, testInfo) => {
   const problems: string[] = []
@@ -861,8 +861,20 @@ test('identifies a failed physical attempt without detail text after a successfu
   const items = retriedToolItems().map((item) => {
     if (item.body.type !== 'tool_batch') return item
     const tool = item.body.tools[0]
-    if (tool?.evidence.type !== 'physical_attempt' || tool.evidence.state !== 'known_failed')
-      return item
+    if (tool?.evidence.type !== 'physical_attempt') return item
+    const evidence =
+      tool.evidence.state === 'known_failed'
+        ? {
+            ...tool.evidence,
+            cause: 'crash_lost' as const,
+            failure_present: false,
+            failure: null,
+          }
+        : {
+            ...tool.evidence,
+            result_present: false,
+            result: null,
+          }
     return {
       ...item,
       projected_body_bytes: 128 + Number(tool.arguments?.total_bytes ?? '0'),
@@ -871,12 +883,7 @@ test('identifies a failed physical attempt without detail text after a successfu
         tools: [
           {
             ...tool,
-            evidence: {
-              ...tool.evidence,
-              cause: 'crash_lost' as const,
-              failure_present: false,
-              failure: null,
-            },
+            evidence,
           },
         ],
       },
@@ -932,11 +939,8 @@ test('identifies a failed physical attempt without detail text after a successfu
     'Failure · Attempt lost on restart',
   )
   await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
-  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
-  await expect(slots.last().getByRole('region', { name: 'Output', exact: true })).toContainText(
-    'passed',
-  )
-  await expect(slots.last().locator('.session-turn-outcome')).toHaveCount(0)
+  await expect(slots.last().locator('.session-turn-outcome')).toHaveText('Completed')
+  await expect(slots.last().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
   await slots.first().locator('.session-turn-outcome').scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
   expect(problems).toEqual([])
