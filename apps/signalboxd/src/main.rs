@@ -661,6 +661,9 @@ enum RuntimeDrainOutcome {
     GuardLost,
 }
 
+// Title work shares a small fixed ceiling across credential profiles.
+const MAX_CONCURRENT_TITLE_TASKS: usize = 4;
+
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     FencedPoolFloor,
@@ -674,7 +677,7 @@ enum RuntimeTaskExit {
     LifecycleDeadline,
     LifecycleMetrics,
     SessionSupervision,
-    SessionTitle,
+    SessionTitle(tokio::sync::OwnedSemaphorePermit),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1161,6 +1164,17 @@ fn joined_task_defect(error: &JoinError) -> RuntimeTaskDefect {
     }
 }
 
+async fn next_title_task(
+    pending: &mut tokio::sync::mpsc::Receiver<signalboxd::web_http::SessionTitleTask>,
+    slots: &Arc<tokio::sync::Semaphore>,
+) -> Option<(
+    signalboxd::web_http::SessionTitleTask,
+    tokio::sync::OwnedSemaphorePermit,
+)> {
+    let permit = slots.clone().acquire_owned().await.ok()?;
+    Some((pending.recv().await?, permit))
+}
+
 fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> RuntimeTaskCompletion {
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
@@ -1174,7 +1188,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
         | Ok(RuntimeTaskExit::LifecycleMetrics)
-        | Ok(RuntimeTaskExit::SessionTitle)
+        | Ok(RuntimeTaskExit::SessionTitle(_))
         | Ok(RuntimeTaskExit::SessionSupervision) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
@@ -2931,6 +2945,8 @@ async fn run_hub_incarnation(
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let web_http_runtime = web_http_runtime.with_session_title_tasks(title_tasks);
+    // Bound title work even when its credential profile has no invocation limit.
+    let title_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TITLE_TASKS));
     let mut runtime_tasks = JoinSet::new();
     let supervision_pool = pool.clone();
     let supervision_nudge = eligibility_nudge.clone();
@@ -3038,8 +3054,8 @@ async fn run_hub_incarnation(
 
                 loop {
                     break select! {
-                        Some(task) = pending_titles.recv() => {
-                            runtime_tasks.spawn(async move { task.await; RuntimeTaskExit::SessionTitle });
+                        Some((task, permit)) = next_title_task(&mut pending_titles, &title_slots) => {
+                            runtime_tasks.spawn(async move { task.await; RuntimeTaskExit::SessionTitle(permit) });
                             continue;
                         }
                         listener_failed = shutdown_requested(&mut termination_signals) => {
@@ -3052,7 +3068,10 @@ async fn run_hub_incarnation(
                         () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
                         completed = runtime_tasks.join_next() => {
                             match completed {
-                                Some(Ok(RuntimeTaskExit::SessionTitle)) => continue,
+                                Some(Ok(RuntimeTaskExit::SessionTitle(permit))) => {
+                                    drop(permit);
+                                    continue;
+                                }
                                 Some(Ok(RuntimeTaskExit::Workflows(result))) => {
                                     match result {
                                         Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
@@ -3589,6 +3608,66 @@ mod tests {
         validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
+
+    #[tokio::test]
+    async fn title_admission_waits_until_the_runtime_collects_a_completion() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let (tasks, mut pending_titles) = tokio::sync::mpsc::channel(1);
+        let (completed, finished) = oneshot::channel();
+        tasks
+            .send(Box::pin(async move {
+                completed.send(()).expect("fixture observes completion");
+            }) as signalboxd::web_http::SessionTitleTask)
+            .await
+            .expect("first task queued");
+        let (task, permit) = super::next_title_task(&mut pending_titles, &slots)
+            .await
+            .expect("first task admitted");
+        let mut running = JoinSet::new();
+        running.spawn(async move {
+            task.await;
+            RuntimeTaskExit::SessionTitle(permit)
+        });
+        finished.await.expect("first task finished");
+        tasks
+            .send(Box::pin(async {}))
+            .await
+            .expect("second task queued");
+        let mut admission = std::pin::pin!(super::next_title_task(&mut pending_titles, &slots));
+        assert!(
+            admission
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending(),
+            "a completed but uncollected task retains its slot"
+        );
+        let completion = running
+            .join_next()
+            .await
+            .expect("runtime collects completion");
+        assert!(
+            admission
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(
+            super::runtime_task_completion(completion),
+            RuntimeTaskCompletion::Clean
+        );
+        let (task, permit) = admission
+            .await
+            .expect("collecting the completion frees the slot");
+        running.spawn(async move {
+            task.await;
+            RuntimeTaskExit::SessionTitle(permit)
+        });
+        assert_eq!(
+            super::runtime_task_completion(running.join_next().await.expect("second completion")),
+            RuntimeTaskCompletion::Clean
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
 
     #[test]
     fn database_environment_is_scrubbed_before_the_runtime_starts() {

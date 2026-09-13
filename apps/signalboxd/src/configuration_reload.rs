@@ -309,6 +309,19 @@ impl ConfigurationReload {
         self
     }
 
+    pub(crate) async fn start_initial_title(
+        &self,
+        pool: sqlx::PgPool,
+        session: signalbox_domain::SessionId,
+        turn: signalbox_domain::TurnId,
+    ) {
+        if let Some(titles) = self.session_titles(pool) {
+            titles.start_initial(session, turn).await;
+        } else if let Some(processes) = &self.title_invocation_processes {
+            processes.retain_initial_title(session, turn);
+        }
+    }
+
     pub(crate) fn session_titles(
         &self,
         pool: sqlx::PgPool,
