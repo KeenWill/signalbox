@@ -323,8 +323,8 @@ impl RunnerStateRoot {
         if !path.is_absolute() || path.file_name().is_none() {
             return Err(RunnerStateError::InvalidRootPath);
         }
-        match fs::symlink_metadata(path) {
-            Ok(_) => {}
+        let created_root = match fs::symlink_metadata(path) {
+            Ok(_) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut builder = fs::DirBuilder::new();
                 builder.mode(ROOT_MODE);
@@ -360,6 +360,7 @@ impl RunnerStateRoot {
                     resource: StateResource::RootParent,
                     source,
                 })?;
+                true
             }
             Err(source) => {
                 return Err(RunnerStateError::Io {
@@ -418,6 +419,11 @@ impl RunnerStateRoot {
             }
         })?;
 
+        let journal = if created_root {
+            Journal::initialize(&directory)?
+        } else {
+            Journal::open(&directory)?
+        };
         let state = match openat(
             &directory,
             STATE_FILE,
@@ -440,7 +446,6 @@ impl RunnerStateRoot {
                 });
             }
         };
-        let journal = Journal::open(&directory)?;
         Ok(Self {
             directory,
             state,
