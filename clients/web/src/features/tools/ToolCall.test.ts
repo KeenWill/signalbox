@@ -11,6 +11,31 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([
+    ['spawn_failed', 'not_found', 'Not found'],
+    ['spawn_failed', 'permission_denied', 'Permission denied'],
+    ['supervision_failed', 'stdout', 'Stdout'],
+    ['supervision_failed', 'cleanup', 'Cleanup'],
+  ])('shows the %s reason %s', (kind, reason, label) => {
+    const markup = render(
+      toolExample('sandboxed_exec', { program: 'tool' }, { outcome: { kind, reason } }),
+    )
+    expect(markup).toContain(`<span>${label}</span>`)
+  })
+
+  it('preserves the executable as one quoted argv element', () => {
+    const [tool] = toolExample(
+      'unsandboxed_exec',
+      { program: 'tools/my "command"', arguments: ['a b'] },
+      {},
+    )
+    const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+    const expected = renderToStaticMarkup(
+      createElement('code', null, '"tools/my \\"command\\"" "a b"'),
+    )
+    expect(markup).toContain(expected)
+  })
+
   it.each([true, false, undefined])(
     'identifies replace-all edits when replace_all is %s',
     (replaceAll) => {

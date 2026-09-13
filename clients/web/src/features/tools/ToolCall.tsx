@@ -105,7 +105,10 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
     ? args.arguments.map((arg) => JSON.stringify(arg)).join(' ')
     : ''
   const command =
-    textField(args.command ?? args.cmd) || [textField(args.program), argv].filter(Boolean).join(' ')
+    textField(args.command ?? args.cmd) ||
+    [typeof args.program === 'string' ? JSON.stringify(args.program) : '', argv]
+      .filter(Boolean)
+      .join(' ')
   const outcome = fields(result.outcome)
   const code = result.exit_code ?? outcome.code
   const stdout = fields(result.stdout)
@@ -118,6 +121,7 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
       )}
       {typeof code === 'number' && <strong>Exit {code}</strong>}
       {typeof outcome.kind === 'string' && <span>{fieldLabel(textField(outcome.kind))}</span>}
+      {typeof outcome.reason === 'string' && <span>{fieldLabel(outcome.reason)}</span>}
       <TextPreview text={textField(stdout.text ?? result.stdout ?? result.output)} label="Output" />
       <TextPreview text={textField(stderr.text ?? result.stderr)} label="Error output" />
       {(stdout.completeness === 'truncated' || stderr.completeness === 'truncated') && (
