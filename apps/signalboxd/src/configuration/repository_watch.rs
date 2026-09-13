@@ -131,7 +131,8 @@ impl WatchedRepositoryConfiguration {
                 Some(path)
             }
             crate::credential_pools::GithubCredentialDelivery::GithubApp { .. }
-            | crate::credential_pools::GithubCredentialDelivery::Environment(_) => None,
+            | crate::credential_pools::GithubCredentialDelivery::Environment(_)
+            | crate::credential_pools::GithubCredentialDelivery::Onepassword { .. } => None,
         }
     }
 
@@ -424,6 +425,7 @@ pub(super) fn parse_repository_watch_configuration(
     let mut repositories = Vec::with_capacity(repository_tables.len());
     let mut repository_set = HashSet::with_capacity(repository_tables.len());
     let mut credential_file_references: Vec<PathBuf> = Vec::with_capacity(repository_tables.len());
+    let mut credential_items = HashSet::with_capacity(repository_tables.len());
     let mut credential_variables = HashSet::with_capacity(repository_tables.len());
     let mut webhook_hook_ids = HashSet::with_capacity(repository_tables.len());
     let mut webhook_repository_count = 0_usize;
@@ -512,6 +514,12 @@ pub(super) fn parse_repository_watch_configuration(
                     .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
             })
             .transpose()?;
+        if let crate::credential_pools::GithubCredentialDelivery::Onepassword { item, .. } =
+            credential.delivery()
+            && !credential_items.insert(crate::credential_pools::onepassword_item_identity(item))
+        {
+            return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialItem);
+        }
         if let crate::credential_pools::GithubCredentialDelivery::Environment(variable) =
             credential.delivery()
             && !credential_variables.insert(variable.clone())
