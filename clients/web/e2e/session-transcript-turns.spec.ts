@@ -281,6 +281,187 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   await page.screenshot({ path: testInfo.outputPath('retried-tool.png') })
 })
 
+test('keeps an open request disclosure and its continued text when physical attempts arrive', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  const attempts = retriedToolItems()
+  const pending = attempts[1]
+  const first = attempts[2]
+  const retry = attempts[4]
+  if (pending?.body.type !== 'tool_batch' || !first || !retry)
+    throw new Error('Attempt fixture missing')
+  const text = '{"cmd":"release status --json --verbose"}'
+  const split = 16
+  const cursor = {
+    type: 'more_body' as const,
+    body: {
+      address: pending.address,
+      field: 'tool_arguments' as const,
+      member_index: 0,
+      offset_bytes: String(split),
+    },
+  }
+  const proposal = {
+    ...pending,
+    projected_body_bytes: 128 + split,
+    body: {
+      ...pending.body,
+      tools: pending.body.tools.map((tool) => ({
+        ...tool,
+        arguments: {
+          text: text.slice(0, split),
+          offset_bytes: '0',
+          total_bytes: String(text.length),
+          continuation: cursor.body,
+        },
+      })),
+    },
+  }
+  const entries = [attempts[0], proposal].filter((item) => item !== undefined)
+  await turnApi(page, undefined, entries)
+  let release = () => {}
+  const growth = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${detailSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            { kind: 'snapshot', snapshot: { ...detailLive, observed_through: '2' } },
+            {
+              kind: 'durable',
+              cursor: '4',
+              address: { event_sequence: '4' },
+              event_kind: 'tool_batch_transition',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/timeline')) {
+      const window = transcriptFixture(url, entries.length) as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind =
+          entries.find((entry) => entry.address.event_sequence === item.address.event_sequence)
+            ?.kind ?? item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      (url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) === '2'
+    ) {
+      const continued = url.searchParams.get('cursor_field') === 'tool_arguments'
+      return route.fulfill({
+        json: detailPage(
+          [
+            continued
+              ? {
+                  ...proposal,
+                  projected_body_bytes: 128 + text.length - split,
+                  body: {
+                    ...proposal.body,
+                    tools: proposal.body.tools.map((tool) => ({
+                      ...tool,
+                      arguments: {
+                        text: text.slice(split),
+                        offset_bytes: String(split),
+                        total_bytes: String(text.length),
+                        continuation: null,
+                      },
+                    })),
+                  },
+                }
+              : proposal,
+          ],
+          continued ? null : cursor,
+        ),
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      ['3', '4'].includes(url.searchParams.get('first') ?? '')
+    ) {
+      const items = entries.filter(
+        (item) => item.address.event_sequence === url.searchParams.get('first'),
+      )
+      const item = items[0]
+      return route.fulfill({
+        json: detailPage(items, {
+          ...resultCursor,
+          body: {
+            ...resultCursor.body,
+            address: item?.address ?? { event_sequence: '3' },
+            field: url.searchParams.get('first') === '3' ? 'tool_failure' : 'tool_result',
+          },
+        }),
+      })
+    }
+    if (url.pathname === `/api/sessions/${detailSessionId}` || url.pathname.endsWith('/live'))
+      return route.fulfill({ json: transcriptFixture(url, entries.length) })
+    return route.fallback()
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  await chips.click()
+  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await expect(continued).toContainText(text.slice(split))
+  const retained = await continued.elementHandle()
+  if (!retained) throw new Error('Continued text missing')
+  for (const [index, item] of [first, retry].entries()) {
+    if (item.body.type !== 'tool_batch') throw new Error('Physical attempt missing')
+    entries.push({
+      ...item,
+      projected_body_bytes: 128 + text.length,
+      address: { event_sequence: String(index + 3) },
+      body: {
+        ...item.body,
+        tools: item.body.tools.map((tool) => ({
+          ...tool,
+          arguments: detailExcerpt(text),
+          evidence:
+            tool.evidence.type === 'physical_attempt'
+              ? { ...tool.evidence, result: null, failure: null }
+              : tool.evidence,
+        })),
+      },
+    })
+  }
+  release()
+  await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveAttribute('aria-expanded', 'true')
+  await expect(chips.last()).toHaveAttribute('aria-expanded', 'false')
+  await expect(continued).toContainText(text.slice(split))
+  expect(await retained.evaluate((element) => element.isConnected)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('request-physical-disclosure.png') })
+  await chips.last().click()
+  await expect(chips.first()).toHaveAttribute('aria-expanded', 'false')
+  await expect(chips.last()).toHaveAttribute('aria-expanded', 'true')
+  expect(problems).toEqual([])
+})
+
 test('keeps the retained tool in its original row when its earlier proposal is prepended', async ({
   page,
 }, testInfo) => {

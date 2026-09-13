@@ -571,18 +571,20 @@ unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. Turn segments retain window boundaries so prepending
 history preserves existing rows and their disclosures. Retained tool chips stay
 in their assigned window segment when earlier proposal evidence is loaded;
-evicted assignments are discarded. Turn-wide classification uses all loaded
-events. The conversation shows user and assistant text and attachment
-references, tool arguments and output, and unsuccessful turn outcomes in event
-order. A completed response remains visible as a non-final message when its
-completed-turn closure is not loaded. Distinct physical tool attempts remain
-independently inspectable in event order even when they share one request. Later
-batch members load on demand at the batch position as separate tool chips. A
-cursor advancing to another member is exposed outside the preceding tool
-disclosure; same-member fields remain inside that disclosure. Repeated terminal
-outcomes for the same turn and cause appear once. Bookkeeping is hidden until
-Events is selected. Raw detail pages remain available to validate body
-continuations.
+evicted assignments are discarded. An open request-only tool keeps its
+disclosure and continued text when its first physical attempt arrives. Later
+physical attempts retain separate disclosure identities. Turn-wide
+classification uses all loaded events. The conversation shows user and assistant
+text and attachment references, tool arguments and output, and unsuccessful turn
+outcomes in event order. A completed response remains visible as a non-final
+message when its completed-turn closure is not loaded. Distinct physical tool
+attempts remain independently inspectable in event order even when they share
+one request. Later batch members load on demand at the batch position as
+separate tool chips. A cursor advancing to another member is exposed outside the
+preceding tool disclosure; same-member fields remain inside that disclosure.
+Repeated terminal outcomes for the same turn and cause appear once. Bookkeeping
+is hidden until Events is selected. Raw detail pages remain available to
+validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
