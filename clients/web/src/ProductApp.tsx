@@ -775,7 +775,11 @@ export function ProductApp({
       sidebarAvailable: !narrowNavigation && app.layout === 'workbench',
       navigationLocked: navigationDisabled,
       navigate: (path) => {
-        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+        if (path === '/attention') setCatalogNeedsAttention(true)
+        void navigate({
+          to: '/$surface',
+          params: { surface: path === '/attention' ? 'sessions' : path.slice(1) },
+        }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
       },

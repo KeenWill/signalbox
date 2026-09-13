@@ -184,3 +184,16 @@ for (const laterPage of [false, true]) {
     })
   }
 }
+
+test('Go to Attention opens the Sessions filter', async ({ page }) => {
+  await installSessions(page)
+  await page.goto('/sessions')
+  const filter = page.getByRole('checkbox', { name: 'Needs attention', exact: true })
+  await expect(filter).not.toBeChecked()
+  await page.getByRole('main').focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('a')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(filter).toBeChecked()
+  await expect(page.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
+})

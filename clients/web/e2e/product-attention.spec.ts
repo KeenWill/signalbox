@@ -535,3 +535,55 @@ test('opens the session from its attention row', async ({ page }) => {
   await row.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${approvalSessionId}`))
 })
+
+for (const { empty, focusElsewhere } of [
+  { empty: false, focusElsewhere: false },
+  { empty: true, focusElsewhere: false },
+  { empty: false, focusElsewhere: true },
+]) {
+  test(`live attention removal ${focusElsewhere ? 'preserves focus outside the list' : empty ? 'focuses the heading' : 'focuses a surviving row'}`, async ({
+    page,
+  }) => {
+    await installAttentionScenario(page)
+    let release = () => {}
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route('**/api/attention/follow', async (route) => {
+      await released
+      const resolved = attentionFixture.summaries.slice(0, empty ? 2 : 1).map((summary) => ({
+        ...summary,
+        action: null,
+        state: 'idle',
+        lifecycle_state: 'created',
+        current_turn_id: null,
+        goal_block: null,
+      }))
+      await route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n${JSON.stringify({ kind: 'update', cursor: '43', summaries: resolved })}\n`,
+      })
+    })
+    await page.goto('/sessions')
+    await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
+    const row = page.getByRole('button').filter({ hasText: approvalSessionId })
+    await row.focus()
+    await expect(row).toBeFocused()
+    const filter = page.getByRole('checkbox', { name: 'Needs attention', exact: true })
+    if (focusElsewhere) await filter.focus()
+    release()
+    await expect(row).toHaveCount(0)
+    if (focusElsewhere) {
+      await expect(filter).toBeFocused()
+    } else if (empty) {
+      await expect(
+        page.getByRole('heading', { name: '0 sessions need attention on this page' }),
+      ).toBeFocused()
+    } else {
+      const remaining = page.getByRole('button').filter({ hasText: blockedSessionId })
+      await expect(remaining).toBeFocused()
+      await page.keyboard.press('Enter')
+      await expect(page).toHaveURL(new RegExp(`session=${blockedSessionId}`))
+    }
+  })
+}

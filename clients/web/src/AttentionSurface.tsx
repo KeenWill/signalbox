@@ -97,6 +97,24 @@ export function AttentionSessions({
     () => attention.data?.summaries.filter((summary) => summary.action !== null) ?? [],
     [attention.data],
   )
+  const previousRows = useRef(needingAttention)
+  useEffect(() => {
+    const previous = previousRows.current
+    previousRows.current = needingAttention
+    if (
+      !selectedTimeline ||
+      !previous.some((summary) => summary.session_id === selectedTimeline) ||
+      needingAttention.some((summary) => summary.session_id === selectedTimeline)
+    )
+      return
+    const restoreFocus = overlay === null && document.activeElement === document.body
+    const replacement = restoreFocus ? (needingAttention[0]?.session_id ?? null) : null
+    dispatch(actions.timelineSelected(replacement))
+    if (restoreFocus) {
+      const target = replacement ? sessionLinks.current.get(replacement) : pageHeading.current
+      target?.focus()
+    }
+  }, [dispatch, needingAttention, overlay, selectedTimeline])
   useEffect(() => {
     onTimelineIds(needingAttention.map((summary) => summary.session_id))
     return () => onTimelineIds([])
