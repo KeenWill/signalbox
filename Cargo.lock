@@ -5407,6 +5407,7 @@ dependencies = [
  "signalbox-module-repo-watch-v2",
  "signalbox-persistence",
  "signalbox-process-protocol",
+ "signalbox-runner",
  "signalbox-runner-wire",
  "signalbox-session-ownership",
  "signalbox-test-bin",

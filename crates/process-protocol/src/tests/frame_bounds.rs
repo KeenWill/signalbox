@@ -152,6 +152,7 @@ fn all_client_request_variants_encode_with_current_version()
     assert_client_request_current_version(
         request(1)?,
         ClientRequest::CreateSession {
+            runner_placement: None,
             command_id: command(4)?,
             initial_model_selection: model,
             model_settings: ModelSettingsOverlay::inherit_all(),

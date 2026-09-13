@@ -37,6 +37,7 @@ pub(crate) async fn create(
     command_id: Option<CommandId>,
     system_prompt: Option<SystemPromptText>,
     placement: SessionPlacement,
+    runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -47,6 +48,7 @@ pub(crate) async fn create(
     }
     let mut connection = client
         .mutation_request(ClientRequest::CreateSession {
+            runner_placement,
             command_id,
             initial_model_selection: selection,
             model_settings: ModelSettingsOverlay::inherit_all(),
@@ -78,6 +80,7 @@ pub(crate) async fn create_from_template(
     template_name: String,
     command_id: Option<CommandId>,
     placement: SessionPlacement,
+    runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -88,6 +91,7 @@ pub(crate) async fn create_from_template(
     }
     let mut connection = client
         .mutation_request(ClientRequest::CreateSessionFromTemplate {
+            runner_placement,
             command_id,
             template_name,
             placement,
