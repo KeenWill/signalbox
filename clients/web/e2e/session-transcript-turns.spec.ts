@@ -160,3 +160,32 @@ test('preserves assistant text before its tool without treating it as the final 
     'The release checks passed. Publishing remains unapproved.',
   ])
 })
+
+for (const recovered of [false, true]) {
+  test(`retains a provider failure ${recovered ? 'before its successful retry' : 'without a lifecycle event'}`, async ({
+    page,
+  }) => {
+    const model = detailItems[3]
+    const completion = detailItems[4]
+    if (model?.body.type !== 'model_call' || !completion) throw new Error('Model fixture missing')
+    const failure = {
+      ...model,
+      address: { event_sequence: '1' },
+      projected_body_bytes: 128,
+      body: {
+        ...model.body,
+        response: null,
+        provider_failure_cause: 'quota_exhausted' as const,
+        state: { type: 'terminal' as const, disposition: 'known_failed' as const },
+      },
+    }
+    await turnApi(page, undefined, [failure, ...(recovered ? [model, completion] : [])])
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await expect(transcript.getByText('Provider error: Quota reached')).toBeVisible()
+    await expect(transcript.locator('.session-turn-outcome, .session-message-text')).toHaveText([
+      'Provider error: Quota reached',
+      ...(recovered ? ['The release checks passed. Publishing remains unapproved.'] : []),
+    ])
+  })
+}
