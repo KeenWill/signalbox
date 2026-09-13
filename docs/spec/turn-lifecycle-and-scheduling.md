@@ -92,6 +92,10 @@ watchdog together.
 
 ## Design decisions
 
+The daemon uses mimalloc for Rust allocations. Why: mixed-lifetime buffers on
+concurrent workers must not accumulate as free memory in glibc's per-thread
+arenas.
+
 Eligibility is a derived predicate, never a durable state, because acceptance
 positions, priority relations, and the active-slot owner are already durable and
 a second eligibility state could only diverge from them.
@@ -514,16 +518,11 @@ cancellation.
 
 ## Planned
 
-- Daemon allocation reclamation; design in
-  [daemon memory allocation](../design/daemon-memory-allocation.md).
-
 - Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
