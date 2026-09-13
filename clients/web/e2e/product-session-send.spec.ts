@@ -1,4 +1,3 @@
-import type { WebSessionTimelineDetail } from '../src/generated/web-contract.mjs'
 import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src/preferences'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, test } from './fontTest'

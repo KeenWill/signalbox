@@ -541,7 +541,9 @@ test('follows workspace navigation and restores its saved transcript anchor', as
   await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: /^First/ }).click()
   await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+  await page.getByText('Session details', { exact: true }).click()
   await page.getByRole('button', { name: 'Next', exact: true }).click()
+  await page.keyboard.press('Escape')
   await expect(transcript.getByText('Message 81', { exact: true })).toBeVisible()
   await page.evaluate((sessionId) => {
     const preferences = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
