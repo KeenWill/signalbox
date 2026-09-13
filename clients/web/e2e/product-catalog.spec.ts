@@ -848,7 +848,12 @@ test('keeps untitled session fallbacks without the detail capability', async ({ 
   expect(timelineReads).toBe(0)
 })
 
-test('renames a session and reads back the saved catalog title', async ({ page }) => {
+test('renames a session without randomUUID and reads back the saved catalog title', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined })
+  })
   await useCatalogFixture(page)
   let title = firstPage.summaries[0].title_summary as string
   const requests: Array<{ command_id: string; title: string }> = []
@@ -878,12 +883,17 @@ test('renames a session and reads back the saved catalog title', async ({ page }
   await expect(page.getByRole('button', { name: /Ship the release/ })).toBeVisible()
   await expect(rename).toBeFocused()
   expect(requests).toHaveLength(1)
-  expect(requests[0]?.command_id).toMatch(/^[0-9a-f-]{36}$/)
+  expect(requests[0]?.command_id).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  )
   await page.reload()
   await expect(page.getByRole('button', { name: /Ship the release/ })).toBeVisible()
 })
 
 test('retries a failed rename with the same intent and can cancel editing', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined })
+  })
   await useCatalogFixture(page)
   const requests: unknown[] = []
   await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {

@@ -13,7 +13,7 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
-import { renameSession } from './session-metadata'
+import { createRenameCommandId, renameSession } from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
@@ -128,10 +128,12 @@ const SessionMetadata = ({
   const save = async (event: FormEvent) => {
     event.preventDefault()
     if (saving || title.length === 0) return
-    if (intent.current?.title !== title) intent.current = { command_id: crypto.randomUUID(), title }
     setSaving(true)
     setError(null)
     try {
+      if (intent.current?.title !== title) {
+        intent.current = { command_id: createRenameCommandId(), title }
+      }
       await renameSession(summary.session_id, intent.current)
       await queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
       close()
