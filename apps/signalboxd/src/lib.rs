@@ -6241,5 +6241,6 @@ mod tests {
 /// Durable configuration reload composition.
 pub mod configuration_reload;
 pub mod model_catalog_runtime;
+mod session_titles;
 
 mod media_preparation;

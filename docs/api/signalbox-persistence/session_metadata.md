@@ -73,6 +73,12 @@ impl convert::From<session_metadata::SessionMetadataCorruption>
 pub struct SessionMetadataRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl session_metadata::SessionMetadataRepository {
+    pub async fn install_generated_title(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        session: signalbox_domain::SessionId,
+        title: string::String,
+    ) -> result::Result<bool, session_metadata::SessionMetadataRepositoryError>;
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub const fn for_title_update(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(

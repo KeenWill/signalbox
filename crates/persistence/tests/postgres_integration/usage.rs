@@ -15,6 +15,195 @@ const SECOND_INPUT_TOKENS: u64 = 17;
 const THIRD_INPUT_TOKENS: u64 = 23;
 const SELECTED_OUTPUT_TOKENS: u64 = 29;
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn initial_session_title_is_claimed_once_preserves_manual_names_and_records_usage()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{UsageCallKind, UsageCallScope, UsageTokenAxes};
+    use signalbox_domain::{Actor, ReplaceSessionMetadata, SessionMetadataContent};
+    use signalbox_persistence::{
+        session_metadata::SessionMetadataRepository,
+        session_titles::{SessionTitleCall, SessionTitleRepository},
+    };
+    let (container, pool, _) = migrated_postgres().await?;
+    let seed = 0x98_000;
+    let (fixture, mut model_repository, authorized) =
+        authorize_checkpointed_model_call(&pool, seed).await?;
+    let titles = SessionTitleRepository::new(pool.clone());
+    let call = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        session: fixture.session,
+        selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            seed + 6,
+        ))),
+        credential_reference: "codex-title-fixture".to_owned(),
+        input_includes_cache_tokens: false,
+        initial_for_turn: Some(fixture.turn),
+    };
+    assert!(
+        !titles.prepare(&call).await?,
+        "an active turn must not trigger a title call"
+    );
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new("Database indexing is complete".to_owned())
+                    .expect("assistant text"),
+            ],
+        });
+    model_repository
+        .commit_observation(
+            fixture.session,
+            observation,
+            signalbox_application::ModelCallTerminalIdentityCandidates::Exact(
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                )),
+            ),
+            |_| TurnId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    assert!(titles.prepare(&call).await?);
+    assert!(
+        !titles
+            .prepare(&SessionTitleCall {
+                call: ModelCallId::from_uuid(Uuid::now_v7()),
+                ..call.clone()
+            })
+            .await?,
+        "duplicate completion delivery must not call the model again"
+    );
+    assert!(
+        titles
+            .conversation(fixture.session, 4096)
+            .await?
+            .contains("Database indexing is complete")
+    );
+    let metadata = SessionMetadataRepository::new(pool.clone());
+    let content = SessionMetadataContent::try_new(
+        None,
+        vec!["work".to_owned()],
+        vec![("source".to_owned(), "fixture".to_owned())],
+        true,
+    )
+    .expect("metadata");
+    metadata
+        .handle(ReplaceSessionMetadata::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            fixture.session,
+            content,
+        ))
+        .await?;
+    titles.authorize(call.call).await?;
+    let usage = UsageTokenAxes {
+        input: Some(17),
+        output: Some(5),
+        cache_creation_input: None,
+        cache_read_input: None,
+    };
+    titles
+        .finish(call.call, Some("Database indexing work"), usage)
+        .await?;
+    let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    assert!(
+        metadata
+            .install_generated_title(
+                command,
+                fixture.session,
+                "Database indexing work".to_owned()
+            )
+            .await?
+    );
+    let snapshot = metadata
+        .load_session_metadata(fixture.session)
+        .await?
+        .expect("session");
+    assert_eq!(snapshot.content().title(), Some("Database indexing work"));
+    assert_eq!(snapshot.content().tags().collect::<Vec<_>>(), vec!["work"]);
+    assert_eq!(
+        snapshot.content().attributes().collect::<Vec<_>>(),
+        vec![("source", "fixture")]
+    );
+    assert!(snapshot.content().archived());
+    assert_eq!(
+        SessionMetadataRepository::for_title_update(pool.clone())
+            .load_command(command)
+            .await?
+            .expect("generated receipt")
+            .command()
+            .actor(),
+        Actor::Core
+    );
+    let manual = SessionMetadataContent::try_new(
+        Some("My chosen name".to_owned()),
+        Vec::new(),
+        Vec::new(),
+        false,
+    )
+    .expect("manual name");
+    metadata
+        .handle(ReplaceSessionMetadata::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            fixture.session,
+            manual,
+        ))
+        .await?;
+    assert!(
+        !metadata
+            .install_generated_title(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                fixture.session,
+                "Late generated name".to_owned()
+            )
+            .await?
+    );
+    let suggestion = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        initial_for_turn: None,
+        ..call
+    };
+    assert!(titles.prepare(&suggestion).await?);
+    titles.authorize(suggestion.call).await?;
+    titles
+        .finish(suggestion.call, Some("Suggested new name"), usage)
+        .await?;
+    assert_eq!(
+        metadata
+            .load_session_metadata(fixture.session)
+            .await?
+            .expect("session")
+            .content()
+            .title(),
+        Some("My chosen name")
+    );
+    let page = UsageRepository::new(pool.clone())
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(fixture.session),
+                    call_kind: Some(UsageCallKind::SessionTitle),
+                    ..UsageSelection::all()
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(2).expect("page limit"),
+            after: None,
+        })
+        .await?;
+    assert_eq!(page.calls().len(), 2);
+    assert_eq!(page.calls()[0].scope, UsageCallScope::SessionTitle);
+    assert_eq!(page.calls()[0].tokens.input, Some(17));
+    assert_eq!(page.calls()[0].tokens.output, Some(5));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn terminal_reported_usage_call(
     pool: &PgPool,
     seed: u128,

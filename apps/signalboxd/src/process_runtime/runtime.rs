@@ -233,6 +233,7 @@ impl ProcessRuntime {
             self.eligibility_nudge.clone(),
             shutdown.clone(),
         );
+        let title_configuration = self.configuration_reload.clone();
         let connection_dependencies = ConnectionDependencies {
             workflows: self.workflows,
             metrics: self.metrics.clone(),
@@ -252,12 +253,13 @@ impl ProcessRuntime {
             unavailable_components: self.unavailable_components,
         };
         let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
-        let dispatcher = dispatch_updates(
+        let dispatcher = dispatch_updates_with_titles(
             self.pool,
             self.eligibility_nudge,
             fanouts,
             self.metrics,
             shutdown,
+            title_configuration,
         );
         let result = tokio::try_join!(server, dispatcher, recovery_notifications);
         let cleanup = self.listener.cleanup();
@@ -339,14 +341,26 @@ impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn dispatch_updates(
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
-    let dispatcher = OutboxDispatcher::new(pool);
+    dispatch_updates_with_titles(pool, eligibility_nudge, fanouts, metrics, shutdown, None).await
+}
+
+async fn dispatch_updates_with_titles(
+    pool: PgPool,
+    eligibility_nudge: InProcessEligibilityNudge,
+    fanouts: ProcessFanouts,
+    metrics: Option<TelemetryMetrics>,
+    mut shutdown: watch::Receiver<bool>,
+    title_configuration: Option<crate::configuration_reload::ConfigurationReload>,
+) -> Result<(), ProcessRuntimeError> {
+    let dispatcher = OutboxDispatcher::new(pool.clone());
     let mut last_metric_sequence = None;
     loop {
         if shutdown_requested(&shutdown) {
@@ -362,6 +376,18 @@ pub(super) async fn dispatch_updates(
                 );
                 // A sessionless receipt has no follower to reach.
                 if let Some(session) = event.session() {
+                    if let DispatchedOutboxEventKind::TurnTerminal {
+                        turn, disposition: DispatchedTurnTerminalDisposition::Completed { .. },
+                    } = event.kind()
+                        && let Some(titles) = title_configuration.as_ref().and_then(|configuration| configuration.session_titles(pool.clone()))
+                    {
+                        let turn = *turn;
+                        tokio::spawn(async move {
+                            if let Err(error) = titles.generate(session, Some(turn)).await {
+                                tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title generation failed");
+                            }
+                        });
+                    }
                     let outcome =
                         nudge_eligible_outbox_wake(&eligibility_nudge, session, event.kind());
                     if outcome

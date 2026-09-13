@@ -468,8 +468,9 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
         (UsageCallKind::ModelCall, Some(turn)) => UsageCallScope::ModelCall(turn),
         (UsageCallKind::ApprovalJudge, Some(turn)) => UsageCallScope::ApprovalJudge(turn),
         (UsageCallKind::ContextCompaction, None) => UsageCallScope::ContextCompaction,
+        (UsageCallKind::SessionTitle, None) => UsageCallScope::SessionTitle,
         (UsageCallKind::ModelCall | UsageCallKind::ApprovalJudge, None)
-        | (UsageCallKind::ContextCompaction, Some(_)) => {
+        | (UsageCallKind::ContextCompaction | UsageCallKind::SessionTitle, Some(_)) => {
             return Err(UsageProjectionCorruption::Invalid("turn correlation").into());
         }
     };

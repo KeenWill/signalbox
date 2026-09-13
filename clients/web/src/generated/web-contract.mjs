@@ -7648,6 +7648,23 @@ const schemas = {
     "title": "WebSessionTitleRequest",
     "type": "object"
   },
+  "WebSessionTitleSuggestion": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A generated session name awaiting user acceptance.",
+    "properties": {
+      "title": {
+        "description": "Generated title, saved only after acceptance through the metadata route.",
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "title"
+    ],
+    "title": "WebSessionTitleSuggestion",
+    "type": "object"
+  },
   "WebSubmitInputRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -8183,7 +8200,8 @@ const schemas = {
         "enum": [
           "model_call",
           "approval_judge",
-          "context_compaction"
+          "context_compaction",
+          "session_title"
         ],
         "type": "string"
       },
@@ -8464,7 +8482,8 @@ const schemas = {
         "enum": [
           "model_call",
           "approval_judge",
-          "context_compaction"
+          "context_compaction",
+          "session_title"
         ],
         "type": "string"
       },
@@ -10522,11 +10541,11 @@ export function decodeWebUsageCallPage(value, order) {
     if (profileBytes === 0 || profileBytes > 256) {
       fail(`usage_call_page.calls[${index}].profile_id`, "1 through 256 UTF-8 bytes");
     }
-    const isCompaction = call.call_kind === "context_compaction";
-    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
+    const isSessionLevel = call.call_kind === "context_compaction" || call.call_kind === "session_title";
+    if (!Object.hasOwn(call, "turn_id") || isSessionLevel !== (call.turn_id === null)) {
       fail(
         `usage_call_page.calls[${index}].turn_id`,
-        "null exactly for context compaction calls",
+        "null exactly for session-level calls",
       );
     }
     const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
@@ -10635,6 +10654,11 @@ export function decodeWebCreateSessionRequest(value) {
 
 export function decodeWebCreateSessionResponse(value) {
   assertSchema(schemas.WebCreateSessionResponse, schemas.WebCreateSessionResponse, value, "webcreatesessionresponse");
+  return value;
+}
+
+export function decodeWebSessionTitleSuggestion(value) {
+  assertSchema(schemas.WebSessionTitleSuggestion, schemas.WebSessionTitleSuggestion, value, "websessiontitlesuggestion");
   return value;
 }
 

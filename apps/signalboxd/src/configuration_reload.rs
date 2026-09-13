@@ -297,6 +297,19 @@ impl ConfigurationReload {
         self
     }
 
+    pub(crate) fn session_titles(
+        &self,
+        pool: sqlx::PgPool,
+    ) -> Option<crate::session_titles::SessionTitles> {
+        let models = self.catalogs().models;
+        models.session_title_selection()?;
+        Some(crate::session_titles::SessionTitles::new(
+            pool,
+            models,
+            self.runtime_factory.clone()?,
+        ))
+    }
+
     /// Rechecks the startup integration credential files on each reload.
     pub fn with_integration_credentials(
         mut self,

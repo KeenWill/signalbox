@@ -135,6 +135,72 @@ pub struct SessionMetadataRepository {
 }
 
 impl SessionMetadataRepository {
+    /// Installs a generated title only while the title remains unset.
+    /// Other metadata is preserved under the same lock as user replacements.
+    pub async fn install_generated_title(
+        &self,
+        command_id: DurableCommandId,
+        session: SessionId,
+        title: String,
+    ) -> Result<bool, SessionMetadataRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = sqlx::query_scalar::<_, Uuid>(lock_inventory::REPLACE_SESSION_METADATA)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+        let current = load_current_snapshot(&mut transaction, session)
+            .await?
+            .ok_or(SessionMetadataCorruption::Missing("locked session"))?;
+        if current.content().title().is_some() {
+            return Ok(false);
+        }
+        let replacement = SessionMetadataContent::try_new(
+            Some(title),
+            current.content().tags().map(str::to_owned).collect(),
+            current
+                .content()
+                .attributes()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+            current.content().archived(),
+        )
+        .map_err(SessionMetadataRepositoryError::InvalidTitleMerge)?;
+        let command =
+            ReplaceSessionMetadata::for_title_generation(command_id, session, replacement);
+        sqlx::query(
+            "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+            VALUES ($1, $2, $3, statement_timestamp(), 'core')",
+        )
+        .bind(command_id.into_uuid())
+        .bind(REPLACE_SESSION_METADATA_KIND)
+        .bind(STORAGE_VERSION)
+        .execute(&mut *transaction)
+        .await?;
+        let updated_at = replacement_statement_timestamp(&mut transaction).await?;
+        let prepared = command.prepare_applied(updated_at);
+        replace_current_snapshot(&mut transaction, prepared.command(), updated_at).await?;
+        insert_typed_record(
+            &mut transaction,
+            &prepared,
+            Some(updated_at),
+            MetadataRequestShape::TitleOnly,
+        )
+        .await?;
+        transaction.commit().await.map_err(|error| {
+            if commit_failure_is_ambiguous(&error) {
+                SessionMetadataRepositoryError::CommitAmbiguous(error)
+            } else {
+                error.into()
+            }
+        })?;
+        Ok(true)
+    }
+
     /// Uses the supplied pool for independent commands and snapshots.
     pub const fn new(pool: PgPool) -> Self {
         Self {
@@ -993,6 +1059,9 @@ fn decode_command(
         required(row, "replacement_archived")?,
     )?;
     let command = match (issuer_kind.as_str(), issuer_tool) {
+        ("core", None) => {
+            ReplaceSessionMetadata::for_title_generation(command_id, session, content)
+        }
         ("user", None) => ReplaceSessionMetadata::new(command_id, session, content),
         ("tool", Some(request)) => ReplaceSessionMetadata::new_for_tool(
             command_id,
@@ -1019,8 +1088,8 @@ fn decode_command(
         "command actor",
     )?;
     match command_actor {
-        Actor::User | Actor::Tool { .. } => {}
-        Actor::Core | Actor::Model { .. } | Actor::Recovery | Actor::Program { .. } => {
+        Actor::Core | Actor::User | Actor::Tool { .. } => {}
+        Actor::Model { .. } | Actor::Recovery | Actor::Program { .. } => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
                 value: actor_kind,

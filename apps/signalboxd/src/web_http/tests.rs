@@ -470,6 +470,33 @@ async fn session_title_rejects_cross_origin_before_command_handling() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+#[tokio::test]
+async fn session_title_suggestions_require_same_origin_json_and_configuration() {
+    let route = format!("/api/sessions/{}/title/suggest", Uuid::now_v7());
+    for (body, origin, expected) in [
+        ("{}", "http://other.example", StatusCode::FORBIDDEN),
+        (
+            "{\"title\":\"unadmitted\"}",
+            "http://localhost",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("{}", "http://localhost", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let response = production_router(None, None, None, None, None)
+            .oneshot(
+                Request::post(&route)
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, origin)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected, "body {body}, origin {origin}");
+    }
+}
+
 fn rated_example_target() -> ResolvedProviderTarget {
     ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid::uuid!(
         "20000000-0000-4000-8000-000000000001"

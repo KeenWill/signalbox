@@ -486,7 +486,19 @@ boundary's not-found response.
 `SubmitInput` and `ReplaceSessionMetadata` are the conversational command
 payloads that carry an actor. `SubmitInput` and the process-facing metadata
 request fix the user actor, and a separate constructor accepts only the tool
-actor for the exact executing tool request.
+actor for the exact executing tool request. Title generation fixes the core
+actor.
+
+When `session_titles.selection_id` names a configured model selection, the first
+completed assistant turn claims one title call if the title is unset. The
+configured model receives recent conversation text and a short plain-language
+title request; completion installs the title only if it is still unset,
+preserving other metadata under the session lock.
+`POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
+`{ "title": "..." }` without saving; accepting a suggestion uses the metadata
+PATCH route. Title calls record their target, credentials, send boundary,
+completion, and reported token axes as session-level `session_title` usage
+evidence.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

@@ -203,6 +203,15 @@ pub struct WebCreateSessionResponse {
     pub summary: WebSessionCatalogSummary,
 }
 
+/// A generated session name awaiting user acceptance.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTitleSuggestion {
+    /// Generated title, saved only after acceptance through the metadata route.
+    #[schemars(length(min = 1))]
+    pub title: String,
+}
+
 /// Human title replacement preserving the other loaded metadata fields.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2248,6 +2257,7 @@ pub enum WebUsageCallKind {
     ModelCall,
     ApprovalJudge,
     ContextCompaction,
+    SessionTitle,
 }
 
 /// Closed provenance of one token-evidence projection.
@@ -3088,6 +3098,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebCreateSessionResponse",
             decoder: "decodeWebCreateSessionResponse",
             schema: create_session_response_schema,
+        },
+        ContractSchema {
+            name: "WebSessionTitleSuggestion",
+            decoder: "decodeWebSessionTitleSuggestion",
+            schema: canonical_schema(schemars::schema_for!(WebSessionTitleSuggestion).to_value()),
         },
         ContractSchema {
             name: "WebSessionTitleRequest",
@@ -5226,11 +5241,11 @@ export function decodeWebUsageCallPage(value, order) {{
     if (profileBytes === 0 || profileBytes > 256) {{
       fail(`usage_call_page.calls[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
     }}
-    const isCompaction = call.call_kind === "context_compaction";
-    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {{
+    const isSessionLevel = call.call_kind === "context_compaction" || call.call_kind === "session_title";
+    if (!Object.hasOwn(call, "turn_id") || isSessionLevel !== (call.turn_id === null)) {{
       fail(
         `usage_call_page.calls[${{index}}].turn_id`,
-        "null exactly for context compaction calls",
+        "null exactly for session-level calls",
       );
     }}
     const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};

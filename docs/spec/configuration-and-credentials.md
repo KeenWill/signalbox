@@ -99,11 +99,13 @@ cannot declare this capability. `[model_settings]` is the deployment global
 default and each `[[model_settings_profiles]]` entry is a named profile a
 model's optional `settings_profile` selects; a selected profile outranks the
 global default, and both sit below the session and per-call layers of
-[model session settings](model-session-settings.md). An adapter mapping that
-names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
-`executable`, `mcp_bridge_executable`, and `working_directory`. The required
-`[numeric_bounds]` table holds the central numeric-bound inventory and the
-members are required except for the defaulted repository-watch poll request
+[model session settings](model-session-settings.md). The optional
+`[session_titles]` table names one configured model through `selection_id`,
+including that model's settings profile and credential routing. An adapter
+mapping that names `claude_cli` requires a `[claude_cli]` table carrying that
+adapter's `executable`, `mcp_bridge_executable`, and `working_directory`. The
+required `[numeric_bounds]` table holds the central numeric-bound inventory and
+the members are required except for the defaulted repository-watch poll request
 budget, while other tables carry their own configured limits. Numeric-bound
 duration policies use Jiff's friendly unsigned-duration syntax.
 `max_git_object_bytes` limits decoded Git object content, including packed delta
