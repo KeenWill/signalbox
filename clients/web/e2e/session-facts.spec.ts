@@ -135,3 +135,29 @@ test('leaving a session cancels its pending cost bootstrap', async ({ page }) =>
   await expect.poll(() => blocked?.failure()?.errorText).toBeTruthy()
   release()
 })
+
+test('wide costs keep the phone header and timeline controls in view', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await sessionApi(page)
+  await page.route('**/api/usage/summary?**', (route) =>
+    route.fulfill({
+      json: { groups: [group('12345678901234567890123456789')], truncated: false },
+    }),
+  )
+  await openSession(page)
+  const cost = page.getByTitle('Session cost', { exact: true })
+  await expect(cost).toHaveText('$12,345,678,901,234,567,890,123,456,789.00')
+  await expect(cost).toBeInViewport({ ratio: 1 })
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'First', exact: true })).toBeInViewport({
+    ratio: 1,
+  })
+  await expect(page.getByRole('button', { name: 'Latest', exact: true })).toBeInViewport({
+    ratio: 1,
+  })
+  const header = await page.locator('.session-compact-header').boundingBox()
+  expect(header!.x + header!.width).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: testInfo.outputPath('facts-wide-cost-phone.png'), fullPage: true })
+})
