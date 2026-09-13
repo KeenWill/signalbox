@@ -61,6 +61,48 @@ pub struct RuleEvent {
 }
 
 impl RepoWatchStore {
+    /// Evaluates retained work through the event tail captured before command submission.
+    pub async fn evaluate_pending<
+        Ids: DispatchReferenceGenerator,
+        Factory: CreateSessionCommandFactory,
+        Codec: SessionCommandCodec,
+    >(
+        &self,
+        repository: &RepositorySlug,
+        rule: &RepoWatchRule,
+        ids: &mut Ids,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        now: OffsetDateTime,
+    ) -> Result<(), EvaluationError<Factory::Error>> {
+        let tail: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(max(repository_event_ordinal), 0) FROM gh_event WHERE repository=$1",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::from)
+        .map_err(EvaluationError::Store)?;
+        while self
+            .activate_next(repository, rule, ids, factory, codec, now)
+            .await?
+        {}
+        while let Some(next) = self
+            .next_rule_event(repository, rule)
+            .await
+            .map_err(EvaluationError::Store)?
+        {
+            if Decimal::from(next.ordinal) > tail
+                || !self
+                    .evaluate_next(repository, rule, ids, factory, codec, now)
+                    .await?
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Reads only the next unevaluated fact after this revision's activation tail.
     pub async fn next_rule_event(
         &self,
