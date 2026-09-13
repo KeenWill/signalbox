@@ -195,3 +195,19 @@ test('cost refresh completes during session growth and catches up without hiding
   await expect(cost).toHaveText('$3.50')
   expect(requests).toHaveLength(2)
 })
+
+test('a failed cost refresh replaces the retained total with an unavailable indication', async ({
+  page,
+}) => {
+  const api = await sessionApi(page)
+  await page.route('**/api/usage/summary?**', (route) =>
+    api.state.grown
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: { groups: [group('1.5')], truncated: false } }),
+  )
+  await openSession(page)
+  const cost = page.getByTitle('Session cost', { exact: true })
+  await expect(cost).toHaveText('$1.50')
+  api.grow()
+  await expect(cost).toHaveText('Cost unavailable')
+})

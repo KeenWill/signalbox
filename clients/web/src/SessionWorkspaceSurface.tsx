@@ -475,10 +475,10 @@ export function SessionWorkspaceSurface({
                     : 'Inactive'}
               </p>
               <span className="session-header-cost" title="Session cost">
-                {cost.data
-                  ? sessionCostLabel(cost.data)
-                  : cost.isError
-                    ? 'Cost unavailable'
+                {cost.isError
+                  ? 'Cost unavailable'
+                  : cost.data
+                    ? sessionCostLabel(cost.data)
                     : 'Cost loading…'}
               </span>
               <div
