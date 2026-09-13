@@ -2140,3 +2140,45 @@ test('identifies a failed physical attempt without detail text after a successfu
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
   expect(problems).toEqual([])
 })
+
+for (const level of ['Summary', 'Tools']) {
+  for (const control of ['Continue reading', 'Close details']) {
+    test(`Escape closes the ${level} continuation from ${control} and restores its opener`, async ({
+      page,
+    }) => {
+      const state = await continuedMessageApi(page)
+      await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+      await page.getByRole('radio', { name: level, exact: true }).check()
+      const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+      const opener = transcript.getByRole('button', { name: 'Read more', exact: true })
+      await opener.click()
+      const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+      await expect(reader).toContainText('b')
+      await reader.getByRole('button', { name: control, exact: true }).press('Escape')
+      await expect(reader).toHaveCount(0)
+      await expect(opener).toBeFocused()
+      await expect(transcript).toBeVisible()
+      await expect(page).toHaveURL(/workspace=true/)
+      state.failContinuation = true
+      await opener.click()
+      await expect(transcript.getByRole('alert')).toContainText('Details could not be loaded.')
+      await expect(transcript.locator('.session-message-text')).toHaveText(['a'])
+    })
+  }
+}
+
+test('Escape closes the focused tool reader and restores Read more', async ({ page }) => {
+  await toolGoalApi(page, 'blocked')
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const opener = transcript.getByRole('button', { name: 'Read more', exact: true })
+  await opener.click()
+  const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await expect(reader).toContainText('passed')
+  await reader.getByRole('button', { name: 'Close details', exact: true }).press('Escape')
+  await expect(reader).toHaveCount(0)
+  await expect(opener).toBeFocused()
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toBeVisible()
+  await expect(page).toHaveURL(/workspace=true/)
+})

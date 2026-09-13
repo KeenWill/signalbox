@@ -1394,9 +1394,15 @@ function ContinuedEvent({
   state?: ContinuedEventState
   onChange: (state?: ContinuedEventState) => void
 }) {
+  const opener = useRef<HTMLButtonElement>(null)
+  const close = () => {
+    onChange(undefined)
+    requestAnimationFrame(() => opener.current?.focus())
+  }
   if (!state)
     return (
       <button
+        ref={opener}
         type="button"
         onClick={() =>
           onChange({
@@ -1418,6 +1424,7 @@ function ContinuedEvent({
       limits={limits}
       state={state}
       onChange={onChange}
+      onClose={close}
     />
   )
 }
@@ -1429,6 +1436,7 @@ function ContinuedEventReader({
   limits,
   state,
   onChange,
+  onClose,
 }: {
   adoptToolPage?: AdoptToolPage
   sessionId: string
@@ -1436,6 +1444,7 @@ function ContinuedEventReader({
   limits: SessionTranscriptLimits
   state: ContinuedEventState
   onChange: (state?: ContinuedEventState) => void
+  onClose: () => void
 }) {
   const cursor = state?.cursor ?? page.continuation ?? null
   const earlier = state?.earlier ?? []
@@ -1474,7 +1483,15 @@ function ContinuedEventReader({
         isToolBodyContinuation(next.body) &&
         !advancesToolMember(detail.data)))
   return (
-    <section aria-label="More message text">
+    <section
+      aria-label="More message text"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || event.defaultPrevented) return
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }}
+    >
       {detail.isPending && <p role="status">Loading details…</p>}
       {detail.isError && (
         <p role="alert">
@@ -1527,7 +1544,7 @@ function ContinuedEventReader({
           Continue reading
         </button>
       )}
-      <button type="button" onClick={() => onChange(undefined)}>
+      <button type="button" onClick={onClose}>
         Close details
       </button>
     </section>
