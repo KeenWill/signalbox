@@ -484,6 +484,41 @@ mod tests {
             PrepareSessionTitleOutcome::Prepared
         );
         let processes = CredentialInvocationProcesses::new(pool.clone(), nudge.clone());
+        let directory = tempfile::tempdir()?;
+        let unavailable_configuration = crate::configuration_reload::ConfigurationReload::new(
+            pool.clone(),
+            crate::HubModelConfiguration::parse(&models.source().replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 1024",
+            ))?,
+            crate::SessionTemplateConfiguration::default(),
+            directory.path().join("models.toml"),
+            directory.path().join("templates.toml"),
+            None,
+        )
+        .map_err(|_| "fixture reload configuration rejected")?
+        .with_runtime_factory(crate::model_catalog_runtime::ModelRuntimeFactory::new(
+            None, None, None,
+        ))
+        .with_title_invocation_processes(processes.clone());
+        assert!(
+            unavailable_configuration
+                .session_titles(pool.clone())
+                .is_none()
+        );
+        unavailable_configuration
+            .start_initial_title(pool.clone(), session, turn)
+            .await;
+        assert_eq!(
+            *processes.pending_titles.lock().expect("pending titles"),
+            BTreeMap::from([(session, turn)]),
+            "an unavailable title budget retains completed-turn work for a later catalog"
+        );
+        processes
+            .pending_titles
+            .lock()
+            .expect("pending titles")
+            .clear();
         let unavailable = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy_with(pool.connect_options().as_ref().clone());
         unavailable.close().await;

@@ -780,7 +780,8 @@ session's most recent `Prepared` call on that pool pinned, including one that
 later failed under `stay`. `switch_next_turn` creates a durable pending
 displacement scoped to the session, policy snapshot, member, and source turn; it
 is ignored inside that source turn and consumed by the transaction that prepares
-a later turn through another member.
+a later turn through another member. Session-level calls ignore next-turn
+displacements.
 
 Every transaction writing an exclusion first takes the affected profile's
 action-head lock, keyed by profile reference alone and in byte order when it

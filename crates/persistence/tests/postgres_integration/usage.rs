@@ -453,6 +453,23 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     titles.finish(outside_turn.call, None, usage).await?;
     sqlx::query("INSERT INTO credential_pool_member_action (pool_name, credential_reference, action_kind, observed_session_id, observed_turn_id, observation_model_call_id, cause_kind) VALUES ('title-pool','displaced-title-home','switch_next_turn',$1,$2,$3,'credential_rejected')")
         .bind(pool_session.into_uuid()).bind(pool_turn.into_uuid()).bind(ordinary.call().id().into_uuid()).execute(&pool).await?;
+    let mut outside_turn = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        ..outside_turn
+    };
+    assert!(
+        titles.prepare(&mut outside_turn, &pools).await? == PrepareSessionTitleOutcome::Prepared
+    );
+    assert_eq!(
+        outside_turn.credential_reference, "displaced-title-home",
+        "a session-level title does not apply a next-turn displacement"
+    );
+    let consumed: Option<Uuid> = sqlx::query_scalar("SELECT consumed_turn_id FROM credential_pool_member_action WHERE observation_model_call_id = $1")
+        .bind(ordinary.call().id().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(consumed, None);
+    titles.finish(outside_turn.call, None, usage).await?;
+    // A profile quarantine still excludes that member from session-level admission.
+    sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin) VALUES ('profile_quarantine', 'displaced-title-home', 'codex_home')").execute(&pool).await?;
     suggestion.session = pool_session;
     suggestion.target = pool_target;
 

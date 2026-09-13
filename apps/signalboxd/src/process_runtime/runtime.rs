@@ -381,11 +381,8 @@ async fn dispatch_updates_with_titles(
                         turn,
                         disposition: DispatchedTurnTerminalDisposition::Completed { .. },
                     } = event.kind()
-                        && let Some(titles) = title_configuration
-                            .as_ref()
-                            .and_then(|configuration| configuration.session_titles(pool.clone()))
                     {
-                        title_work = Some((titles, session, *turn));
+                        title_work = Some((session, *turn));
                     }
                     let outcome =
                         nudge_eligible_outbox_wake(&eligibility_nudge, session, event.kind());
@@ -416,8 +413,12 @@ async fn dispatch_updates_with_titles(
             .await;
         match outcome {
             Ok(OutboxDispatchOutcome::Delivered { .. }) => {
-                if let Some((titles, session, turn)) = title_work {
-                    titles.start_initial(session, turn).await;
+                if let Some((session, turn)) = title_work
+                    && let Some(configuration) = &title_configuration
+                {
+                    configuration
+                        .start_initial_title(pool.clone(), session, turn)
+                        .await;
                 }
             }
             Ok(OutboxDispatchOutcome::Idle)

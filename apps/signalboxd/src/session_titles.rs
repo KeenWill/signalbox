@@ -8,8 +8,8 @@ use signalbox_model_provider_runtime::{
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference,
     DeliveryMode, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    ObservationSink, PreparationOutcome, ProviderCompactionMode, RequestedTarget, ResolvedTarget,
-    TerminalEvidence, TokenUsage,
+    ObservationSink, PreparationFailure, PreparationOutcome, ProviderCompactionMode,
+    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_persistence::session_titles::{
     PrepareSessionTitleOutcome, SessionTitleCall, SessionTitleRepository,
@@ -265,6 +265,18 @@ impl SessionTitles {
             .await
         {
             PreparationOutcome::Prepared(prepared) => prepared,
+            PreparationOutcome::Failed {
+                failure: PreparationFailure::CredentialUnavailable { .. },
+                ..
+            } => {
+                let error = self
+                    .close_before_send(call.call, TitleError::Unavailable)
+                    .await;
+                if let Some(turn) = call.initial_for_turn {
+                    self.defer_initial(call.session, turn);
+                }
+                return Err(error);
+            }
             PreparationOutcome::Cancelled { .. }
             | PreparationOutcome::Failed { .. }
             | PreparationOutcome::Defect { .. } => {
@@ -666,6 +678,137 @@ selection_id = "{selection}"
                 "{adapter}"
             );
         }
+        pool.close().await;
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn unavailable_title_credentials_abandon_unsent_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_domain::{
+            CreateSession, DirectModelSelection, ModelSelectionRequest, ProviderModelIdentity,
+            ResolvedProviderTarget, SessionConfigurationDefaults, SessionCreationCause,
+            SessionCreationProvenance, TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            create_session::CreateSessionRepository, credential_invocations,
+            scheduler::PostgresEligibilitySweep,
+        };
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let models = Arc::new(crate::HubModelConfiguration::parse(
+            crate::configuration::tests::CONFIGURATION,
+        )?);
+        let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let selection =
+            DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000001"));
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )
+        .prepare(session)
+        .map_err(|_| "session creation rejected")?;
+        CreateSessionRepository::new(pool.clone(), models.session_credential_pin())
+            .handle(creation)
+            .await?;
+        let profile = "codex-title-unavailable-fixture";
+        credential_invocations::replace_registrations(
+            &pool,
+            &[(profile.to_owned(), std::num::NonZeroU32::new(1))],
+        )
+        .await?;
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let processes =
+            crate::credential_invocations::CredentialInvocationProcesses::new(pool.clone(), nudge);
+        let service = SessionTitles::new(
+            pool.clone(),
+            models,
+            ModelRuntimeFactory::new(None, None, None),
+            processes.clone(),
+        );
+        let repository = SessionTitleRepository::new(pool.clone());
+        struct UnavailableCredential;
+        impl ModelRuntime<ModelCallId> for UnavailableCredential {
+            type Prepared = std::convert::Infallible;
+
+            async fn prepare(
+                &self,
+                operation: ModelOperation<ModelCallId>,
+                _: CancellationSignal,
+            ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
+                PreparationOutcome::Failed {
+                    correlation: operation.correlation,
+                    failure: PreparationFailure::CredentialUnavailable {
+                        error: signalbox_model_runtime::CredentialAccessError::new(
+                            operation.credential_reference,
+                            signalbox_model_runtime::CredentialAccessFailure::Unavailable,
+                        ),
+                    },
+                }
+            }
+
+            async fn execute(
+                &self,
+                prepared: Self::Prepared,
+                _: &mut (dyn ObservationSink<ModelCallId> + Send),
+                _: CancellationSignal,
+            ) -> signalbox_model_runtime::TerminalReport<ModelCallId> {
+                match prepared {}
+            }
+        }
+        let mut call = SessionTitleCall {
+            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            session,
+            selection,
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                uuid::Uuid::now_v7(),
+            )),
+            credential_reference: profile.to_owned(),
+            input_includes_cache_tokens: false,
+            initial_for_turn: None,
+        };
+        assert!(
+            repository.prepare(&mut call, &Default::default()).await?
+                == PrepareSessionTitleOutcome::Prepared
+        );
+        let request = PreparedTitle {
+            operation: title_operation(
+                &call,
+                ResolvedTarget::new("synthetic-title"),
+                ResolvedTarget::new("synthetic-title"),
+                ModelSettings::new(256),
+            ),
+            call: call.clone(),
+            max_output_tokens: 256,
+        };
+        assert!(matches!(
+            service
+                .generate_using(&UnavailableCredential, request)
+                .await,
+            Err(TitleError::Unavailable)
+        ));
+        let evidence: (bool, bool, bool) = sqlx::query_as(
+            "SELECT abandoned, in_flight_at IS NULL, reservation.released_at IS NOT NULL
+             FROM session_title_model_call title JOIN credential_invocation_reservation reservation USING (model_call_id)
+             WHERE model_call_id = $1"
+        ).bind(call.call.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(evidence, (true, true, true));
+        let mut retry = SessionTitleCall {
+            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            ..call
+        };
+        assert!(
+            repository.prepare(&mut retry, &Default::default()).await?
+                == PrepareSessionTitleOutcome::Prepared
+        );
         pool.close().await;
         Ok(())
     }

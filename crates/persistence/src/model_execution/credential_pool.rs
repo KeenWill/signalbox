@@ -381,7 +381,7 @@ async fn load_pool_exclusions(
             "avoid_new_sessions" => !completed_references.contains(&reference),
             "switch_next_turn" => {
                 observed_session == session_id_to_uuid(session)
-                    && Some(observed_turn) != turn.map(turn_id_to_uuid)
+                    && turn.is_some_and(|turn| observed_turn != turn_id_to_uuid(turn))
             }
             _ => {
                 return Err(ModelCallCorruption::Unsupported {
