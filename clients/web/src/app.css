@@ -3282,3 +3282,32 @@ kbd {
 .navigation-collapsed .scenario-entry {
   display: none;
 }
+
+.open-session-command {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+.open-session-command input {
+  min-width: 0;
+  width: 100%;
+  min-height: 32px;
+  padding: 0.4rem 0.5rem;
+}
+
+.open-session-dialog {
+  width: min(420px, calc(100vw - 2rem));
+}
+.open-session-dialog > p {
+  margin: 0.75rem 0.75rem 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.open-session-command button {
+  justify-self: end;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 0.75rem;
+}

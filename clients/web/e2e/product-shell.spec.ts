@@ -2051,6 +2051,29 @@ test('the sidebar rail remembers collapse and keeps keyboard navigation', async 
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '218px')
 })
 
+test('the command palette opens a pasted session id and restores focus on cancel', async ({
+  page,
+}, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  const pastedSessionId = 'abcdef01-2345-6789-abcd-ef0123456789'
+  await page.goto('/settings')
+  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+  await palette.click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  const dialog = page.getByRole('dialog', { name: 'Open session by id' })
+  await expect(dialog.getByLabel('Session ID')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(palette).toBeFocused()
+  await palette.click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await dialog.getByLabel('Session ID').fill(pastedSessionId.toUpperCase())
+  await page.screenshot({ path: testInfo.outputPath('open-session-command.png') })
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${pastedSessionId}`))
+  await expect(dialog).toBeHidden()
+})
+
 test('offers the sidebar command only when the desktop sidebar is visible', async ({ page }) => {
   await page.goto('/settings')
   const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
@@ -2065,4 +2088,73 @@ test('offers the sidebar command only when the desktop sidebar is visible', asyn
   await page.setViewportSize({ width: 390, height: 844 })
   await palette.click()
   await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toHaveCount(0)
+})
+
+for (const catalogState of [
+  { q: 'review', sort: 'identity', archived: 'true', afterSession: sessionWorkspaceFixture.id },
+  { q: 'review', archived: 'true', afterSession: sessionWorkspaceFixture.id, afterActivity: '42' },
+]) {
+  test(`opening and reopening a session by id preserves catalog state for ${catalogState.sort ?? 'activity'} order`, async ({
+    page,
+  }) => {
+    await useDeterministicBootstrap(page)
+    await useDeterministicSession(page)
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          ...emptySessionCatalogFixture,
+          sort:
+            catalogState.sort === 'identity'
+              ? 'session_identity_ascending'
+              : 'last_activity_descending',
+        },
+      }),
+    )
+    const search = new URLSearchParams(Object.entries(catalogState))
+    await page.goto(`/sessions?${search}`)
+    for (const step of ['Open from catalog', 'Reopen the current session']) {
+      await test.step(step, async () => {
+        await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+        await page.getByRole('button', { name: /^Open session by id/ }).click()
+        await page
+          .getByRole('dialog', { name: 'Open session by id' })
+          .getByLabel('Session ID')
+          .fill(sessionWorkspaceFixture.id)
+        await page.keyboard.press('Enter')
+        search.set('session', sessionWorkspaceFixture.id)
+        search.set('workspace', 'true')
+        await expect
+          .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+          .toEqual(Object.fromEntries(search))
+      })
+    }
+    await page.keyboard.press('Escape')
+    await expect
+      .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+      .toEqual(catalogState)
+  })
+}
+
+test('opening a session by id from a direct empty workspace returns to the catalog', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/settings')
+  await page.goto('/sessions?workspace=true&q=review&archived=true')
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await page
+    .getByRole('dialog', { name: 'Open session by id' })
+    .getByLabel('Session ID')
+    .fill(sessionWorkspaceFixture.id)
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`session=${sessionWorkspaceFixture.id}`))
+  await page.keyboard.press('Escape')
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/sessions')
+  await expect
+    .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+    .toEqual({ q: 'review', archived: 'true' })
+  await page.goBack()
+  await expect(page).toHaveURL(/\/settings$/)
 })

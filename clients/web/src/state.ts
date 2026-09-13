@@ -16,7 +16,7 @@ export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
-export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type Overlay = 'palette' | 'help' | 'navigation' | 'session-entry' | null
 export type ArtifactOriginalState = 'loading' | 'loaded' | 'failed'
 
 export interface VisibleRange {

@@ -11,6 +11,15 @@ export interface ProductCommandContext extends CommandContext {
 
 const productNavigationCommands = [
   {
+    id: 'session.open-by-id',
+    title: 'Open session by id',
+    description: 'Open a session using its identifier.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context: ProductCommandContext) => !context.navigationLocked,
+    run: (context: ProductCommandContext) => context.dispatch(actions.overlaySet('session-entry')),
+  },
+  {
     id: 'navigation.toggle',
     title: 'Toggle sidebar',
     description: 'Collapse or expand the sidebar.',
