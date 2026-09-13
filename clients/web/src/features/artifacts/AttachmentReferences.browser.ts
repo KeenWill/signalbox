@@ -422,3 +422,44 @@ for (const label of ['image/', 'image/png extra']) {
     await expect(chip).toBeVisible()
   })
 }
+
+for (const controlName of ['Download', 'Image Image', 'Load original']) {
+  test(`keeps an offscreen attachment active while ${controlName} owns focus`, async ({ page }) => {
+    await page.route('**/api/bootstrap', (route) =>
+      route.fulfill({ json: webContractBootstrapFixture }),
+    )
+    await page.route('**/api/blobs/**/descriptor?*', (route) =>
+      route.fulfill({ json: withoutFilename(jpegDescriptor) }),
+    )
+    await page.route('**/api/blobs/**/content/image-png', (route) =>
+      route.fulfill({ body: preview, contentType: 'image/png' }),
+    )
+    await page.goto('/src/features/artifacts/scenario.html?original&revisit')
+    const control = page
+      .getByRole('article', { name: 'Artifact Image', exact: true })
+      .getByRole(controlName === 'Download' ? 'link' : 'button', {
+        name: controlName,
+        exact: true,
+      })
+    await control.focus()
+    await page.getByRole('listitem').evaluate(async (element) => {
+      await new Promise<void>((resolve) => {
+        const observer = new IntersectionObserver(([entry]) => {
+          if (entry?.isIntersecting) return
+          observer.disconnect()
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        })
+        observer.observe(element)
+        window.scrollTo(0, document.documentElement.scrollHeight)
+      })
+    })
+    await expect(control).not.toBeInViewport()
+    await expect(control).toBeFocused()
+    await page.getByRole('heading', { name: 'Conversation attachments' }).evaluate((element) => {
+      element.tabIndex = -1
+      element.focus({ preventScroll: true })
+    })
+    await expect(control).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Conversation attachments' })).toBeFocused()
+  })
+}

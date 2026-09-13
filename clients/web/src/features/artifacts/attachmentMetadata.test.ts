@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { attachmentTypeLabel } from '../../ArtifactInspector'
 import { decodeWebBlobDescriptor } from '../../generated/web-contract.mjs'
+import { attachmentTypeLabel } from '../../labels'
 import { fallbackDescriptor } from './artifactScenario'
 import { attachmentDescriptorMediaType } from './attachmentMetadata'
 

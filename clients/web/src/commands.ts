@@ -684,38 +684,6 @@ export const commandRegistry = [
     },
   },
   {
-    id: 'pane.inspector.preview',
-    title: 'Preview inspector pane size',
-    description: 'Preview the inspector width.',
-    category: 'Settings',
-    bindings: [],
-    available: paneSizeProvided,
-    run: (context) => {
-      if (context.paneSize === undefined) return
-      const paneSizes: BrowserPreferences['paneSizes'] = {
-        ...context.getState().app.paneSizes,
-        inspector: context.paneSize,
-      }
-      context.dispatch(actions.paneSizesPreviewed(paneSizes))
-    },
-  },
-  {
-    id: 'pane.inspector.resize',
-    title: 'Resize inspector pane',
-    description: 'Set the inspector width.',
-    category: 'Settings',
-    bindings: [],
-    available: paneSizeProvided,
-    run: (context) => {
-      if (context.paneSize === undefined) return
-      const paneSizes: BrowserPreferences['paneSizes'] = {
-        ...context.getState().app.paneSizes,
-        inspector: context.paneSize,
-      }
-      context.dispatch(actions.paneSizesSet(paneSizes))
-    },
-  },
-  {
     id: 'preferences.reset',
     title: 'Restore preference defaults',
     description: 'Reset browser preferences.',

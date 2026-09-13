@@ -57,7 +57,7 @@ describe('browser preferences', () => {
     const stored = {
       layout: 'dashboard',
       density: 'comfortable',
-      paneSizes: { navigation: -50, inspector: 50_000 },
+      paneSizes: { navigation: -50 },
       remoteMedia: 'proxy',
     } as const
     expect(() => decodeBrowserPreferences(stored)).toThrow(
