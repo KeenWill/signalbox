@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import {
   createRootRoute,
   createRoute,
@@ -16,6 +16,7 @@ import { useState } from 'react'
 import { readProductRouteState } from '../product'
 import { defaultSearchUsageRouteState, SearchUsageWorkbench } from '../SearchUsage'
 import { AttentionCost } from './AttentionCost'
+import { usageSourceOptions } from './queries'
 import { SEARCH_USAGE_SCENARIO_SESSION_ID, SearchUsageScenarioSource } from './scenario'
 import {
   CostChip,
@@ -24,7 +25,7 @@ import {
   useSessionCost,
   useTurnCosts,
 } from './session-cost'
-import { UsageContent, UsageSurface } from './UsageSurface'
+import { UsageContent } from './UsageSurface'
 
 function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string }) {
   const [previewOpen, setPreviewOpen] = useState(false)
@@ -82,6 +83,12 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
 }
 
 const source = new SearchUsageScenarioSource()
+function HttpUsagePreview() {
+  const source = useQuery(usageSourceOptions)
+  if (source.isError) return <p role="alert">Usage could not load.</p>
+  if (!source.data) return <p role="status">Loading usage…</p>
+  return <UsageContent source={source.data} authority="http" />
+}
 function Preview() {
   const search = useLocation({ select: (location) => location.searchStr })
   const navigate = useNavigate()
@@ -100,7 +107,7 @@ function Preview() {
     )
   if (query.get('preview') === 'cost')
     return <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
-  if (query.has('http')) return <UsageSurface />
+  if (query.has('http')) return <HttpUsagePreview />
   if (query.has('workbench'))
     return (
       <div className="usage-product">
