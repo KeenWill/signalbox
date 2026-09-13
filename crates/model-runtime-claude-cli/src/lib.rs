@@ -18,7 +18,7 @@
 mod bridge;
 mod config;
 mod image;
-pub use image::image_presentation_capability;
+pub use image::{document_presentation_capability, image_presentation_capability};
 mod event;
 mod runtime;
 mod status;

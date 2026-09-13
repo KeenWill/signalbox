@@ -142,7 +142,7 @@ impl SessionTemplateConfiguration {
         Self::parse_at_with_home(content, path, &|| home.clone(), models)
     }
 
-    fn parse_at_with_home(
+    pub(crate) fn parse_at_with_home(
         content: &str,
         path: &Path,
         home: &dyn Fn() -> Option<PathBuf>,
@@ -204,6 +204,61 @@ impl SessionTemplateConfiguration {
             templates,
             review_library,
         })
+    }
+
+    /// Replaces one ordinary definition or the shared library that generates its name.
+    pub(crate) fn replace_definition(
+        &self,
+        name: &SessionTemplateName,
+        definition: &str,
+        mut source: DocumentMut,
+    ) -> Result<String, SessionTemplateConfigurationError> {
+        let definition = definition
+            .parse::<DocumentMut>()
+            .map_err(|_| SessionTemplateConfigurationError::InvalidDocument)?;
+        reject_unknown_fields(
+            definition.as_table(),
+            &["version", "templates", "review_library"],
+        )?;
+        if definition.get("version").and_then(|item| item.as_integer()) != Some(1) {
+            return Err(SessionTemplateConfigurationError::UnsupportedVersion);
+        }
+        let ordinary = source
+            .get_mut("templates")
+            .and_then(|item| item.as_array_of_tables_mut())
+            .and_then(|tables| {
+                tables.iter_mut().find(|table| {
+                    table.get("name").and_then(|item| item.as_str()) == Some(name.as_str())
+                })
+            });
+        if let Some(target) = ordinary {
+            let tables = definition
+                .get("templates")
+                .and_then(|item| item.as_array_of_tables())
+                .ok_or(SessionTemplateConfigurationError::InvalidTemplates)?;
+            if tables.len() != 1 || definition.contains_key("review_library") {
+                return Err(SessionTemplateConfigurationError::InvalidTemplates);
+            }
+            let table = tables
+                .get(0)
+                .ok_or(SessionTemplateConfigurationError::InvalidTemplates)?;
+            if table.get("name").and_then(|item| item.as_str()) != Some(name.as_str()) {
+                return Err(SessionTemplateConfigurationError::InvalidName);
+            }
+            *target = table.clone();
+        } else {
+            if self.resolve(name).is_none() || definition.contains_key("templates") {
+                return Err(SessionTemplateConfigurationError::InvalidTemplates);
+            }
+            source.insert(
+                "review_library",
+                definition
+                    .get("review_library")
+                    .ok_or(SessionTemplateConfigurationError::InvalidReviewLibrary)?
+                    .clone(),
+            );
+        }
+        Ok(source.to_string())
     }
 
     /// Returns source with every external prompt replaced by its accepted content.
@@ -1128,6 +1183,80 @@ security = "Find security boundary failures."
 documentation-code-drift = "Find documentation drift."
 "#,
         )
+    }
+
+    #[test]
+    fn replacement_preserves_other_template_prompt_references() {
+        let models = models();
+        let source = inline_catalog("");
+        let templates =
+            SessionTemplateConfiguration::parse_snapshot(&source, &models).expect("catalog");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned()).expect("name");
+        // The sibling's prompt reference must remain in the persisted source.
+        let sibling = format!(
+            "\n[[templates]]\nname = \"sibling\"\nversion = 1\nalias = \"{ALIAS_ID}\"\nsystem_prompt_file = \"sibling.txt\"\ndangerous_tool_auto_approval = false\n"
+        );
+        let document = format!("{source}{sibling}").parse().expect("document");
+        let replacement = source.replace(INLINE_PROMPT, "Replacement instructions.");
+        let saved = templates
+            .replace_definition(&name, &replacement, document)
+            .expect("replacement");
+        assert!(saved.contains("system_prompt_file = \"sibling.txt\""));
+        assert!(saved.contains("Replacement instructions."));
+    }
+
+    #[test]
+    fn replacement_rejects_renaming_or_additional_definitions() {
+        let models = models();
+        let source = inline_catalog("");
+        let templates =
+            SessionTemplateConfiguration::parse_snapshot(&source, &models).expect("catalog");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned()).expect("name");
+        let renamed = source.replace(TEMPLATE_NAME, "another-template");
+        assert!(matches!(
+            templates.replace_definition(&name, &renamed, source.parse().expect("source")),
+            Err(SessionTemplateConfigurationError::InvalidName)
+        ));
+        let additional = renamed
+            .strip_prefix("\nversion = 1")
+            .expect("version prefix");
+        let multiple = format!("{source}{additional}");
+        assert!(matches!(
+            templates.replace_definition(&name, &multiple, source.parse().expect("source")),
+            Err(SessionTemplateConfigurationError::InvalidTemplates)
+        ));
+    }
+
+    #[test]
+    fn replacing_a_generated_template_updates_its_shared_library() {
+        let models = models();
+        let source = review_catalog("");
+        let templates =
+            SessionTemplateConfiguration::parse_snapshot(&source, &models).expect("catalog");
+        let name = SessionTemplateName::try_new(super::REVIEW_IMPORT_TEMPLATE_NAME.to_owned())
+            .expect("name");
+        let replacement = source.replace(
+            "Publish only the reserved result.",
+            "Publish the checked result.",
+        );
+        let saved = templates
+            .replace_definition(&name, &replacement, source.parse().expect("source"))
+            .expect("shared replacement");
+        let parsed = SessionTemplateConfiguration::parse_snapshot(&saved, &models)
+            .expect("valid replacement");
+        let publication =
+            SessionTemplateName::try_new(super::REVIEW_PUBLICATION_TEMPLATE_NAME.to_owned())
+                .expect("publication name");
+        assert!(
+            parsed
+                .resolve(&publication)
+                .expect("publication")
+                .defaults()
+                .system_prompt()
+                .expect("prompt")
+                .as_str()
+                .ends_with("Publish the checked result.")
+        );
     }
 
     #[test]
