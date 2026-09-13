@@ -323,29 +323,19 @@ test('captures sessions detail evidence', async ({ page, browserName }) => {
   test.skip(browserName !== 'chromium', 'Chromium owns pixel evidence')
   await page.setViewportSize({ width: 1440, height: 1200 })
   await openDetails(page)
-  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
-  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await toolRow(page).click()
   await page.getByRole('button', { name: 'Load more', exact: true }).click()
   await expect(timeline.getByRole('region', { name: 'Tool result' })).toBeVisible()
-  await transcript.evaluate((element) => {
-    element.scrollTop = element.scrollHeight
-  })
   await expect.soft(page).toHaveScreenshot('sessions-detail-desktop-dark.png')
   await page.getByRole('row').filter({ hasText: 'Tool approval decided' }).click()
   await timeline.getByRole('region', { name: 'Approval rationale' }).scrollIntoViewIfNeeded()
   await expect(timeline.getByRole('region', { name: 'Approval rationale' })).toBeVisible()
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await transcript.evaluate((element) => {
-    element.scrollTop = element.scrollHeight
-  })
   await expect.soft(page).toHaveScreenshot('sessions-detail-desktop-light.png')
   await page.setViewportSize({ width: 390, height: 844 })
   await timeline.getByRole('region', { name: 'Approval rationale' }).scrollIntoViewIfNeeded()
-  await transcript.evaluate((element) => {
-    element.scrollTop = element.scrollHeight
-  })
   await expect.soft(page).toHaveScreenshot('sessions-detail-mobile-light.png')
 })
 
