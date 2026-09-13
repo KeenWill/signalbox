@@ -11,6 +11,36 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each(['missing', 'unusable'])('identifies %s sandbox availability', (availability) => {
+    const [, tool] = toolExample(
+      'sandboxed_exec',
+      { program: 'tool' },
+      {
+        confinement: { kind: 'sandbox_refused', availability },
+        outcome: { kind: 'spawn_failed', reason: 'sandbox_unavailable' },
+      },
+    )
+    const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+    expect(markup).toContain(
+      `Sandbox availability: ${availability === 'missing' ? 'Missing' : 'Unusable'}`,
+    )
+  })
+
+  it.each(['network_fence_active', null])('preserves the timeout diagnostic %s', (diagnostic) => {
+    const [, tool] = toolExample(
+      'sandboxed_exec',
+      { program: 'tool' },
+      {
+        confinement: { kind: 'filesystem_confined' },
+        outcome: { kind: 'timed_out' },
+        diagnostic,
+      },
+    )
+    const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+    expect(markup).toContain('Timed out')
+    expect(markup.includes('Network fence active')).toBe(diagnostic !== null)
+  })
+
   it('retains rejected argument values in the labeled fallback', () => {
     const [tool] = toolExample('sandboxed_exec', { program: 'cargo', arguments: 42 }, {})
     if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')

@@ -133,6 +133,10 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
       )}
       {typeof outcome.reason === 'string' && <span>{fieldLabel(outcome.reason)}</span>}
       {typeof confinement.kind === 'string' && <span>{fieldLabel(confinement.kind)}</span>}
+      {typeof confinement.availability === 'string' && (
+        <small>Sandbox availability: {fieldLabel(confinement.availability)}</small>
+      )}
+      {typeof result.diagnostic === 'string' && <small>{fieldLabel(result.diagnostic)}</small>}
       <TextPreview text={textField(stdout.text ?? result.stdout ?? result.output)} label="Output" />
       <TextPreview text={textField(stderr.text ?? result.stderr)} label="Error output" />
       {(stdout.completeness === 'truncated' || stderr.completeness === 'truncated') && (
