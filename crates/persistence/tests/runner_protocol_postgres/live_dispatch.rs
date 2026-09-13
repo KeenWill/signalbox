@@ -103,7 +103,7 @@ async fn generic_startup_scan_leaves_runner_owned_attempts_for_reconciliation()
             .await?;
     let correlation = pin.lease.correlation();
     let repository = signalbox_persistence::startup::PostgresStartupScanRepository::new(pool);
-    assert!(store.has_unsettled_execution().await?);
+    assert!(!store.has_unsettled_execution().await?);
     assert!(
         !repository
             .sessions()
@@ -113,6 +113,7 @@ async fn generic_startup_scan_leaves_runner_owned_attempts_for_reconciliation()
     store
         .claim_tool_lease(enrollment.enrollment(), epoch, correlation.clone())
         .await?;
+    assert!(store.has_unsettled_execution().await?);
     let mut scan = signalbox_application::StartupScanService::new(
         signalbox_application::UuidV7StartupScanIdGenerator,
         repository.clone(),
