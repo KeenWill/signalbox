@@ -1,5 +1,27 @@
 use super::*;
 
+async fn admit_runner_placement(
+    placement: Option<&signalbox_domain::SessionRunnerPlacementRequest>,
+    services: &ConnectionServices,
+) -> Result<(), ProtocolError> {
+    use signalbox_persistence::runner_protocol::{RunnerProtocolStore, RunnerProtocolStoreError};
+    let Some(placement) = placement else {
+        return Ok(());
+    };
+    let catalog = crate::runner_protocol_runtime::local_runner_catalog()
+        .map_err(|_| ProtocolError::without_detail(ErrorCode::Internal))?;
+    RunnerProtocolStore::new(services.pool.clone(), catalog)
+        .validate_creation_placement(placement)
+        .await
+        .map_err(|error| match error {
+            RunnerProtocolStoreError::Domain(_) => {
+                ProtocolError::without_detail(ErrorCode::InvalidRequest)
+            }
+            RunnerProtocolStoreError::Database(_) => ProtocolError::mutation_unavailable(false),
+            _ => ProtocolError::without_detail(ErrorCode::Internal),
+        })
+}
+
 pub(super) struct WireCreateSessionRequest {
     pub(super) command_uuid: uuid::Uuid,
     pub(super) initial_model_selection: WireModelSelection,
@@ -7,6 +29,7 @@ pub(super) struct WireCreateSessionRequest {
     pub(super) system_prompt: SystemPromptMember,
     pub(super) placement: WireSessionPlacement,
     pub(super) lifecycle: SessionLifecycleMembers,
+    pub(super) runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 }
 
 /// The lifecycle members of one creation, admitted into domain values.
@@ -96,7 +119,20 @@ where
         system_prompt,
         placement,
         lifecycle,
+        runner_placement,
     } = wire_request;
+    let Ok(runner_placement) = runner_placement
+        .map(signalbox_process_protocol::RunnerPlacementRequest::try_into_domain)
+        .transpose()
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let Ok(lifecycle) = LifecycleMembers::admit(lifecycle) else {
         return write_error(
             writer,
@@ -147,6 +183,7 @@ where
                 && defaults.model_settings().precedence().session() == caller_model_settings
                 && command.template_provenance().is_none()
                 && command.placement() == &placement
+                && command.runner_placement() == runner_placement.as_ref()
                 && lifecycle.matches(command)
             {
                 return write_recorded_creation(writer, version, request_id, &recorded).await;
@@ -200,6 +237,9 @@ where
             .await;
         }
     }
+    if let Err(error) = admit_runner_placement(runner_placement.as_ref(), services).await {
+        return write_error(writer, version, request_id, error).await;
+    }
     let model_settings = match validate_session_model_settings(
         services.model_configuration.as_ref(),
         model_selection,
@@ -232,11 +272,14 @@ where
     };
     let request = CreateSessionRequest::try_new(command_id, defaults);
     let Ok(request) = request.map(|request| {
-        request.with_placement(placement).with_lifecycle(
-            lifecycle.start_gate,
-            lifecycle.ownership,
-            lifecycle.finish_condition,
-        )
+        request
+            .with_runner_placement(runner_placement)
+            .with_placement(placement)
+            .with_lifecycle(
+                lifecycle.start_gate,
+                lifecycle.ownership,
+                lifecycle.finish_condition,
+            )
     }) else {
         return write_error(
             writer,
@@ -262,6 +305,7 @@ pub(super) struct WireCreateSessionFromTemplateRequest {
     pub(super) template_name: String,
     pub(super) placement: WireSessionPlacement,
     pub(super) lifecycle: SessionLifecycleMembers,
+    pub(super) runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 }
 
 pub(super) async fn handle_create_session_from_template<Writer>(
@@ -279,7 +323,20 @@ where
         template_name,
         placement,
         lifecycle,
+        runner_placement,
     } = request;
+    let Ok(runner_placement) = runner_placement
+        .map(signalbox_process_protocol::RunnerPlacementRequest::try_into_domain)
+        .transpose()
+    else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let Ok(lifecycle) = LifecycleMembers::admit(lifecycle) else {
         return write_error(
             writer,
@@ -320,6 +377,7 @@ where
                 .map(SessionTemplateProvenance::name);
             if recorded_name == Some(&template_name)
                 && recorded.command().placement() == &placement
+                && recorded.command().runner_placement() == runner_placement.as_ref()
                 && lifecycle.matches(recorded.command())
             {
                 return write_recorded_creation(writer, version, request_id, &recorded).await;
@@ -374,6 +432,9 @@ where
         }
     }
 
+    if let Err(error) = admit_runner_placement(runner_placement.as_ref(), services).await {
+        return write_error(writer, version, request_id, error).await;
+    }
     let Some(template) = services.template_configuration.resolve(&template_name) else {
         return write_error(
             writer,
@@ -389,11 +450,14 @@ where
         template.defaults().clone(),
     );
     let Ok(request) = request.map(|request| {
-        request.with_placement(placement).with_lifecycle(
-            lifecycle.start_gate,
-            lifecycle.ownership,
-            lifecycle.finish_condition,
-        )
+        request
+            .with_runner_placement(runner_placement)
+            .with_placement(placement)
+            .with_lifecycle(
+                lifecycle.start_gate,
+                lifecycle.ownership,
+                lifecycle.finish_condition,
+            )
     }) else {
         return write_error(
             writer,
@@ -420,6 +484,7 @@ pub(super) struct WireCommissionSessionRequest {
     pub(super) fence: WireCommissionedSessionFence,
     pub(super) statement: String,
     pub(super) content: InputContent,
+    pub(super) runner_placement: Option<signalbox_process_protocol::RunnerPlacementRequest>,
 }
 
 /// Admits one wire fence into its exact domain values.
@@ -469,12 +534,17 @@ where
         fence,
         statement,
         content,
+        runner_placement,
     } = request;
     let admitted = (|| {
         let template_name = SessionTemplateName::try_new(template_name).map_err(|_| ())?;
         let statement = GoalStatement::try_new(statement).map_err(|_| ())?;
         let content = UserContent::try_text(content.into_string()).map_err(|_| ())?;
         let fence = domain_commissioned_fence(fence)?;
+        let runner_placement = runner_placement
+            .map(signalbox_process_protocol::RunnerPlacementRequest::try_into_domain)
+            .transpose()
+            .map_err(|_| ())?;
         CommissionDispatchRequest::try_new(
             DurableCommandId::from_uuid(command_uuid),
             template_name,
@@ -482,6 +552,7 @@ where
             statement,
             content,
         )
+        .map(|request| request.with_runner_placement(runner_placement))
         .map_err(|_| ())
     })();
     let Ok(request) = admitted else {
@@ -560,6 +631,9 @@ where
         };
         return write_error(writer, version, request_id, refusal).await;
     };
+    if let Err(error) = admit_runner_placement(request.runner_placement(), services).await {
+        return write_error(writer, version, request_id, error).await;
+    }
     let mut ids = UuidV7CommissionedDispatchIdGenerator;
     let Ok(prepared) = request.prepare(
         &mut ids,

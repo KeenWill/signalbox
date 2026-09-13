@@ -1721,6 +1721,39 @@ impl RunnerProtocolStore {
         Ok(loaded)
     }
 
+    /// Checks an unpinned creation request against the active local registration.
+    pub async fn validate_creation_placement(
+        &self,
+        request: &SessionRunnerPlacementRequest,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let row = sqlx::query(
+            "SELECT enrollment.enrollment_id, registration.registration_revision
+             FROM runner_enrollment AS enrollment
+             JOIN runner_current_registration AS registration USING (enrollment_id)
+             WHERE enrollment.state_kind = 'active'",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::SelectorMismatch,
+        ))?;
+        let registration = load_registration_in(
+            transaction.as_mut(),
+            runner_enrollment_id(row.decode_column("enrollment_id")?),
+            decode_registration_revision(row.decode_column("registration_revision")?)?,
+            None,
+            &self.catalog,
+        )
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        request
+            .validate_registration(registration.registration())
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Appends one domain-validated placement snapshot and optional grant.
     pub async fn store_placement(
         &self,
@@ -4374,8 +4407,34 @@ fn stored_registration_identity(
         .unwrap_or((None, None))
 }
 
+pub(crate) async fn insert_created_placement(
+    connection: &mut PgConnection,
+    session: SessionId,
+    request: SessionRunnerPlacementRequest,
+) -> Result<(), RunnerProtocolStoreError> {
+    let placement = SessionRunnerPlacement::new(session, request);
+    insert_placement_record(
+        connection,
+        1,
+        "created",
+        &placement,
+        (None, None),
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement (session_id, event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(session.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 async fn insert_placement_record(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut PgConnection,
     event_ordinal: u64,
     event_kind: &str,
     placement: &SessionRunnerPlacement,
@@ -4467,7 +4526,7 @@ async fn insert_placement_record(
             .grant_lineage
             .map(|lineage| Decimal::from(lineage.revision.get())),
     )
-    .execute(&mut **transaction)
+    .execute(&mut *transaction)
     .await?;
     for tool in state.tools {
         sqlx::query(
@@ -4479,7 +4538,7 @@ async fn insert_placement_record(
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
         .bind(state.runner_required_tools.contains(tool))
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await?;
     }
     for (tool, permission) in permission_overrides {
@@ -4492,7 +4551,7 @@ async fn insert_placement_record(
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
         .bind(encode_permission_override(permission))
-        .execute(&mut **transaction)
+        .execute(&mut *transaction)
         .await?;
     }
     Ok(())

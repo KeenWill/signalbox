@@ -33,7 +33,7 @@ use crate::outbox;
 const COMMAND_KIND: &str = "create_session";
 const WRITTEN_STORAGE_VERSION: i16 = 9;
 pub(crate) const WORKFLOW_FROM_STORAGE_VERSION: i16 = 9;
-const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 8;
+pub(crate) const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 8;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
@@ -573,6 +573,19 @@ pub(crate) async fn insert_prepared(
     .await?;
 
     insert_command_record(connection, command, prepared.applied_result()).await?;
+
+    if let Some(request) = command.runner_placement() {
+        crate::runner_protocol::insert_created_placement(connection, session.id(), request.clone())
+            .await
+            .map_err(|error| match error {
+                crate::runner_protocol::RunnerProtocolStoreError::Database(error) => {
+                    CreateSessionRepositoryError::Database(error)
+                }
+                _ => CreateSessionRepositoryError::Corruption(
+                    CreateSessionCorruption::Inconsistent("created runner placement"),
+                ),
+            })?;
+    }
 
     outbox::append(
         connection,

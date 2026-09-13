@@ -26,6 +26,11 @@ derives its empty reconnect inventory from a versioned, fsynced, atomically
 published private journal and executes nothing. Leases, dispatch, runner
 workspace execution, and sandbox supervision are listed under Planned.
 
+The three process-wire creation commands retain optional runner placement and
+initialize its unpinned status in the creation transaction. Creation validates
+the request against the active registration without pinning or issuing a grant
+or lease.
+
 The domain lives in `crates/domain/src/runner/` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
 enrollment, and authentication-reference identities to the capability classes
