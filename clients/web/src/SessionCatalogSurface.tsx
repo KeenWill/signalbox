@@ -102,6 +102,7 @@ const SessionTitle = ({
 const SessionMetadata = ({
   summary,
   canRename,
+  titleGenerationAvailable,
   catalogUpdatedAt,
   onRename,
   selected,
@@ -110,6 +111,7 @@ const SessionMetadata = ({
 }: {
   summary: SessionSummary
   canRename: boolean
+  titleGenerationAvailable: boolean
   catalogUpdatedAt: number
   onRename: () => void
   selected: boolean
@@ -204,7 +206,8 @@ const SessionMetadata = ({
       setEditing(true)
     } else void suggest()
   }
-  const canSuggest = !editing && !suggesting && suggestion === null && canRename
+  const canSuggest =
+    titleGenerationAvailable && !editing && !suggesting && suggestion === null && canRename
   const suggestionAction = useRef(beginSuggestion)
   useEffect(() => {
     suggestionAction.current = beginSuggestion
@@ -729,6 +732,9 @@ export function SessionCatalogSurface({
                       }}
                       catalogUpdatedAt={sessions.dataUpdatedAt}
                       canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
+                      titleGenerationAvailable={
+                        bootstrap.data?.capabilities.session_title_generation === true
+                      }
                     />
                   </li>
                 ))}

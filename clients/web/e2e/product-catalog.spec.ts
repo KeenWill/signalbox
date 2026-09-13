@@ -131,8 +131,18 @@ test.beforeEach(async ({ page }) => {
   )
 })
 
-const useCatalogFixture = async (page: Page) => {
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const useCatalogFixture = async (page: Page, titleGeneration = true) => {
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: {
+          ...bootstrapFixture.capabilities,
+          session_title_generation: titleGeneration,
+        },
+      },
+    }),
+  )
   await page.route('**/api/attention/follow', (route) =>
     route.fulfill({
       body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionPage })}\n`,
@@ -1276,6 +1286,25 @@ for (const finish of ['Save', 'Cancel', 'Escape']) {
       .toBe(continuationSummaries[0]?.session_id)
   })
 }
+
+test('disables suggestions in the row and palette when title generation is unavailable', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page, false)
+  await page.goto('/sessions')
+  await expect(
+    page.getByRole('button', { name: `Suggest a name for session ${firstSessionId}`, exact: true }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true }),
+  ).toBeEnabled()
+  await page.getByRole('button', { name: /Release verification/ }).focus()
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette.getByRole('button', { name: /Suggest a name/ })).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
 
 test('suggests a title inline and saves only after keyboard acceptance', async ({
   page,
