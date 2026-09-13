@@ -173,6 +173,7 @@ const toolsResult = spawnSync(
     '--workers=2',
     '--output',
     join(evidence, 'tool-test-results'),
+    ...process.argv.slice(2),
   ],
   {
     cwd: project,

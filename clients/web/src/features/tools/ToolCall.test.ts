@@ -11,6 +11,13 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([0, 512])('retains the requested read window at byte %s', (offset) => {
+    const [tool] = toolExample('read_file', { path: 'file.txt', offset, max_bytes: 1024 }, {})
+    const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+    expect(markup).toContain(`Starting byte: ${offset}`)
+    expect(markup).toContain('Maximum bytes: 1024')
+  })
+
   it.each(['one\r\ntwo\r\n', '10%\r20%\r', '\r\n😀\r'])(
     'preserves evidence separators in %j',
     (text) => {

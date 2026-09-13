@@ -149,6 +149,8 @@ function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
       <strong>{textField(args.path ?? result.path)}</strong>
+      {typeof args.offset === 'number' && <small>Starting byte: {args.offset}</small>}
+      {typeof args.max_bytes === 'number' && <small>Maximum bytes: {args.max_bytes}</small>}
       {typeof result.content === 'string' ? (
         result.content === '' ? (
           <p>No content in this read</p>
