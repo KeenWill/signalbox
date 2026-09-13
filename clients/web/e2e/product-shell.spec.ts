@@ -1632,7 +1632,7 @@ test('does not run product view hotkeys while the artifact sheet owns focus', as
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
   const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
   await expect(sheet).toBeVisible()
-  await sheet.getByRole('button', { name: 'Close artifact inspector' }).focus()
+  await sheet.getByRole('button', { name: 'Close attachment details' }).focus()
   await page.keyboard.press('Shift+T')
   await page.keyboard.press('Shift+D')
   await page.keyboard.press('Shift+W')
