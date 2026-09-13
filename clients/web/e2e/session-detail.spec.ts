@@ -160,55 +160,50 @@ async function openDetails(
     if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: timelineWindow })
     if (url.pathname.endsWith('/timeline-detail')) {
       reads.push(url)
-      if (url.searchParams.get('first') !== url.searchParams.get('through')) {
-        if (url.searchParams.get('cursor_field') === 'tool_result') {
-          let item = toolResultItem()
-          const prefix = '{"status":"ok"}'
-          const fullText = `${prefix}${' '.repeat(40)}`
-          const offset = Number(url.searchParams.get('cursor_offset'))
-          const next = {
-            ...resultCursor.body,
-            offset_bytes: String(prefix.length),
-          }
-          if (partialResult && item.body.type === 'tool_batch') {
-            item = {
-              ...item,
-              projected_body_bytes: 128 + (offset === 0 ? prefix.length : fullText.length - offset),
-              body: {
-                ...item.body,
-                tools: item.body.tools.map((tool) => ({
-                  ...tool,
-                  evidence:
-                    tool.evidence.type === 'physical_attempt'
-                      ? {
-                          ...tool.evidence,
-                          result: {
-                            text: offset === 0 ? prefix : fullText.slice(offset),
-                            offset_bytes: String(offset),
-                            total_bytes: String(fullText.length),
-                            continuation: offset === 0 ? next : null,
-                          },
-                        }
-                      : tool.evidence,
-                })),
-              },
-            }
-          }
-          return route.fulfill({
-            json: detailPage(
-              [item],
-              partialResult && offset === 0
-                ? { type: 'more_body', body: next }
-                : { type: 'more_at', address: { event_sequence: '3' } },
-            ),
-          })
+      if (url.searchParams.get('cursor_field') === 'tool_result') {
+        let item = toolResultItem()
+        const prefix = '{"status":"ok"}'
+        const fullText = `${prefix}${' '.repeat(40)}`
+        const offset = Number(url.searchParams.get('cursor_offset'))
+        const next = {
+          ...resultCursor.body,
+          offset_bytes: String(prefix.length),
         }
-        if (url.searchParams.get('cursor_address') === '3')
-          return route.fulfill({ json: detailPage(items.slice(2)) })
-        return route.fulfill({ json: detailPage(items.slice(0, 2), resultCursor) })
+        if (partialResult && item.body.type === 'tool_batch') {
+          item = {
+            ...item,
+            projected_body_bytes: 128 + (offset === 0 ? prefix.length : fullText.length - offset),
+            body: {
+              ...item.body,
+              tools: item.body.tools.map((tool) => ({
+                ...tool,
+                evidence:
+                  tool.evidence.type === 'physical_attempt'
+                    ? {
+                        ...tool.evidence,
+                        result: {
+                          text: offset === 0 ? prefix : fullText.slice(offset),
+                          offset_bytes: String(offset),
+                          total_bytes: String(fullText.length),
+                          continuation: offset === 0 ? next : null,
+                        },
+                      }
+                    : tool.evidence,
+              })),
+            },
+          }
+        }
+        return route.fulfill({
+          json: detailPage(
+            [item],
+            partialResult && offset === 0 ? { type: 'more_body', body: next } : null,
+          ),
+        })
       }
       let selected = items.find(
-        (item) => item.address.event_sequence === url.searchParams.get('first'),
+        (item) =>
+          item.address.event_sequence ===
+          (url.searchParams.get('cursor_address') ?? url.searchParams.get('first')),
       )
       if (!selected)
         return route.fulfill({
@@ -383,6 +378,7 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(conversation.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
     'release status --json',
   )
+  await conversation.getByRole('button', { name: 'Read more', exact: true }).click()
   await expect(conversation.getByRole('region', { name: 'Output', exact: true })).toContainText(
     'passed',
   )
@@ -399,9 +395,10 @@ test('reads tool arguments and output in conversation order with events hidden',
           entries.map((entry) => entry.getAttribute('data-event-sequence')),
         ),
     )
-    .toEqual(['1', '2', '2', '4'])
-  await conversation.focus()
-  await expect(conversation).toBeFocused()
+    .toEqual(['1', '2', '4'])
+  const transcript = conversation.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.focus()
+  await expect(transcript).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(toolRow(page)).toBeVisible()
   await page.getByText('Session details', { exact: true }).click()
@@ -468,7 +465,7 @@ test('shows retired goal turns in conversation order with events hidden', async 
           entries.map((entry) => entry.getAttribute('data-event-sequence')),
         ),
     )
-    .toEqual(['1', '2', '2', '4', '5'])
+    .toEqual(['1', '2', '4', '5'])
   await page.screenshot({ path: test.info().outputPath('retired-outcome.png') })
 })
 
@@ -490,13 +487,12 @@ test('labels partial tool payloads and the final continued chunk', async ({ page
   await openDetails(page, false, false, undefined, undefined, true)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
-  const output = conversation.getByRole('region', { name: 'Output', exact: true })
+  await conversation.getByRole('button', { name: 'Read more', exact: true }).click()
+  const tool = conversation.getByRole('region', { name: 'More message text', exact: true })
+  const output = tool.getByRole('region', { name: 'Output', exact: true })
   await expect(output).toContainText('From byte 0 of 55')
   await expect(output).toContainText('"status": "ok"')
-  await expect(
-    conversation.getByRole('region', { name: 'Arguments', exact: true }),
-  ).not.toContainText('From byte')
-  await page.getByRole('button', { name: 'Next text page', exact: true }).click()
+  await tool.getByRole('button', { name: 'Continue reading', exact: true }).click()
   await expect(output).toContainText('From byte 15 of 55')
 })
 

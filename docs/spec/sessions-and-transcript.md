@@ -562,21 +562,53 @@ wait. The session synchronization service owns the selected stream and publishes
 its phase, monotonic cursor, and live projection to application state. Only the
 open workspace requests a follow subscription, and closing it cancels that
 subscription. Transcript text reads require the bounded timeline-detail
-capability and replace pages of at most eight items and 65,536 projected bytes,
-clamped to the advertised limits, with exact byte accounting and continuation
-matching. Pagination resets when the session, window bounds, or observation
-cursor changes; the response bound includes their attachment references. Text
-pages advance past metadata-only detail records automatically within the
-workspace record budget and projected-byte page budget; discarded records
-consume both budgets. The scan and retained-content item budgets are clamped
-independently to the advertised limit. The continuation remains available when
-either budget is exhausted. An empty detail page stops the scan and preserves
-its unreturned-item continuation. The conversation shows user and assistant text
-and attachment references, tool arguments and output, and unsuccessful turn
-outcomes in event order. Repeated terminal outcomes for the same turn and cause
-appear once. Bookkeeping is hidden until Events is selected. The last bounded
-raw detail page is retained separately from conversation content to validate
-body continuations.
+capability. The virtual transcript retains three neighboring keyset windows,
+each with at most eight headers and a shared detail budget of eight items and
+65,536 projected bytes, clamped to the advertised limits. Each header receives
+an equal share of the detail budget; unread body continuations remain available
+on demand. Attachment references are included in the response bound. Scrolling
+loads earlier or later windows. Loading a later window preserves the reading
+position even when that window reaches the actual tail; it does not
+automatically request the remaining history. Following live growth resumes when
+the reader scrolls to that tail. Session and anchor changes reset the view;
+observation refreshes retain visible text while rereading loaded windows, or
+refresh from latest when following the confirmed actual timeline tail. Following
+continues when a refresh replaces the entire retained window, even if the prior
+tail row is absent. User-driven backward navigation clears that tail intent;
+automatic scans through hidden tail records preserve it. Refreshing from latest
+resets automatic scanning to the earlier direction with a fresh scan budget.
+Refreshes continue retaining current text through a failed reread. The
+session-scoped reader rejects detail kinds that contradict their timeline
+headers and compares immutable detail facts, including identities, attachment
+references and excerpt byte totals and overlapping excerpt content, across
+initial reads. It retains facts for at most 24 recently read event addresses;
+changed excerpt lengths under different read budgets preserve compatible
+prefixes and retain the longest checked excerpt.
+
+Windows advance past metadata-only detail records in the requested direction
+automatically within the workspace record budget and projected-byte budget. All
+returned headers, detail items and projected bytes are charged, including
+discarded records. The scan item budget is clamped to the advertised detail
+limit; each automatic read uses only the remaining scan allowance. Scanning
+stops at a visible item, a detail continuation, or an exhausted budget. Rapid
+edge events share one in-flight page read. Programmatic anchor and measurement
+adjustments do not start page reads. Prepending rows does not trigger selection
+scrolling when the selected row identity stays unchanged; a changed selection
+scrolls into view once its row is available. An empty detail page preserves its
+unreturned-item continuation. Hidden non-tool details with a body continuation
+retain an addressable reading row; opening it shows the requested excerpt. Open
+readers retain their cursor, current page and validation predecessor above
+virtual rows until closed or evicted from the retained windows. A row containing
+the focused control stays mounted. Failed loads show the failure without an
+empty-conversation message. Retrying a failed edge read repeats that earlier or
+later request with its remaining scan allowance; success or a fresh scroll
+releases that allowance. Other failures retry the retained read. Scrolling again
+starts a fresh bounded scan using the timeline continuation. The conversation
+shows user and assistant text and attachment references, tool arguments and
+output, and unsuccessful turn outcomes in event order. Repeated terminal
+outcomes for the same turn and cause appear once. Bookkeeping is hidden until
+Events is selected. Raw detail pages remain available to validate body
+continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

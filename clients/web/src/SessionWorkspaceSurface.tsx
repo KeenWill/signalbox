@@ -647,12 +647,14 @@ export function SessionWorkspaceSurface({
             </div>
           </header>
           <section
-            ref={showEvents ? undefined : timelineRef}
-            tabIndex={showEvents ? -1 : 0}
+            ref={!showEvents && !transcriptAvailable ? timelineRef : undefined}
+            tabIndex={!showEvents && !transcriptAvailable ? 0 : undefined}
             aria-label="Conversation"
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
+                scrollRef={showEvents ? undefined : timelineRef}
+                anchor={displayedSession.anchor}
                 sessionId={sessionId ?? ''}
                 first={
                   displayedSession.window.items[0]?.address.event_sequence ??
