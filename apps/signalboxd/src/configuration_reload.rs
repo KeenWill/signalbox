@@ -1219,6 +1219,46 @@ mod tests {
         (directory, reload)
     }
 
+    #[tokio::test]
+    async fn replacement_loads_the_selected_judgment_template() {
+        let (_directory, reload) = fixture();
+        let mut source = include_str!("../../../config/session-templates.example.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("example templates");
+        std::fs::write(&reload.template_path, source.to_string()).expect("default library");
+        let original = reload.read_replacement().expect("default judgment catalog");
+        source["review_library"]["judgment_template"] =
+            toml_edit::value("review-judgment-agentic-full");
+        std::fs::write(&reload.template_path, source.to_string()).expect("selected judgment");
+
+        let replacement = reload
+            .read_replacement()
+            .expect("judgment selection reloads");
+
+        assert_eq!(
+            original
+                .templates
+                .review_judgment_template_name()
+                .unwrap()
+                .as_str(),
+            "review-judgment",
+        );
+        assert_eq!(
+            replacement
+                .templates
+                .review_judgment_template_name()
+                .unwrap()
+                .as_str(),
+            "review-judgment-agentic-full",
+        );
+        source["review_library"]["judgment_template"] = toml_edit::value("missing-judge");
+        std::fs::write(&reload.template_path, source.to_string()).expect("invalid selection");
+        assert!(
+            reload.read_replacement().is_err(),
+            "unknown judge must reject reload"
+        );
+    }
+
     // Arbitrary template name and prompt text for the save integration fixtures.
     const SAVE_NAME: &str = "save-template";
     const SAVE_PROMPT: &str = "Initial instructions.";

@@ -451,6 +451,10 @@ pub struct ValidatedRunnerRegistrationReconstitutionInput {
 pub struct RunnerLeaseCorrelation {
     pub lease: RunnerLeaseId,
     pub runner: RunnerId,
+    pub registration_revision: RunnerGeneration,
+    pub placement_revision: RunnerGeneration,
+    pub working_directory: RunnerWorkingDirectory,
+    pub sandbox: RunnerSandboxProfile,
     pub tool: ToolName,
     pub dispatch: ToolAttemptDispatchCorrelation,
     pub generation: RunnerGeneration,
@@ -513,6 +517,7 @@ impl RunnerLease {
     pub const fn generation(&self) -> RunnerGeneration;
     pub const fn attempt(&self) -> ToolAttemptId;
     pub const fn tool(&self) -> &ToolName;
+    pub const fn arguments(&self) -> &NormalizedToolArguments;
     pub const fn credential_authorization(
         &self,
     ) -> option::Option<&CredentialDispatchAuthorization>;
@@ -556,7 +561,12 @@ pub struct RunnerLeaseReconstitutionInput {
     pub lease: RunnerLeaseId,
     pub dispatch: ToolAttemptDispatchCorrelation,
     pub runner: RunnerId,
+    pub registration_revision: RunnerGeneration,
+    pub placement_revision: RunnerGeneration,
+    pub working_directory: RunnerWorkingDirectory,
+    pub sandbox: RunnerSandboxProfile,
     pub tool: ToolName,
+    pub arguments: NormalizedToolArguments,
     pub effect: RunnerToolEffectClass,
     pub credential_authorization: option::Option<CredentialDispatchAuthorization>,
     pub generation: RunnerGeneration,
@@ -564,6 +574,7 @@ pub struct RunnerLeaseReconstitutionInput {
     pub recorded_correlation: RunnerLeaseCorrelation,
     pub recorded_session: SessionId,
     pub recorded_effect: RunnerToolEffectClass,
+    pub recorded_arguments: NormalizedToolArguments,
     pub recorded_credential_authorization: option::Option<CredentialDispatchAuthorization>,
     pub recorded_state: RunnerLeaseState,
     pub retry_preparation: RunnerLeaseRetryPreparation,

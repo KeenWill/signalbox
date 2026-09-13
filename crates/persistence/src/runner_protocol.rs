@@ -16,18 +16,19 @@ use signalbox_domain::{
     AbandonedRunnerPlacement, CanonicalCloneUrlDigest, CredentialDispatchAuthorization,
     CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState,
     CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval, EndedToolAttempt,
-    LostPinnedRunnerPlacement, PinnedRunnerPlacement, ProvisionedWorkspace, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
-    RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
-    RunnerEnrollmentReconstitutionInput, RunnerEnrollmentState, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseLoss,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
-    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPrePinReplacementHistory, RunnerRepositoryEntry, RunnerSandboxProfile, RunnerSelector,
-    RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
-    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
-    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolAdmissibleLoci,
+    LostPinnedRunnerPlacement, NormalizedToolArguments, PinnedRunnerPlacement,
+    ProvisionedWorkspace, RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass,
+    RunnerCatalog, RunnerClaimedAttemptReplacement, RunnerCredentialGrantLineage,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentReconstitutionInput,
+    RunnerEnrollmentState, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
+    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
+    RunnerPlacementReconstitutionHistory, RunnerPrePinReplacementHistory, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
+    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, ToolAdmissibleLoci, ToolArgumentsKind,
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
     ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
@@ -40,6 +41,9 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, ty
 
 pub use signalbox_domain::RunnerEnrollmentRequestId;
 
+mod dispatch;
+mod resume;
+pub use resume::{RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome};
 mod provisioning;
 mod recovery;
 pub mod status;
@@ -223,9 +227,9 @@ pub enum RunnerConnectionTransition {
     HeartbeatRecovered,
     /// Records the first missed heartbeat interval.
     HeartbeatMissed,
-    /// Records hub-initiated clean shutdown.
+    /// Records hub shutdown, losing the connection when a lease remains unsettled.
     DaemonShutdown,
-    /// Records runner-initiated clean shutdown.
+    /// Records runner shutdown, losing the connection when a lease remains unsettled.
     RunnerShutdown,
     /// Records terminal heartbeat loss.
     HeartbeatTimeout,
@@ -779,6 +783,30 @@ impl RunnerProtocolStore {
                 RunnerConnectionTransitionOutcome::Current(current),
             ));
         }
+        let transition = if matches!(
+            transition,
+            RunnerConnectionTransition::DaemonShutdown | RunnerConnectionTransition::RunnerShutdown
+        ) && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                    SELECT 1 FROM runner_lease_generation AS generation
+                    JOIN runner_current_lease_event AS head
+                      ON head.lease_id = generation.lease_id
+                     AND head.generation = generation.generation
+                    JOIN runner_lease_event AS event
+                      ON event.lease_id = head.lease_id
+                     AND event.generation = head.generation
+                     AND event.event_ordinal = head.event_ordinal
+                    WHERE generation.registration_enrollment_id = $1
+                      AND event.state_kind IN ('offered', 'claimed'))",
+        )
+        .bind(enrollment.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?
+        {
+            RunnerConnectionTransition::TransportClosed
+        } else {
+            transition
+        };
         let event_ordinal = NonZeroU64::new(
             current
                 .event_ordinal()
@@ -1948,6 +1976,18 @@ impl RunnerProtocolStore {
         pin: &SessionRunnerPin,
         registration: &StoredValidatedRunnerRegistration,
     ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.store_pin_in(&mut transaction, pin, registration)
+            .await?;
+        commit_mutation(transaction).await
+    }
+
+    async fn store_pin_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        pin: &SessionRunnerPin,
+        registration: &StoredValidatedRunnerRegistration,
+    ) -> Result<(), RunnerProtocolStoreError> {
         validate_placement_snapshot(
             &pin.placement,
             Some(registration),
@@ -1959,12 +1999,11 @@ impl RunnerProtocolStore {
                 RunnerDomainError::InvalidState,
             ));
         }
-        let mut transaction = self.pool.begin().await?;
-        lock_runner_placement_loss_baseline(&mut transaction, &pin.placement).await?;
+        lock_runner_placement_loss_baseline(transaction, &pin.placement).await?;
         let enrollment = registration.registration().enrollment();
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment.into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
         if locked.is_none() {
             return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
@@ -1975,7 +2014,7 @@ impl RunnerProtocolStore {
               WHERE enrollment_id = $1",
         )
         .bind(enrollment.into_uuid())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         match decode_enrollment_state(&enrollment_state)? {
             RunnerEnrollmentState::Active => {}
@@ -2005,7 +2044,7 @@ impl RunnerProtocolStore {
         }
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(pin.placement.session().into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
         let event_ordinal = prior
             .as_ref()
@@ -2022,7 +2061,7 @@ impl RunnerProtocolStore {
         }
         let grant_origin = placement_grant_origin(prior.as_ref(), event_ordinal, &pin.placement)?;
         insert_placement_record(
-            &mut transaction,
+            transaction,
             event_ordinal,
             event_kind,
             &pin.placement,
@@ -2033,7 +2072,7 @@ impl RunnerProtocolStore {
         .await?;
         if let Some(grant) = pin.grant.as_ref() {
             insert_grant_if_new(
-                &mut transaction,
+                transaction,
                 prior.as_ref(),
                 event_ordinal,
                 &pin.placement,
@@ -2055,9 +2094,9 @@ impl RunnerProtocolStore {
         )
         .bind(pin.placement.session().into_uuid())
         .bind(Decimal::from(event_ordinal))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        insert_lease_generation(&mut transaction, &pin.lease).await?;
+        insert_lease_generation(transaction, &pin.lease).await?;
         let correlation = pin.lease.correlation();
         sqlx::query(
             "INSERT INTO runner_lease_event
@@ -2066,7 +2105,7 @@ impl RunnerProtocolStore {
         )
         .bind(correlation.lease.into_uuid())
         .bind(Decimal::from(correlation.generation.get()))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "INSERT INTO runner_current_lease_event
@@ -2075,9 +2114,9 @@ impl RunnerProtocolStore {
         )
         .bind(correlation.lease.into_uuid())
         .bind(Decimal::from(correlation.generation.get()))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        commit_mutation(transaction).await
+        Ok(())
     }
 
     /// Loads and reconstitutes the current placement and selected grant.
@@ -2839,6 +2878,8 @@ impl RunnerProtocolStore {
         let row = sqlx::query(
             "SELECT lease_generation.*, event.state_kind,
                     request.tool_name AS canonical_attempt_tool,
+                    request.arguments_kind AS canonical_arguments_kind,
+                    request.arguments_text AS canonical_arguments_text,
                     attempt.turn_id AS canonical_attempt_turn,
                     attempt.issuing_turn_attempt_id
                         AS canonical_issuing_attempt,
@@ -2847,6 +2888,9 @@ impl RunnerProtocolStore {
                         AS canonical_dispatch_generation,
                     placement.state_kind AS canonical_placement_state,
                     placement.pinned_runner_id AS canonical_placement_runner,
+                    placement.placement_revision AS canonical_placement_revision,
+                    placement.pinned_working_directory AS canonical_working_directory,
+                    placement.requested_sandbox_profile AS canonical_sandbox_profile,
                     placement.registration_enrollment_id
                         AS canonical_registration_enrollment,
                     placement.registration_revision
@@ -2893,7 +2937,7 @@ impl RunnerProtocolStore {
         let registration = load_registration_in(
             transaction.as_mut(),
             runner_enrollment_id(row.decode_column("registration_enrollment_id")?),
-            decode_registration_revision(row.decode_column("registration_revision")?)?,
+            decode_registration_revision(row.decode_column("offer_registration_revision")?)?,
             None,
             &self.catalog,
         )
@@ -2926,6 +2970,7 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(generation.get()))
         .fetch_optional(transaction.as_mut())
         .await?;
+        let lease_correlation = loaded.correlation();
         let no_execution = row
             .map(|row| {
                 let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
@@ -2945,6 +2990,10 @@ impl RunnerProtocolStore {
                 Ok::<_, RunnerProtocolStoreError>(RunnerLeaseCorrelation {
                     lease: runner_lease_id(row.decode_column("lease_id")?),
                     runner: runner_id(row.decode_column("runner_id")?),
+                    registration_revision: lease_correlation.registration_revision,
+                    placement_revision: lease_correlation.placement_revision,
+                    working_directory: lease_correlation.working_directory.clone(),
+                    sandbox: lease_correlation.sandbox,
                     tool: tool_name(row.decode_column("tool_name")?)?,
                     dispatch,
                     generation: decode_generation(row.decode_column("generation")?)?,
@@ -6379,17 +6428,22 @@ async fn insert_lease_generation(
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
     let canonical_dispatch = sqlx::query(
-        "SELECT session_id, turn_id, issuing_turn_attempt_id,
-                request_id, dispatch_generation
-           FROM tool_attempt
-          WHERE attempt_id = $1",
+        "SELECT attempt.session_id, attempt.turn_id, attempt.issuing_turn_attempt_id,
+                attempt.request_id, attempt.dispatch_generation,
+                request.arguments_text, request.arguments_kind
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request ON request.request_id = attempt.request_id
+          WHERE attempt.attempt_id = $1",
     )
     .bind(correlation.dispatch.attempt().into_uuid())
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
-    if canonical_dispatch.decode_column::<Uuid>("session_id")?
-        != correlation.dispatch.session().into_uuid()
+    if canonical_dispatch.decode_column::<String>("arguments_kind")? != "json"
+        || canonical_dispatch.decode_column::<String>("arguments_text")?
+            != lease.arguments().as_str()
+        || canonical_dispatch.decode_column::<Uuid>("session_id")?
+            != correlation.dispatch.session().into_uuid()
         || canonical_dispatch.decode_column::<Uuid>("turn_id")?
             != correlation.dispatch.turn().into_uuid()
         || canonical_dispatch.decode_column::<Uuid>("issuing_turn_attempt_id")?
@@ -6429,7 +6483,16 @@ async fn insert_lease_generation(
     let placement_runner = placement
         .decode_column::<Option<Uuid>>("pinned_runner_id")?
         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
-    if placement_runner != lease.runner().into_uuid() {
+    if placement_runner != lease.runner().into_uuid()
+        || decode_generation(placement.decode_column("placement_revision")?)?
+            != correlation.placement_revision
+        || placement
+            .decode_column::<Option<String>>("pinned_working_directory")?
+            .as_deref()
+            != Some(correlation.working_directory.as_str())
+        || decode_sandbox(placement.decode_column("requested_sandbox_profile")?)?
+            != correlation.sandbox
+    {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let enrollment = placement
@@ -6437,6 +6500,16 @@ async fn insert_lease_generation(
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
     if enrollment != observed_enrollment {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let current_revision = sqlx::query_scalar::<_, Decimal>(RUNNER_REGISTRATION_HEAD)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    if decode_generation(current_revision)? != correlation.registration_revision {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::RegistrationChanged,
+        ));
     }
     let authorization = lease.credential_authorization();
     let authorization_origin = match authorization {
@@ -6603,11 +6676,43 @@ fn decode_lease(
         }
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
+    let registration_revision =
+        decode_generation(row.decode_column("offer_registration_revision")?)?;
+    let placement_revision = decode_generation(
+        row.decode_column::<Option<Decimal>>("canonical_placement_revision")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )?;
+    let directory = working_directory(
+        row.decode_column::<Option<String>>("canonical_working_directory")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )?;
+    let sandbox = decode_sandbox(
+        row.decode_column::<Option<String>>("canonical_sandbox_profile")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?,
+    )?;
+    if row
+        .decode_column::<Option<String>>("canonical_arguments_kind")?
+        .as_deref()
+        != Some("json")
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let arguments = NormalizedToolArguments::try_from_stored(
+        ToolArgumentsKind::Json,
+        row.decode_column::<Option<String>>("canonical_arguments_text")?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?,
+    )
+    .map_err(|_| RunnerProtocolCorruption::CrossWiredReference)?;
     RunnerLease::reconstitute(
         RunnerLeaseReconstitutionInput {
             lease,
             dispatch,
             runner,
+            registration_revision,
+            placement_revision,
+            working_directory: directory.clone(),
+            sandbox,
+            arguments: arguments.clone(),
             tool: tool.clone(),
             effect: decode_effect(row.decode_column("effect_class")?)?,
             credential_authorization: authorization.clone(),
@@ -6616,11 +6721,16 @@ fn decode_lease(
             recorded_correlation: RunnerLeaseCorrelation {
                 lease,
                 runner: runner_id(canonical_runner),
+                registration_revision,
+                placement_revision,
+                working_directory: directory,
+                sandbox,
                 tool: tool_name(canonical_tool)?,
                 dispatch,
                 generation,
             },
             recorded_session: session,
+            recorded_arguments: arguments,
             recorded_effect: decode_effect(row.decode_column("effect_class")?)?,
             recorded_credential_authorization: authorization.clone(),
             recorded_state: decode_lease_state(row.decode_column("state_kind")?)?,

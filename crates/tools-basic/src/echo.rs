@@ -120,6 +120,14 @@ impl ToolArgumentValidator for EchoArgumentValidator {
 #[derive(Clone, Copy, Debug)]
 pub struct EchoExecutor;
 
+impl EchoExecutor {
+    /// Evaluates the pure tool without transport or dispatch authority.
+    pub fn evaluate(arguments: &NormalizedToolArguments) -> Result<&str, EchoExecutorError> {
+        decode_arguments(arguments).map_err(|_| EchoExecutorError)?;
+        Ok(arguments.as_str())
+    }
+}
+
 #[derive(signalbox_derive::OperatorError)]
 #[error("echo argument validation drifted")]
 /// A checked catalog/executor assumption failed inside `echo`.
@@ -156,9 +164,8 @@ fn decode_arguments(arguments: &NormalizedToolArguments) -> Result<(), InvalidEc
 fn echo_evidence(
     arguments: &NormalizedToolArguments,
 ) -> Result<ToolExecutorEvidence, EchoExecutorError> {
-    decode_arguments(arguments).map_err(|_| EchoExecutorError)?;
     Ok(ToolExecutorEvidence::CompletedText(
-        arguments.as_str().to_owned(),
+        EchoExecutor::evaluate(arguments)?.to_owned(),
     ))
 }
 

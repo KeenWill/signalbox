@@ -11,9 +11,11 @@ use std::{
 
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
-    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest, Enroll,
-    Frame, FrameError, Heartbeat, HeartbeatAck, MAX_FRAME_BYTES, Message, PositiveU64, Registered,
-    Rejected, RejectionCode, Resume, Shutdown, ShutdownReason, ValueError, advertisement_digest,
+    Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest,
+    DirectiveAction, EffectClass, Enroll, Frame, FrameError, Heartbeat, HeartbeatAck, LeaseClaim,
+    LeaseCorrelation, LeaseOffer, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
+    PositiveU64, Registered, Rejected, RejectionCode, ResultFrame, Resume, RetainedResult,
+    SandboxProfile, Shutdown, ShutdownReason, TerminalResult, ValueError, advertisement_digest,
     decode_line, encode_line,
 };
 use tokio::{
@@ -353,6 +355,7 @@ pub enum ProtocolViolation {
     InvalidShutdownReason,
     PendingRegistrationMutation,
     ConnectionCorrelationMismatch,
+    LeaseMismatch,
 }
 
 impl fmt::Display for ProtocolViolation {
@@ -395,6 +398,9 @@ impl fmt::Display for ProtocolViolation {
                 "resume changed advertisement without advancing registration revision {}",
                 revision.get()
             ),
+            Self::LeaseMismatch => {
+                formatter.write_str("lease frame does not match retained execution authority")
+            }
             Self::ResumeDirectives => {
                 formatter.write_str("resume directives do not match the sent inventory")
             }
@@ -515,11 +521,50 @@ impl RunnerConnectionError {
 /// Established serial runner connection and exact active receipt.
 pub struct RunnerConnection<S> {
     io: BufReader<S>,
+    receive_buffer: Vec<u8>,
+    pending_offer: Option<LeaseOffer>,
+    resumed_lease: Option<LeaseCorrelation>,
+    execution: Option<RunnerExecution>,
+    last_recorded: Option<LeaseCorrelation>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
     connection_epoch: PositiveU64,
     heartbeat: Option<HeartbeatExchange>,
+}
+
+enum RunnerEvent {
+    Message(Message),
+    Result(RetainedResult),
+}
+
+struct RunnerExecution {
+    correlation: LeaseCorrelation,
+    task: tokio::task::JoinHandle<signalbox_domain::ToolAttemptEnd>,
+}
+
+impl Drop for RunnerExecution {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn execution_finished(
+    execution: &mut Option<RunnerExecution>,
+) -> Result<RetainedResult, RunnerConnectionError> {
+    let Some(execution) = execution else {
+        return std::future::pending().await;
+    };
+    let end = (&mut execution.task).await.map_err(|_| lease_mismatch())?;
+    let result = TerminalResult::from_attempt_end(&end).map_err(|_| lease_mismatch())?;
+    Ok(RetainedResult {
+        correlation: execution.correlation.clone(),
+        result,
+    })
+}
+
+fn lease_mismatch() -> RunnerConnectionError {
+    RunnerConnectionError::Violation(ProtocolViolation::LeaseMismatch)
 }
 
 #[derive(Clone)]
@@ -541,6 +586,7 @@ where
         let digest = advertisement_digest(advertisement)
             .map_err(RunnerConnectionError::InvalidLocalFrame)?;
         let mut io = BufReader::new(stream);
+        let mut resumed_lease = None;
         let (receipt, outcome, connection_epoch) = match state.state().clone() {
             RunnerState::Pristine { request_id } => {
                 send_message(
@@ -605,7 +651,51 @@ where
                         },
                     ));
                 }
+                if let Some(directive) = &resumed.directives.lease {
+                    match directive.action {
+                        DirectiveAction::Await
+                            if inventory.result.is_none()
+                                && inventory.lease.as_ref().is_some_and(|lease| {
+                                    matches!(
+                                        lease.phase,
+                                        LeasePhaseKind::WaitingDispatch
+                                            | LeasePhaseKind::DispatchReceived
+                                    )
+                                }) =>
+                        {
+                            resumed_lease = Some(directive.correlation.clone());
+                        }
+                        DirectiveAction::DiscardAsRecorded
+                            if resumed.directives.result.as_ref().is_some_and(|result| {
+                                result.action == DirectiveAction::DiscardAsRecorded
+                            }) =>
+                        {
+                            state.acknowledge_terminal_result(&directive.correlation)?;
+                        }
+                        DirectiveAction::FailStale
+                            if resumed.directives.result.as_ref().is_none_or(|result| {
+                                result.action == DirectiveAction::FailStale
+                            }) =>
+                        {
+                            state.discard_reconciled_lease(&directive.correlation)?;
+                        }
+                        _ => {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::ResumeDirectives,
+                            ));
+                        }
+                    }
+                }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
+                if let Some(correlation) = &resumed_lease {
+                    send_message(
+                        &mut io,
+                        Message::LeaseClaim(LeaseClaim {
+                            correlation: correlation.clone(),
+                        }),
+                    )
+                    .await?;
+                }
                 (
                     receipt,
                     EnrollmentOutcome::Resumed,
@@ -615,6 +705,11 @@ where
         };
         Ok(Self {
             io,
+            receive_buffer: Vec::new(),
+            pending_offer: None,
+            resumed_lease,
+            execution: None,
+            last_recorded: None,
             receipt,
             advertisement: advertisement.clone(),
             outcome,
@@ -704,7 +799,7 @@ where
         Ok(())
     }
 
-    /// Serves heartbeats and fails closed every other post-registration frame.
+    /// Serves liveness and the serial pure-tool lease machine.
     pub async fn serve(
         &mut self,
         state: &mut RunnerStateRoot,
@@ -716,7 +811,7 @@ where
         }
     }
 
-    /// Serves until the connection ends or local shutdown reaches a clean frame boundary.
+    /// Drains admitted execution and its acknowledgement before local shutdown.
     pub async fn serve_until_shutdown<F>(
         &mut self,
         state: &mut RunnerStateRoot,
@@ -726,24 +821,62 @@ where
         F: Future<Output = ()>,
     {
         tokio::pin!(shutdown);
+        let mut shutdown_requested = false;
         loop {
-            let message = tokio::select! {
-                message = receive_message(&mut self.io) => message?,
-                () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
+            if shutdown_requested && !self.has_unsettled_lease(state) {
+                return Ok(ServeOutcome::ShutdownReady);
+            }
+            let event = tokio::select! {
+                event = self.receive_event() => event?,
+                () = &mut shutdown, if !shutdown_requested => {
+                    shutdown_requested = true;
+                    continue;
+                },
             };
-            if let Some(end) = self.serve_message(state, message).await? {
+            if let Some(end) = self.serve_event(state, event).await? {
                 return Ok(ServeOutcome::ConnectionEnded(end));
             }
         }
     }
 
-    /// Handles one complete daemon frame; exposed for hermetic protocol harnesses.
+    fn has_unsettled_lease(&self, state: &RunnerStateRoot) -> bool {
+        let inventory = state.reconnect_inventory();
+        self.pending_offer.is_some()
+            || self.execution.is_some()
+            || inventory.lease.is_some()
+            || inventory.result.is_some()
+    }
+
+    /// Handles one complete daemon frame or completed child result.
     pub async fn serve_one(
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
-        let message = receive_message(&mut self.io).await?;
-        self.serve_message(state, message).await
+        let event = self.receive_event().await?;
+        self.serve_event(state, event).await
+    }
+
+    async fn receive_event(&mut self) -> Result<RunnerEvent, RunnerConnectionError> {
+        tokio::select! {
+            message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => message.map(RunnerEvent::Message),
+            result = execution_finished(&mut self.execution) => result.map(RunnerEvent::Result),
+        }
+    }
+
+    async fn serve_event(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        event: RunnerEvent,
+    ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
+        match event {
+            RunnerEvent::Message(message) => self.serve_message(state, message).await,
+            RunnerEvent::Result(result) => {
+                state.record_terminal_result(result)?;
+                self.execution = None;
+                self.send_retained_result(state).await?;
+                Ok(None)
+            }
+        }
     }
 
     async fn serve_message(
@@ -774,6 +907,7 @@ where
             Message::Heartbeat(challenge) => {
                 let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
+                self.send_retained_result(state).await?;
                 Ok(None)
             }
             Message::Shutdown(shutdown)
@@ -827,9 +961,99 @@ where
                     offer.correlation.runner_id,
                     offer.correlation.registration_revision,
                 )?;
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                if self.pending_offer.is_some()
+                    || state.reconnect_inventory().lease.is_some()
+                    || offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
+                    || self
+                        .advertisement
+                        .tools
+                        .binary_search(&offer.correlation.tool_name)
+                        .is_err()
+                    || offer.effect_class != EffectClass::Pure
+                    || offer.correlation.sandbox_profile != SandboxProfile::Ambient
+                    || !self
+                        .advertisement
+                        .sandbox_profiles
+                        .contains(&SandboxProfile::Ambient)
+                    || offer.credential_profile.as_ref().is_some_and(|profile| {
+                        !self.advertisement.credential_profiles.contains(profile)
+                    })
+                {
+                    return Err(lease_mismatch());
+                }
+                let arguments = signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+                    offer.normalized_arguments.to_string(),
+                )
+                .map_err(|_| lease_mismatch())?;
+                signalbox_tools_basic::EchoExecutor::evaluate(&arguments)
+                    .map_err(|_| lease_mismatch())?;
+                let correlation = offer.correlation.clone();
+                self.pending_offer = Some(offer);
+                send_message(
+                    &mut self.io,
+                    Message::LeaseClaim(LeaseClaim { correlation }),
+                )
+                .await?;
+                Ok(None)
+            }
+            Message::LeaseClaimed(claimed) => {
+                if self.resumed_lease.as_ref() == Some(&claimed.correlation) {
+                    return Ok(None);
+                }
+                if !self
+                    .pending_offer
+                    .as_ref()
+                    .is_some_and(|offer| offer.correlation == claimed.correlation)
+                {
+                    return Err(lease_mismatch());
+                }
+                state.record_lease_phase(LeasePhase {
+                    correlation: claimed.correlation,
+                    phase: LeasePhaseKind::WaitingDispatch,
+                })?;
+                Ok(None)
+            }
+            Message::Dispatch(dispatch) => {
+                let inventory = state.reconnect_inventory();
+                let resumed = self.resumed_lease.as_ref() == Some(&dispatch.correlation);
+                if self.execution.is_some()
+                    || !(resumed
+                        || self.pending_offer.as_ref().is_some_and(|offer| {
+                            offer.correlation == dispatch.correlation
+                                && offer.normalized_arguments == dispatch.normalized_arguments
+                        }))
+                    || !inventory.lease.as_ref().is_some_and(|lease| {
+                        lease.correlation == dispatch.correlation
+                            && (lease.phase == LeasePhaseKind::WaitingDispatch
+                                || (resumed && lease.phase == LeasePhaseKind::DispatchReceived))
+                    })
+                    || inventory.result.is_some()
+                {
+                    return Err(lease_mismatch());
+                }
+                state.record_lease_phase(LeasePhase {
+                    correlation: dispatch.correlation.clone(),
+                    phase: LeasePhaseKind::DispatchReceived,
+                })?;
+                state.record_lease_phase(LeasePhase {
+                    correlation: dispatch.correlation.clone(),
+                    phase: LeasePhaseKind::ExecutionMayHaveStarted,
+                })?;
+                self.execution = Some(RunnerExecution {
+                    correlation: dispatch.correlation.clone(),
+                    task: tokio::spawn(crate::executor::execute(dispatch)),
+                });
+                self.resumed_lease = None;
+                Ok(None)
+            }
+            Message::ResultRecorded(recorded) => {
+                if self.last_recorded.as_ref() == Some(&recorded.correlation) {
+                    return Ok(None);
+                }
+                state.acknowledge_terminal_result(&recorded.correlation)?;
+                self.last_recorded = Some(recorded.correlation);
+                self.pending_offer = None;
+                Ok(None)
             }
             Message::Rejected(rejected) => Err(rejected_error(rejected)),
             other => Err(RunnerConnectionError::Violation(
@@ -839,6 +1063,23 @@ where
                 },
             )),
         }
+    }
+
+    async fn send_retained_result(
+        &mut self,
+        state: &RunnerStateRoot,
+    ) -> Result<(), RunnerConnectionError> {
+        if let Some(result) = state.reconnect_inventory().result {
+            send_message(
+                &mut self.io,
+                Message::Result(ResultFrame {
+                    correlation: result.correlation,
+                    result: result.result,
+                }),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     fn heartbeat_acknowledgement(
@@ -1052,19 +1293,34 @@ async fn receive_message<S>(io: &mut BufReader<S>) -> Result<Message, RunnerConn
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut line = Vec::new();
-    let mut bounded = io.take((MAX_FRAME_BYTES + 1) as u64);
+    receive_message_buffered(io, &mut Vec::new()).await
+}
+
+async fn receive_message_buffered<S>(
+    io: &mut BufReader<S>,
+    line: &mut Vec<u8>,
+) -> Result<Message, RunnerConnectionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let remaining = (MAX_FRAME_BYTES + 1).saturating_sub(line.len());
+    let mut bounded = io.take(remaining as u64);
     let bytes = bounded
-        .read_until(b'\n', &mut line)
+        .read_until(b'\n', line)
         .await
         .map_err(RunnerConnectionError::Read)?;
     if bytes == 0 {
         return Err(RunnerConnectionError::PeerClosed);
     }
-    decode_line(&line)
+    let decoded = decode_line(line)
         .map(|frame| frame.message)
-        .map_err(RunnerConnectionError::Decode)
+        .map_err(RunnerConnectionError::Decode);
+    line.clear();
+    decoded
 }
+
+#[cfg(test)]
+mod lease_tests;
 
 #[cfg(test)]
 mod tests {

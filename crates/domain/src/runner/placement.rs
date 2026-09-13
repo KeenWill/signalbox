@@ -20,8 +20,8 @@ use super::names::{
     WorkspaceRepositoryKey,
 };
 use crate::{
-    RunnerId, SessionId, ToolAttemptDispatchCorrelation, ToolDecisionSource, ToolName,
-    WorkspaceManifestId,
+    NormalizedToolArguments, RunnerId, SessionId, ToolAttemptDispatchCorrelation,
+    ToolDecisionSource, ToolName, WorkspaceManifestId,
 };
 use std::collections::BTreeSet;
 
@@ -315,7 +315,7 @@ impl SessionRunnerPlacement {
         offer: RunnerLeaseOfferRequest,
     ) -> Result<RunnerLease, RunnerDomainError> {
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &offer.tool)?;
-        let (attempt, retry_evidence) = validate_authorized_attempt(
+        let (attempt, arguments, retry_evidence) = validate_authorized_attempt(
             self.session,
             &offer.tool,
             dispatch.effect,
@@ -329,6 +329,11 @@ impl SessionRunnerPlacement {
             lease: offer.lease,
             dispatch: attempt,
             runner: dispatch.runner,
+            registration_revision: dispatch.registration_revision,
+            placement_revision: dispatch.placement_revision,
+            working_directory: dispatch.working_directory,
+            sandbox: dispatch.sandbox,
+            arguments,
             tool: offer.tool,
             effect: dispatch.effect,
             credential_authorization: dispatch.credential_authorization,
@@ -354,18 +359,25 @@ impl SessionRunnerPlacement {
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &lost.tool)?;
         if lost.dispatch.session() != self.session
             || lost.runner != dispatch.runner
+            || lost.registration_revision != dispatch.registration_revision
+            || lost.placement_revision != dispatch.placement_revision
+            || lost.working_directory != dispatch.working_directory
+            || lost.sandbox != dispatch.sandbox
             || lost.effect != dispatch.effect
             || lost.credential_authorization != dispatch.credential_authorization
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
-        let (attempt, retry_evidence) = validate_authorized_attempt(
+        let (attempt, arguments, retry_evidence) = validate_authorized_attempt(
             self.session,
             &lost.tool,
             dispatch.effect,
             dispatch.approval,
             authorization,
         )?;
+        if lost.arguments != arguments {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
         match (retry.claimed_attempt, retry_evidence) {
             (Some(claimed), _) if attempt.attempt() == claimed => {
                 return Err(RunnerDomainError::AttemptIdentityReuse);
@@ -383,6 +395,11 @@ impl SessionRunnerPlacement {
             lease: lost.lease,
             dispatch: attempt,
             runner: lost.runner,
+            registration_revision: lost.registration_revision,
+            placement_revision: lost.placement_revision,
+            working_directory: lost.working_directory,
+            sandbox: lost.sandbox,
+            arguments,
             tool: lost.tool,
             effect: lost.effect,
             credential_authorization: lost.credential_authorization,
@@ -862,6 +879,10 @@ pub struct SessionRunnerPlacementReconstitutionInput {
 
 struct ValidatedRunnerDispatch {
     runner: RunnerId,
+    registration_revision: RunnerGeneration,
+    placement_revision: RunnerGeneration,
+    working_directory: RunnerWorkingDirectory,
+    sandbox: RunnerSandboxProfile,
     approval: CredentialToolApproval,
     effect: RunnerToolEffectClass,
     credential_authorization: Option<CredentialDispatchAuthorization>,
@@ -908,6 +929,10 @@ fn validate_dispatch(
     }
     Ok(ValidatedRunnerDispatch {
         runner: pinned.runner,
+        registration_revision: registration.revision(),
+        placement_revision: placement.revision,
+        working_directory: pinned.working_directory.clone(),
+        sandbox: pinned.sandbox,
         approval,
         effect: declaration.effect,
         credential_authorization,
@@ -936,11 +961,13 @@ fn validate_authorized_attempt(
 ) -> Result<
     (
         ToolAttemptDispatchCorrelation,
+        NormalizedToolArguments,
         Option<RunnerRetryAttemptEvidence>,
     ),
     RunnerDomainError,
 > {
     let (approved, authorized, retry_evidence) = authorization.into_parts();
+    let arguments = approved.request().arguments().clone();
     let (attempt, correlation) = authorized.into_parts();
     let expected_effect = tool_effect_class(effect);
     if approved.request().name() != tool
@@ -956,7 +983,7 @@ fn validate_authorized_attempt(
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
-    Ok((correlation, retry_evidence))
+    Ok((correlation, arguments, retry_evidence))
 }
 
 fn registration_preserves_snapshot(

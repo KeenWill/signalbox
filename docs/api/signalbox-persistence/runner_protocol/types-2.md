@@ -103,6 +103,33 @@ impl convert::From<error::Error> for runner_protocol::RunnerRecoveryError {
 }
 ```
 
+## RunnerLeaseResumeEvidence
+
+```rust
+pub enum RunnerLeaseResumeEvidence {
+    AwaitingDispatch(signalbox_domain::RunnerLeaseCorrelation),
+    ExecutionPossible(signalbox_domain::RunnerLeaseCorrelation),
+    Result {
+        correlation: signalbox_domain::RunnerLeaseCorrelation,
+        observation: signalbox_domain::ToolAttemptObservation,
+    },
+}
+// derives: clone::Clone, fmt::Debug
+```
+
+## RunnerLeaseResumeOutcome
+
+```rust
+pub enum RunnerLeaseResumeOutcome {
+    Empty,
+    AwaitingDispatch,
+    Recorded,
+    Lost,
+    LoseConnection(runner_protocol::RunnerConnectionSnapshot),
+}
+// derives: clone::Clone, fmt::Debug
+```
+
 ## RunnerStatusAfter
 
 ```rust

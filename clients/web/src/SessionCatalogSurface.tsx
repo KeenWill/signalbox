@@ -3,6 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { type CommandContext, invokeCommand } from './commands'
+import { AttentionSessions } from './AttentionSurface'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
@@ -361,6 +362,10 @@ export function SessionCatalogSurface({
   onSuggestCommand,
   returnSessionId,
   onReturnFocusConsumed,
+  needsAttention,
+  onNeedsAttentionChange,
+  attentionAfter,
+  onAttentionAfterChange,
   lifecycleFilter,
   pageOrder,
   onLifecycleFilterChange,
@@ -373,6 +378,10 @@ export function SessionCatalogSurface({
   onSuggestCommand: (command: { run: () => void } | null) => void
   returnSessionId?: string
   onReturnFocusConsumed: () => void
+  needsAttention: boolean
+  attentionAfter: string | null
+  onAttentionAfterChange: (value: string | null) => void
+  onNeedsAttentionChange: (value: boolean) => void
   lifecycleFilter: string
   pageOrder: string
   onLifecycleFilterChange: (value: string) => void
@@ -423,6 +432,7 @@ export function SessionCatalogSurface({
         ),
       ),
     gcTime: 0,
+    enabled: !needsAttention,
   })
   const titleDetailsAvailable =
     bootstrap.data?.capabilities.bounded_session_timeline_detail === true
@@ -465,9 +475,10 @@ export function SessionCatalogSurface({
     return rows
   }, [sessions.data, rates.data, lifecycleFilter, pageOrder, rateById])
   useEffect(() => {
+    if (needsAttention) return
     onTimelineIds(listed.map((row) => row.session_id))
     return () => onTimelineIds([])
-  }, [listed, onTimelineIds])
+  }, [listed, needsAttention, onTimelineIds])
   useEffect(() => {
     const openingRename = renameSelection.current === keyboardSelection
     renameSelection.current = null
@@ -475,12 +486,12 @@ export function SessionCatalogSurface({
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
   useEffect(() => {
-    if (!sessions.data || overlay !== null || !pendingReturnFocus.current) return
+    if (needsAttention || !sessions.data || overlay !== null || !pendingReturnFocus.current) return
     const target = sessionButtons.current.get(pendingReturnFocus.current)
     pendingReturnFocus.current = undefined
     target?.focus()
     onReturnFocusConsumed()
-  }, [sessions.data, overlay, onReturnFocusConsumed])
+  }, [needsAttention, sessions.data, overlay, onReturnFocusConsumed])
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
     restorePageFocus.current = false
@@ -535,8 +546,37 @@ export function SessionCatalogSurface({
     )
   }
 
+  const attentionFilter = (
+    <label className="catalog-checkbox">
+      <input
+        type="checkbox"
+        checked={needsAttention}
+        onChange={(event) => onNeedsAttentionChange(event.target.checked)}
+      />
+      Needs attention
+    </label>
+  )
+  if (needsAttention)
+    return (
+      <div className="surface-body catalog-surface">
+        {attentionFilter}
+        <AttentionSessions
+          after={attentionAfter}
+          onAfterChange={onAttentionAfterChange}
+          returnSessionId={returnSessionId}
+          onReturnFocusConsumed={() => {
+            pendingReturnFocus.current = undefined
+            onReturnFocusConsumed()
+          }}
+          onSessionOpen={(session) => onStateChange({ ...state, session, workspace: true })}
+          onTimelineIds={onTimelineIds}
+        />
+      </div>
+    )
+
   return (
     <div className="surface-body catalog-surface">
+      {attentionFilter}
       <form
         className="catalog-toolbar"
         onSubmit={submit}

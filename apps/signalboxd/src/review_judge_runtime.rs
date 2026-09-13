@@ -5,16 +5,42 @@ use signalbox_application::{
 };
 use signalbox_domain::{NormalizedToolArguments, ToolName};
 
-pub(crate) const TEMPLATE_NAME: &str = "review-judgment-agentic";
-/// Each judgment may admit at most eight tool requests across its turn.
-pub(crate) const TOOL_CALL_LIMIT: u64 = 8;
-/// Allows a final response after the read allowance is spent.
-pub(crate) const TOOL_ROUND_LIMIT: usize = TOOL_CALL_LIMIT as usize + 1;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JudgeMode {
+    Ordinary,
+    Synopsis,
+    FullContext,
+    FullContextWithoutTools,
+}
 
-pub(crate) async fn is_agentic_judge(
+impl JudgeMode {
+    fn from_template(name: &str) -> Self {
+        match name {
+            "review-judgment-agentic" => Self::Synopsis,
+            "review-judgment-agentic-full" => Self::FullContext,
+            "review-judgment-agentic-full-no-tools" => Self::FullContextWithoutTools,
+            _ => Self::Ordinary,
+        }
+    }
+
+    pub(crate) fn tool_limit(self) -> Option<u64> {
+        match self {
+            Self::Ordinary => None,
+            Self::Synopsis => Some(8),
+            Self::FullContext => Some(16),
+            Self::FullContextWithoutTools => Some(0),
+        }
+    }
+
+    fn remaining(self, used: u64) -> Option<u64> {
+        self.tool_limit().map(|limit| limit.saturating_sub(used))
+    }
+}
+
+pub(crate) async fn judge_mode(
     repository: &signalbox_persistence::model_execution::PostgresModelCallRepository,
     session: signalbox_domain::SessionId,
-) -> Result<bool, signalbox_persistence::model_execution::ModelCallRepositoryError> {
+) -> Result<JudgeMode, signalbox_persistence::model_execution::ModelCallRepositoryError> {
     use signalbox_persistence::{
         model_execution::{ModelCallCorruption, ModelCallRepositoryError},
         session::SessionRepositoryError,
@@ -32,27 +58,27 @@ pub(crate) async fn is_agentic_judge(
     Ok(loaded
         .as_ref()
         .and_then(|session| session.template_provenance())
-        .is_some_and(|template| template.name().as_str() == TEMPLATE_NAME))
+        .map_or(JudgeMode::Ordinary, |template| {
+            JudgeMode::from_template(template.name().as_str())
+        }))
 }
 
 pub(crate) async fn tool_allowance(
     repository: &signalbox_persistence::model_execution::PostgresModelCallRepository,
-    restricted: bool,
+    mode: JudgeMode,
     session: signalbox_domain::SessionId,
     turn: signalbox_domain::TurnId,
 ) -> Result<Option<u64>, signalbox_persistence::model_execution::ModelCallRepositoryError> {
-    if !restricted {
+    if mode.tool_limit().is_none() {
         return Ok(None);
     }
-    Ok(Some(TOOL_CALL_LIMIT.saturating_sub(
-        repository.turn_tool_request_count(session, turn).await?,
-    )))
+    Ok(mode.remaining(repository.turn_tool_request_count(session, turn).await?))
 }
 
 #[derive(Clone)]
 pub(crate) struct JudgeCatalog<Catalog> {
     pub catalog: Catalog,
-    pub restricted: bool,
+    pub mode: JudgeMode,
 }
 
 impl<Catalog> JudgeCatalog<Catalog> {
@@ -61,10 +87,12 @@ impl<Catalog> JudgeCatalog<Catalog> {
             name.as_str(),
             crate::blob_tools::FINDING_TEXT_NAME | crate::blob_tools::REVIEW_THREAD_TEXT_NAME
         );
-        if self.restricted {
-            review_text || name.as_str() == "read_file"
-        } else {
-            !review_text
+        let extended = matches!(name.as_str(), "review_thread_list" | "read_diff");
+        match self.mode {
+            JudgeMode::Ordinary => !review_text && !extended,
+            JudgeMode::Synopsis => review_text || name.as_str() == "read_file",
+            JudgeMode::FullContext => review_text || extended || name.as_str() == "read_file",
+            JudgeMode::FullContextWithoutTools => false,
         }
     }
 }
@@ -139,12 +167,12 @@ mod tests {
         .unwrap();
         let judge = JudgeCatalog {
             catalog,
-            restricted: true,
+            mode: JudgeMode::Synopsis,
         };
         assert_eq!(judge.definitions().len(), 3);
         let ordinary = JudgeCatalog {
             catalog: judge.catalog.clone(),
-            restricted: false,
+            mode: JudgeMode::Ordinary,
         };
         assert_eq!(ordinary.definitions().len(), 4);
         assert!(
@@ -168,5 +196,44 @@ mod tests {
             );
             assert_eq!(judge.preauthorization(&name, &arguments).is_ok(), index < 3);
         }
+    }
+
+    #[test]
+    fn full_context_ablation_removes_both_tool_advertisement_and_admission() {
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            ToolDefinition::new(
+                ToolName::try_new(String::from("read_file")).unwrap(),
+                String::from("Read source"),
+                ToolInputSchema::try_new(String::from(r#"{"type":"object"}"#)).unwrap(),
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_arguments: &NormalizedToolArguments| Ok(()),
+        )])
+        .unwrap();
+        let judge = JudgeCatalog {
+            catalog,
+            mode: JudgeMode::from_template("review-judgment-agentic-full-no-tools"),
+        };
+        assert_eq!(judge.mode.tool_limit(), Some(0));
+        assert!(judge.definitions().is_empty());
+        let arguments =
+            NormalizedToolArguments::try_from_provider_text(String::from("{}")).unwrap();
+        assert!(
+            judge
+                .validate_arguments(
+                    &ToolName::try_new(String::from("read_file")).unwrap(),
+                    &arguments
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn full_context_judgments_can_fetch_beyond_the_synopsis_allowance() {
+        let mode = JudgeMode::from_template("review-judgment-agentic-full");
+        assert_eq!(mode.remaining(8), Some(8));
+        assert_eq!(mode.remaining(16), Some(0));
+        assert_eq!(mode.remaining(17), Some(0));
     }
 }

@@ -23,7 +23,7 @@ export const excerpt = (text: string) => ({
 })
 
 export async function sessionApi(
-  page: Page,
+  page: Pick<Page, 'route'>,
   busy = false,
   selectedSessionId = sessionId,
   origin: WebRepositoryWatchProvenance | null = null,
@@ -31,6 +31,7 @@ export async function sessionApi(
   const state = {
     supervision: null as WebSessionTimelineDescriptor['supervision'],
     active: busy,
+    activeTurnId: turnId,
     activeState: { kind: 'running', model_call_id: null } as WebSessionLiveActiveState,
     grown: false,
     observed: false,
@@ -46,7 +47,7 @@ export async function sessionApi(
   const snapshot = () => ({
     session_id: selectedSessionId,
     observed_through: state.grown || state.observed ? '44' : '43',
-    active: state.active ? { turn_id: turnId, state: state.activeState } : null,
+    active: state.active ? { turn_id: state.activeTurnId, state: state.activeState } : null,
     queued_turn_count: '0',
     queued_turn_ids: [],
     reconciliation: null,

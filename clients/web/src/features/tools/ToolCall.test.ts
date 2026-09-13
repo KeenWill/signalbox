@@ -11,6 +11,65 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each(['\n', '\r', '\r\n'])('shares the field-list line budget for %j breaks', (separator) => {
+    const values = Object.fromEntries(
+      Array.from({ length: 32 }, (_, index) => [
+        `field_${index}`,
+        ['a', 'b', 'c', 'd', 'e'].join(separator),
+      ]),
+    )
+    const markup = render(toolExample('unknown_multiline', {}, values))
+    const rows = Array.from(markup.matchAll(/<dd>(.*?)<\/dd>/gs), (match) => match[1] ?? '')
+    expect(rows.reduce((lines, value) => lines + value.split(/\r\n|\r|\n/u).length, 0)).toBe(32)
+    expect(markup).toContain('Showing part of the details')
+  })
+
+  it('labels an empty structured string as empty text', () => {
+    const markup = render(
+      toolExample(
+        'file_read',
+        {},
+        { status: 'structured', body: '', truncated: false, cursor: null },
+      ),
+    )
+    expect(markup).toContain('Empty text')
+    expect(markup).not.toContain('Showing part of the text')
+  })
+
+  it.each([4000, 4001])('labels scalar structured body omissions at %s characters', (length) => {
+    const markup = render(
+      toolExample(
+        'file_read',
+        {},
+        { status: 'structured', body: 'x'.repeat(length), truncated: false, cursor: null },
+      ),
+    )
+    expect(markup.includes('Showing part of the text')).toBe(length > 4000)
+  })
+
+  it.each([0, 10])(
+    'labels a structured empty file body only with a complete excerpt at offset %s',
+    (offset) => {
+      const [, tool] = toolExample(
+        'file_read',
+        {},
+        { status: 'structured', body: {}, truncated: false, cursor: null },
+      )
+      if (tool.evidence.type !== 'physical_attempt' || !tool.evidence.result)
+        throw new Error('Result fixture required')
+      const result = {
+        ...tool.evidence.result,
+        offset_bytes: String(offset),
+        total_bytes: String(Number(tool.evidence.result.total_bytes) + offset),
+      }
+      const markup = renderToStaticMarkup(
+        createElement(ToolCall, { tool: { ...tool, evidence: { ...tool.evidence, result } } }),
+      )
+      expect(markup.includes('No fields')).toBe(offset === 0)
+      if (offset === 0) expect(markup).toContain('aria-label="File contents"')
+    },
+  )
+
   it.each([0, 128])('shows paged file_read output at byte %s', (offset) => {
     const [, tool] = toolExample('file_read', { view: 'text' }, {})
     if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
@@ -24,7 +83,8 @@ describe('tool presentation', () => {
     const markup = renderToStaticMarkup(
       createElement(ToolCall, { tool: { ...tool, evidence: { ...tool.evidence, result } } }),
     )
-    expect(markup).toContain(text)
+    expect(markup).toContain('Output excerpt available in Raw')
+    expect(markup).not.toContain(text)
     expect(markup).toContain('Showing part of output')
   })
 
@@ -115,7 +175,7 @@ describe('tool presentation', () => {
         { ...resultTool, evidence: { ...resultTool.evidence, result: toolExcerpt(text) } },
       ]) {
         const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
-        expect(markup).toContain(number)
+        expect(markup).not.toContain(number)
         expect(markup).not.toContain('9007199254740992')
       }
       expect(excerptFields(toolExcerpt(text))).toEqual({})
@@ -590,7 +650,7 @@ describe('tool presentation', () => {
       toolExample('read_file', { path: 'large.txt' }, { content: 'x'.repeat(1_000_000) }),
     )
     expect(markup.length).toBeLessThan(6_000)
-    expect(markup).toContain('Showing part of the text')
+    expect(markup).toContain('Open Raw for the original text')
   })
 
   it('links the normalized GitHub result destination', () => {
@@ -621,7 +681,7 @@ describe('tool presentation', () => {
     expect(webLink('javascript:alert(1)')).toBeUndefined()
   })
 
-  it('shows the recorded approval actor and reason', () => {
+  it.each([0, 512])('shows the recorded approval reason at byte %s', (offset) => {
     const markup = renderToStaticMarkup(
       createElement(ToolApproval, {
         approval: {
@@ -629,7 +689,11 @@ describe('tool presentation', () => {
           tool_name: 'unsandboxed_exec',
           decision: 'deny',
           actor: { type: 'policy' },
-          rationale: toolExcerpt('Command is outside the workspace'),
+          rationale: {
+            ...toolExcerpt('Command is outside the workspace'),
+            offset_bytes: String(offset),
+            total_bytes: String(offset + 32),
+          },
           request_id: '00000000-0000-7000-8000-000000000001',
           turn_id: '00000000-0000-7000-8000-000000000002',
           approval_judge_escalated: false,
