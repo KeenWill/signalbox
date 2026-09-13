@@ -251,27 +251,32 @@ test('releases the phone height reservation after reloading at desktop width', a
   expect(desktop.height).toBeLessThan(phone.height)
 })
 
-test('downloads attachments carrying non-MIME timeline labels', async ({ page }) => {
-  const mediaTypes: string[] = []
-  await page.route('**/api/bootstrap', (route) =>
-    route.fulfill({ json: webContractBootstrapFixture }),
-  )
-  await page.route('**/api/blobs/**/descriptor?*', (route) => {
-    mediaTypes.push(new URL(route.request().url()).searchParams.get('media_type') ?? '')
-    return route.fulfill({ json: fileAttachment })
+for (const label of ['garbage', 'image/png;']) {
+  test(`downloads attachments carrying timeline label ${label}`, async ({ page }) => {
+    const mediaTypes: string[] = []
+    await page.route('**/api/bootstrap', (route) =>
+      route.fulfill({ json: webContractBootstrapFixture }),
+    )
+    await page.route('**/api/blobs/**/descriptor?*', (route) => {
+      mediaTypes.push(new URL(route.request().url()).searchParams.get('media_type') ?? '')
+      return route.fulfill({ json: fileAttachment })
+    })
+    await page.goto(`/src/features/artifacts/scenario.html?label=${encodeURIComponent(label)}`)
+    const chip = page.getByRole('button', {
+      name: `File · ${label} · 4,096 bytes`,
+      exact: true,
+    })
+    await expect(page.getByRole('link', { name: 'Download' })).toBeVisible()
+    await chip.click()
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Attachment details' })
+        .getByRole('link', { name: 'Download' }),
+    ).toHaveAttribute('href', fileAttachment.available_views[0]?.content_url ?? '')
+    expect(mediaTypes.length).toBeGreaterThan(0)
+    expect(mediaTypes.every((type) => type === 'application/octet-stream')).toBe(true)
   })
-  await page.goto('/src/features/artifacts/scenario.html?label')
-  const chip = page.getByRole('button', { name: 'File · garbage · 4,096 bytes', exact: true })
-  await expect(page.getByRole('link', { name: 'Download' })).toBeVisible()
-  await chip.click()
-  await expect(
-    page
-      .getByRole('dialog', { name: 'Attachment details' })
-      .getByRole('link', { name: 'Download' }),
-  ).toHaveAttribute('href', fileAttachment.available_views[0]?.content_url ?? '')
-  expect(mediaTypes.length).toBeGreaterThan(0)
-  expect(mediaTypes.every((type) => type === 'application/octet-stream')).toBe(true)
-})
+}
 
 test('restores focus to the image preview control after closing details', async ({ page }) => {
   await page.route('**/api/bootstrap', (route) =>
@@ -326,3 +331,44 @@ test('labels uppercase image MIME types as images in previews and details', asyn
   await expect(pane.getByRole('article', { name: 'Artifact Image', exact: true })).toBeVisible()
   await expect(pane.getByRole('img', { name: 'Preview of Image', exact: true })).toBeVisible()
 })
+
+for (const move of ['pointer', 'keyboard']) {
+  test(`preserves ${move} focus moves during an inline retry`, async ({ page }) => {
+    let retrying = false
+    const pending = Promise.withResolvers<void>()
+    const requested = Promise.withResolvers<void>()
+    await page.route('**/api/bootstrap', (route) =>
+      route.fulfill({ json: webContractBootstrapFixture }),
+    )
+    await page.route('**/api/blobs/**/descriptor?*', async (route) => {
+      if (!decodeURIComponent(route.request().url()).includes(imageDescriptor.digest))
+        return route.fulfill({ json: fileAttachment })
+      if (!retrying) return route.fulfill({ json: { invalid: true } })
+      requested.resolve()
+      await pending.promise
+      return route.fulfill({ json: imageAttachment })
+    })
+    await page.route('**/api/blobs/**/content/image-png', (route) =>
+      route.fulfill({ body: preview, contentType: 'image/png' }),
+    )
+    await page.goto('/src/features/artifacts/scenario.html')
+    const retry = page.getByRole('button', { name: 'Retry attachment' })
+    await retry.focus()
+    retrying = true
+    await page.keyboard.press('Enter')
+    await requested.promise
+    if (move === 'pointer')
+      await page.getByText('Here is the image and the trace file.', { exact: true }).click()
+    else await page.keyboard.press('Tab')
+    const focused = await page.evaluateHandle(() => document.activeElement)
+    pending.resolve()
+    await expect(page.getByRole('img', { name: 'Preview of Image' })).toBeVisible()
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    )
+    expect(await page.evaluate((element) => document.activeElement === element, focused)).toBe(true)
+  })
+}

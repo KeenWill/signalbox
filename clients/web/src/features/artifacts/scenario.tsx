@@ -40,7 +40,7 @@ if (root)
                 blob_id: descriptor.digest,
                 length_bytes: descriptor.byte_length,
                 media_type: location.search.includes('label')
-                  ? 'garbage'
+                  ? new URLSearchParams(location.search).get('label') || 'garbage'
                   : location.search.includes('uppercase')
                     ? descriptor.declared_media_type.toUpperCase()
                     : descriptor.declared_media_type,

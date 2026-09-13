@@ -3,12 +3,19 @@ import { attachmentTypeLabel } from '../../ArtifactInspector'
 import { attachmentDescriptorMediaType } from './attachmentMetadata'
 
 describe('attachment descriptor media types', () => {
-  it.each(['garbage', 'image/', 'text/plain; charset', 'image/png extra', null, undefined])(
-    'uses binary delivery for %s',
-    (label) => {
-      expect(attachmentDescriptorMediaType(label)).toBe('application/octet-stream')
-    },
-  )
+  it.each([
+    'garbage',
+    'image/png;',
+    'image/png; ',
+    'text/plain; charset=utf-8;',
+    'image/',
+    'text/plain; charset',
+    'image/png extra',
+    null,
+    undefined,
+  ])('uses binary delivery for %s', (label) => {
+    expect(attachmentDescriptorMediaType(label)).toBe('application/octet-stream')
+  })
   it.each([
     'image/png',
     'application/vnd.example+json',

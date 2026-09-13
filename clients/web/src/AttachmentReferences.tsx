@@ -153,9 +153,21 @@ function AttachmentReference({
               type="button"
               onClick={(event) => {
                 const opener = event.currentTarget
-                const wasFocused = document.activeElement === opener
+                let restoreFocus = document.activeElement === opener
+                const recordBlur = () => {
+                  queueMicrotask(() => {
+                    if (opener.isConnected) restoreFocus = false
+                  })
+                }
+                const recordPointerMove = () => {
+                  restoreFocus = false
+                }
+                opener.addEventListener('blur', recordBlur)
+                document.addEventListener('pointerdown', recordPointerMove)
                 void descriptor.refetch().then((result) => {
-                  if (!result.isSuccess || !wasFocused) return
+                  opener.removeEventListener('blur', recordBlur)
+                  document.removeEventListener('pointerdown', recordPointerMove)
+                  if (!result.isSuccess || !restoreFocus) return
                   requestAnimationFrame(() => {
                     if (
                       document.activeElement === opener ||
