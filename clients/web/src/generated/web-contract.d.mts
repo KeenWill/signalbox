@@ -1000,6 +1000,11 @@ export type WebCreateSessionResponse = {
   readonly summary: WebSessionCatalogSummary;
 };
 
+export type WebSessionTitleRequest = {
+  readonly command_id: string;
+  readonly title: string;
+};
+
 export type WebContractExample = {
   readonly message: string;
   readonly request_id: string;
@@ -1253,6 +1258,7 @@ export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap
 export function decodeWebSubmitInputRequest(value: unknown): WebSubmitInputRequest;
 export function decodeWebCreateSessionRequest(value: unknown): WebCreateSessionRequest;
 export function decodeWebCreateSessionResponse(value: unknown): WebCreateSessionResponse;
+export function decodeWebSessionTitleRequest(value: unknown): WebSessionTitleRequest;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;

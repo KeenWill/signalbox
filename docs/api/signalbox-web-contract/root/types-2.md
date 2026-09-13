@@ -2,6 +2,16 @@
 
 # root: types-2
 
+## WebUsageProvenance
+
+```rust
+pub enum WebUsageProvenance {
+    Reported,
+    Estimated,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebUsageInputSemantics
 
 ```rust

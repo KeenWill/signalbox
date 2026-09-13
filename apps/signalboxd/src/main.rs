@@ -7,6 +7,10 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+mod heap_allocator;
+#[cfg(all(test, target_os = "linux"))]
+mod heap_retention;
+
 #[cfg(test)]
 use signalboxd::credential_files_conflict;
 use signalboxd::repo_watch_runtime::{
@@ -2537,6 +2541,8 @@ async fn run_hub_incarnation(
         None => configuration_reload,
     };
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    tool_executor =
+        tool_executor.with_ambient_credentials(configuration_reload.clone(), pool.clone());
     let approval_judge_repository_watch = repository_watch_runtime.clone();
     let workflow_repository_watch = repository_watch_runtime.clone();
     let eval_runtime_factory = runtime_factory.clone();

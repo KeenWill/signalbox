@@ -203,6 +203,20 @@ pub struct WebCreateSessionResponse {
     pub summary: WebSessionCatalogSummary,
 }
 
+/// Human title replacement preserving the other loaded metadata fields.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTitleRequest {
+    /// Durable identity retained when retrying the title edit.
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    /// Exact nonempty human-facing title.
+    #[schemars(length(min = 1))]
+    pub title: String,
+}
+
 /// Small generated-contract fixture proving Rust/TypeScript round trips.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -3036,6 +3050,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebCreateSessionResponse",
             decoder: "decodeWebCreateSessionResponse",
             schema: create_session_response_schema,
+        },
+        ContractSchema {
+            name: "WebSessionTitleRequest",
+            decoder: "decodeWebSessionTitleRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSessionTitleRequest).to_value()),
         },
         ContractSchema {
             name: "WebContractExample",
