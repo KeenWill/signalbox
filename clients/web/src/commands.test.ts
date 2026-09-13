@@ -95,17 +95,8 @@ describe('command registry', () => {
       focusTimeline: () => undefined,
       paneSize: 320,
     })
-    invokeCommand('pane.inspector.resize', {
-      dispatch: store.dispatch,
-      getState: store.getState,
-      timelineIds: [],
-      artifactPreviewIds: [],
-      artifactOriginalIds: [],
-      focusTimeline: () => undefined,
-      paneSize: 440,
-    })
 
-    expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320, inspector: 440 })
+    expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320 })
   })
 
   it('routes exact session opening through a parameterized central command', () => {

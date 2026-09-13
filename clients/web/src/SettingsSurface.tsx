@@ -14,11 +14,7 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
 export function SettingsSurface({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
   const resizePane = (
-    command:
-      | 'pane.navigation.preview'
-      | 'pane.navigation.resize'
-      | 'pane.inspector.preview'
-      | 'pane.inspector.resize',
+    command: 'pane.navigation.preview' | 'pane.navigation.resize',
     paneSize: number,
   ) => invokeCommand(command, { ...context, paneSize })
   return (
@@ -139,29 +135,6 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               }
               onBlur={(event) =>
                 resizePane('pane.navigation.resize', event.currentTarget.valueAsNumber)
-              }
-            />
-          </label>
-          <label>
-            <span>Inspector width</span>
-            <output>{app.paneSizes.inspector}px</output>
-            <input
-              type="range"
-              aria-label="Inspector width"
-              min="200"
-              max="480"
-              value={app.paneSizes.inspector}
-              onInput={(event) =>
-                resizePane('pane.inspector.preview', event.currentTarget.valueAsNumber)
-              }
-              onPointerUp={(event) =>
-                resizePane('pane.inspector.resize', event.currentTarget.valueAsNumber)
-              }
-              onKeyUp={(event) =>
-                resizePane('pane.inspector.resize', event.currentTarget.valueAsNumber)
-              }
-              onBlur={(event) =>
-                resizePane('pane.inspector.resize', event.currentTarget.valueAsNumber)
               }
             />
           </label>
