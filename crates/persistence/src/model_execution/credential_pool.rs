@@ -326,7 +326,7 @@ async fn load_pool_exclusions(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion AS chain
           WHERE session_id = $1
-            AND ($2::uuid IS NULL OR turn_id = $2)
+            AND turn_id = $2
             AND NOT EXISTS (SELECT 1 FROM credential_pool_exclusion_release released
                             WHERE released.predecessor_model_call_id = chain.predecessor_model_call_id)",
     )
