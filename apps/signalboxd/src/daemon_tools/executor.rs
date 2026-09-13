@@ -60,6 +60,7 @@ pub struct DaemonToolExecutor<
 > {
     pub(super) current_time: CurrentTimeExecutor<Clock>,
     pub(super) echo: EchoExecutor,
+    pub(super) runner_dispatch: Option<crate::runner_dispatch::RunnerDispatchService>,
     pub(super) web_fetch: WebFetchExecutor<Transport>,
     pub(super) web_search: WebSearchExecutor<Credentials, SearchTransport>,
     pub(super) session_status: SessionStatusExecutor<Writer>,
@@ -106,6 +107,15 @@ where
     FileSystem: WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 {
+    /// Routes the mirrored pure tool through the session's admitted runner.
+    pub fn with_runner_dispatch(
+        mut self,
+        dispatch: crate::runner_dispatch::RunnerDispatchService,
+    ) -> Self {
+        self.runner_dispatch = Some(dispatch);
+        self
+    }
+
     /// Installs the workflow executor matching the compiled declarations.
     pub fn with_workflows(mut self, port: super::workflows::DaemonWorkflowPort) -> Self {
         self.workflows = Some(signalbox_tools_workflows::WorkflowExecutor(port));
@@ -358,6 +368,20 @@ where
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<ToolExecutorDisposition, Self::Error> {
+        if invocation.request().name().as_str() == ECHO_NAME
+            && let Some(dispatch) = &self.runner_dispatch
+            && dispatch
+                .execute(invocation.dispatch_authority())
+                .await
+                .map_err(|error| {
+                    tracing::error!(failure = ?error, "runner dispatch admission failed");
+                    DaemonToolExecutorError::pre_dispatch()
+                })?
+        {
+            return Ok(ToolExecutorDisposition::DurableCompletion(
+                invocation.durable_completion(),
+            ));
+        }
         if SESSION_DELEGATION_TOOL_NAMES.contains(&invocation.request().name().as_str()) {
             return match self
                 .delegation

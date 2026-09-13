@@ -184,7 +184,10 @@ The seven local Git tools perform no remote operation. `git_log` limits its
 returned page to `max_entries`; merge ancestry traversal is independent of
 worktree inspection limits.
 
-The daemon-local registry supplies no runner execution path.
+The daemon executor routes the mirrored `echo` tool through the attached
+runner's serial lease service when admitted. The service returns durable
+completion only after the runner result and completed lease commit together; the
+tool loop reloads that ended physical attempt before continuing.
 
 Because the attempt schema requires a closed effect class, preparation records
 `EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight

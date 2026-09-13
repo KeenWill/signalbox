@@ -1032,8 +1032,7 @@ async fn pinned_affinity_and_grant_round_trip() -> Result<(), Box<dyn Error>> {
         .pin_and_offer_lease(
             &expected_enrollment,
             registration.registration(),
-            RunnerWorkingDirectory::try_new("/workspace/profileless".to_owned())
-                .expect("the profileless directory is valid"),
+            pin.lease.correlation().working_directory,
             None,
             authorized(PROFILELESS_PHYSICAL_ATTEMPT),
             RunnerLeaseOfferRequest {

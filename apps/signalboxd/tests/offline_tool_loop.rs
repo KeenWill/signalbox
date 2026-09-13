@@ -6,6 +6,8 @@
 
 #[path = "offline_tool_loop/ambient_credentials.rs"]
 mod ambient_credentials;
+#[path = "offline_tool_loop/runner_execution.rs"]
+mod runner_execution;
 #[path = "offline_tool_loop/runner_fallback.rs"]
 mod runner_fallback;
 mod support;

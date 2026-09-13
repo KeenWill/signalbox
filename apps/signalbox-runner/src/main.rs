@@ -18,6 +18,15 @@ const SHUTDOWN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if env::args_os()
+        .skip(1)
+        .eq([OsString::from(signalbox_runner::ECHO_CHILD_ARGUMENT)])
+    {
+        return match signalbox_runner::run_echo_child() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     match run(
         env::args_os().skip(1),
         env::var_os(CONFIGURATION_ENVIRONMENT),

@@ -474,6 +474,7 @@ where
             executor: DaemonToolExecutor {
                 current_time,
                 echo,
+                runner_dispatch: None,
                 web_fetch,
                 web_search,
                 session_status,

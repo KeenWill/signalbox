@@ -78,6 +78,57 @@ impl RunnerEnrollmentResponse {
 
 /// Durable-before-ack boundary consumed by the runner socket runtime.
 pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
+    /// Observes newly committed lease work without reconstructing authority in memory.
+    fn lease_changes(&self) -> Option<watch::Receiver<()>> {
+        None
+    }
+    /// Wakes retained dispatch reads at the existing liveness boundary.
+    fn lease_tick(&self) {}
+    /// Loads one durable offer for this exact connection.
+    fn pending_tool_offer(
+        &self,
+        _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
+    ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::LeaseOffer>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Commits a claim before issuing its capability and immutable dispatch payload.
+    fn claim_tool_offer(
+        &self,
+        _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
+        claim: signalbox_runner_wire::LeaseClaim,
+    ) -> RunnerRegistrationFuture<
+        '_,
+        (
+            signalbox_runner_wire::LeaseClaimed,
+            signalbox_runner_wire::Dispatch,
+        ),
+    > {
+        Box::pin(async move {
+            Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::LeaseClaim,
+                AvailableCorrelation::Lease(claim.correlation),
+                RejectionCode::Unavailable,
+            ))
+        })
+    }
+    /// Commits terminal evidence before acknowledging its exact result.
+    fn record_tool_result(
+        &self,
+        _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
+        result: signalbox_runner_wire::ResultFrame,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::ResultRecorded> {
+        Box::pin(async move {
+            Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Result,
+                AvailableCorrelation::Lease(result.correlation),
+                RejectionCode::Unavailable,
+            ))
+        })
+    }
+
     /// Loads the committed active receipt of an explicitly promoted candidate.
     fn promotion_receipt(
         &self,
@@ -141,6 +192,7 @@ pub struct PostgresRunnerRegistrationService {
     store: RunnerProtocolStore,
     allowed_classes: Vec<RunnerCapabilityClass>,
     registration_admission: Arc<Mutex<()>>,
+    dispatch: crate::runner_dispatch::RunnerDispatchService,
     eligibility_nudge: Option<InProcessEligibilityNudge>,
 }
 
@@ -150,12 +202,19 @@ impl PostgresRunnerRegistrationService {
         store: RunnerProtocolStore,
         allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
     ) -> Self {
+        let dispatch = crate::runner_dispatch::RunnerDispatchService::new(store.clone());
         Self {
             store,
+            dispatch,
             allowed_classes: allowed_classes.into_iter().collect(),
             registration_admission: Arc::new(Mutex::new(())),
             eligibility_nudge: None,
         }
+    }
+
+    /// Shares the local runner's serial dispatch service with daemon tools.
+    pub fn dispatch_service(&self) -> crate::runner_dispatch::RunnerDispatchService {
+        self.dispatch.clone()
     }
 
     /// Schedules affected sessions after connection-loss propagation commits.
@@ -729,6 +788,131 @@ fn echo_declaration() -> Result<RunnerToolDeclaration, RunnerDomainError> {
 }
 
 impl RunnerRegistrationService for PostgresRunnerRegistrationService {
+    fn lease_changes(&self) -> Option<watch::Receiver<()>> {
+        Some(self.dispatch.subscribe())
+    }
+    fn lease_tick(&self) {
+        self.dispatch.changed();
+    }
+
+    fn pending_tool_offer(
+        &self,
+        enrollment: CanonicalUuid,
+        epoch: PositiveU64,
+    ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::LeaseOffer>> {
+        Box::pin(async move {
+            let kind = RunnerInboundFrameKind::LeaseOffer;
+            let available = AvailableCorrelation::ConnectionEpoch(epoch);
+            let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                RunnerRegistrationFailure::new(
+                    kind,
+                    available.clone(),
+                    RejectionCode::CorrelationMismatch,
+                )
+            })?;
+            let lease = self
+                .store
+                .pending_tool_lease(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()), epoch)
+                .await
+                .map_err(|error| store_failure(kind, available.clone(), error))?;
+            lease
+                .as_ref()
+                .map(crate::runner_dispatch_wire::offer)
+                .transpose()
+                .map_err(|_| {
+                    RunnerRegistrationFailure::new(
+                        kind,
+                        available,
+                        RejectionCode::CorrelationMismatch,
+                    )
+                })
+        })
+    }
+
+    fn claim_tool_offer(
+        &self,
+        enrollment: CanonicalUuid,
+        epoch: PositiveU64,
+        claim: signalbox_runner_wire::LeaseClaim,
+    ) -> RunnerRegistrationFuture<
+        '_,
+        (
+            signalbox_runner_wire::LeaseClaimed,
+            signalbox_runner_wire::Dispatch,
+        ),
+    > {
+        Box::pin(async move {
+            let kind = RunnerInboundFrameKind::LeaseClaim;
+            let available = AvailableCorrelation::Lease(claim.correlation.clone());
+            let invalid = || {
+                RunnerRegistrationFailure::new(
+                    kind,
+                    available.clone(),
+                    RejectionCode::CorrelationMismatch,
+                )
+            };
+            let correlation = crate::runner_dispatch_wire::domain_correlation(claim.correlation)
+                .map_err(|_| invalid())?;
+            let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(invalid)?;
+            let lease = self
+                .store
+                .claim_tool_lease(
+                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                    epoch,
+                    correlation,
+                )
+                .await
+                .map_err(|error| store_failure(kind, available.clone(), error))?;
+            Ok((
+                signalbox_runner_wire::LeaseClaimed {
+                    correlation: crate::runner_dispatch_wire::wire_correlation(
+                        &lease.correlation(),
+                    )
+                    .map_err(|_| invalid())?,
+                },
+                crate::runner_dispatch_wire::dispatch(&lease).map_err(|_| invalid())?,
+            ))
+        })
+    }
+
+    fn record_tool_result(
+        &self,
+        enrollment: CanonicalUuid,
+        epoch: PositiveU64,
+        result: signalbox_runner_wire::ResultFrame,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::ResultRecorded> {
+        Box::pin(async move {
+            let kind = RunnerInboundFrameKind::Result;
+            let available = AvailableCorrelation::Lease(result.correlation.clone());
+            let invalid = || {
+                RunnerRegistrationFailure::new(
+                    kind,
+                    available.clone(),
+                    RejectionCode::CorrelationMismatch,
+                )
+            };
+            let correlation = crate::runner_dispatch_wire::domain_correlation(result.correlation)
+                .map_err(|_| invalid())?;
+            let observation = result.result.into_observation().map_err(|_| invalid())?;
+            let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(invalid)?;
+            let lease = self
+                .store
+                .record_tool_lease_result(
+                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                    epoch,
+                    correlation,
+                    observation,
+                )
+                .await
+                .map_err(|error| store_failure(kind, available.clone(), error))?;
+            self.dispatch.changed();
+            Ok(signalbox_runner_wire::ResultRecorded {
+                correlation: crate::runner_dispatch_wire::wire_correlation(&lease.correlation())
+                    .map_err(|_| invalid())?,
+            })
+        })
+    }
+
     fn promotion_receipt(
         &self,
         enrollment: CanonicalUuid,
@@ -1485,6 +1669,9 @@ where
         let mut heartbeat_state = HeartbeatState::new();
         let mut sent_provisions = std::collections::BTreeSet::new();
         let mut sent_promotion = false;
+        let mut receive_buffer = Vec::new();
+        let mut lease_changes = service.lease_changes();
+        let mut sent_lease = None;
         loop {
         tokio::select! {
             biased;
@@ -1506,7 +1693,7 @@ where
                     return Ok(());
                 }
             }
-            frame = read_frame(&mut reader) => {
+            frame = read_frame_buffered(&mut reader, &mut receive_buffer) => {
                 let frame = match frame {
                     Ok(frame) => frame,
                     Err(RunnerProtocolRuntimeError::Closed) => {
@@ -1588,6 +1775,27 @@ where
                                 }
                                 return Ok(());
                             }
+                        }
+                    }
+                    Message::LeaseClaim(claim) => {
+                        match service.claim_tool_offer(context.enrollment, context.epoch, claim).await {
+                            Ok((claimed, dispatch)) => {
+                                write_message(&mut writer, Message::LeaseClaimed(claimed)).await?;
+                                write_message(&mut writer, Message::Dispatch(dispatch)).await?;
+                            },
+                            Err(failure) => {
+                                terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::LeaseClaim, context.epoch, failure).await?;
+                                return Ok(());
+                            },
+                        }
+                    }
+                    Message::Result(result) => {
+                        match service.record_tool_result(context.enrollment, context.epoch, result).await {
+                            Ok(recorded) => write_message(&mut writer, Message::ResultRecorded(recorded)).await?,
+                            Err(failure) => {
+                                terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::Result, context.epoch, failure).await?;
+                                return Ok(());
+                            },
                         }
                     }
                     Message::HeartbeatAck(acknowledgement) => {
@@ -1675,7 +1883,17 @@ where
                     }
                 }
             }
+            () = lease_changed(&mut lease_changes) => {
+                if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                    let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
+                    if sent_lease != Some(identity) {
+                        write_message(&mut writer, Message::LeaseOffer(offer)).await?;
+                        sent_lease = Some(identity);
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
+                service.lease_tick();
                 match heartbeat_state.next_tick()? {
                     HeartbeatTick::Challenge(challenge) => {
                         write_message(&mut writer, Message::Heartbeat(challenge)).await?;
@@ -1724,6 +1942,17 @@ where
         transition_is_current(&service, context, transition).await?;
     }
     outcome
+}
+
+async fn lease_changed(changes: &mut Option<watch::Receiver<()>>) {
+    match changes {
+        Some(changes) => {
+            if changes.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1977,7 +2206,13 @@ impl HeartbeatState {
 async fn read_frame(
     reader: &mut BufReader<OwnedReadHalf>,
 ) -> Result<Frame, RunnerProtocolRuntimeError> {
-    let mut line = Vec::new();
+    read_frame_buffered(reader, &mut Vec::new()).await
+}
+
+async fn read_frame_buffered(
+    reader: &mut BufReader<OwnedReadHalf>,
+    line: &mut Vec<u8>,
+) -> Result<Frame, RunnerProtocolRuntimeError> {
     loop {
         let available = reader
             .fill_buf()
@@ -2007,7 +2242,9 @@ async fn read_frame(
             break;
         }
     }
-    decode_line(&line).map_err(RunnerProtocolRuntimeError::Decode)
+    let decoded = decode_line(line).map_err(RunnerProtocolRuntimeError::Decode);
+    line.clear();
+    decoded
 }
 
 async fn write_rejected(
@@ -2260,6 +2497,49 @@ mod tests {
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
+    #[tokio::test]
+    async fn partial_runner_frame_survives_a_lease_notification() {
+        let (daemon, mut runner) = tokio::net::UnixStream::pair().expect("local stream pair");
+        let (reader, _) = daemon.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut buffer = Vec::new();
+        let message = Message::HeartbeatAck(HeartbeatAck {
+            challenge_sequence: PositiveU64::try_new(1).expect("first challenge"),
+            runner_sequence: PositiveU64::try_new(1).expect("first response"),
+            lease_phase: None,
+            workspace_phase: None,
+        });
+        let frame = Frame::try_new(message).expect("heartbeat acknowledgement");
+        let encoded = encode_line(&frame).expect("encoded frame");
+        let split = encoded.len() / 2;
+        runner
+            .write_all(&encoded[..split])
+            .await
+            .expect("partial frame");
+        reader
+            .get_ref()
+            .readable()
+            .await
+            .expect("partial frame is readable");
+        tokio::select! {
+            biased;
+            _ = read_frame_buffered(&mut reader, &mut buffer) => panic!("incomplete frame cannot finish"),
+            () = tokio::task::yield_now() => {},
+        }
+        assert_eq!(buffer, encoded[..split]);
+        runner
+            .write_all(&encoded[split..])
+            .await
+            .expect("remaining frame");
+        assert_eq!(
+            read_frame_buffered(&mut reader, &mut buffer)
+                .await
+                .expect("whole frame"),
+            frame
+        );
+        assert!(buffer.is_empty());
+    }
+
     const CONFIGURED_REPOSITORY: &str = "signalbox";
     const ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE: u64 = 1;
     const ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE: u64 = 1;
@@ -2450,6 +2730,12 @@ mod tests {
             lease_id: arbitrary_identity,
             lease_generation: first,
             runner_id: arbitrary_identity,
+            placement_revision: first,
+            working_directory: signalbox_runner_wire::WorkingDirectory::try_new(
+                "/tmp/runner-work".to_owned(),
+            )
+            .expect("fixture directory"),
+            sandbox_profile: signalbox_runner_wire::SandboxProfile::Ambient,
             tool_name: signalbox_runner_wire::WireToolName::try_new("git_fetch".to_owned())
                 .expect("the fixture tool name is valid"),
             session_id: arbitrary_identity,
