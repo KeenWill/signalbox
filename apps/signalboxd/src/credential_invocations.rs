@@ -122,12 +122,18 @@ impl CredentialInvocationProcesses {
     }
 
     pub(crate) async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
-        for (session, turn) in
-            signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone())
-                .unclaimed_initial_turns()
-                .await?
-        {
-            self.retain_initial_title(session, turn);
+        let repository =
+            signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone());
+        let mut after = None;
+        loop {
+            let page = repository.unclaimed_initial_turns(after).await?;
+            let Some((last_session, _)) = page.last().copied() else {
+                break;
+            };
+            for (session, turn) in page {
+                self.retain_initial_title(session, turn);
+            }
+            after = Some(last_session);
         }
         Ok(())
     }
@@ -899,7 +905,7 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(repository.unclaimed_initial_turns().await?.is_empty());
+        assert!(repository.unclaimed_initial_turns(None).await?.is_empty());
         let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2 AND NOT abandoned")
             .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
         let recovered_target: uuid::Uuid = sqlx::query_scalar(

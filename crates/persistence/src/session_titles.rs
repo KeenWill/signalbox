@@ -10,6 +10,8 @@ use sqlx::{PgConnection, PgPool, Row};
 
 use crate::session_metadata::SessionMetadataRepositoryError;
 
+const INITIAL_TITLE_RECOVERY_PAGE_SIZE: i64 = 256;
+
 /// Facts frozen before a title model is invoked.
 #[derive(Clone, Debug)]
 pub struct SessionTitleCall {
@@ -44,19 +46,26 @@ impl SessionTitleRepository {
         Self { pool }
     }
 
-    /// Finds one completed turn for each untitled session without an initial claim.
-    pub async fn unclaimed_initial_turns(&self) -> Result<Vec<(SessionId, TurnId)>, sqlx::Error> {
+    /// Finds one page of completed turns for untitled sessions without an initial claim.
+    pub async fn unclaimed_initial_turns(
+        &self,
+        after: Option<SessionId>,
+    ) -> Result<Vec<(SessionId, TurnId)>, sqlx::Error> {
         let rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
             "SELECT DISTINCT ON (turn.session_id) turn.session_id, turn.turn_id
              FROM turn_lifecycle AS turn
              WHERE turn.state_kind = 'terminal' AND turn.terminal_disposition_kind = 'completed'
+               AND ($1::uuid IS NULL OR turn.session_id > $1)
                AND NOT EXISTS (SELECT 1 FROM session_metadata metadata
                    WHERE metadata.session_id = turn.session_id AND metadata.title IS NOT NULL)
                AND NOT EXISTS (SELECT 1 FROM session_title_model_call title
                    WHERE title.session_id = turn.session_id AND title.initial_for_turn IS NOT NULL
                      AND NOT title.abandoned)
-             ORDER BY turn.session_id, turn.turn_id",
+             ORDER BY turn.session_id, turn.turn_id
+             LIMIT $2",
         )
+        .bind(after.map(SessionId::into_uuid))
+        .bind(INITIAL_TITLE_RECOVERY_PAGE_SIZE)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
