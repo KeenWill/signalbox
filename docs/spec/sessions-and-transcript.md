@@ -164,10 +164,12 @@ recorded result without reinstalling it. The Sessions page offers a title
 editor, closes it on acknowledgment before refreshing the catalog, and retains a
 derived title when no saved title exists. Unresolved rename intents survive
 editor closure and catalog navigation until acknowledgment or definitive
-rejection. Catalog pull request and trigger chips link to the source pull
-request or repository. Title-only intent is retained with the receipt; reusing a
-full-replacement command ID for a title request, or the reverse, is conflicting
-reuse.
+rejection. After a retained retry is acknowledged, its identity remains retained
+until a catalog read started after acknowledgment returns the current title;
+reopening the editor before that read permits only the same retry. Catalog pull
+request and trigger chips link to the source pull request or repository.
+Title-only intent is retained with the receipt; reusing a full-replacement
+command ID for a title request, or the reverse, is conflicting reuse.
 
 ## Design decisions
 

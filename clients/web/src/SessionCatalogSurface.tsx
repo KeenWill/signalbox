@@ -13,7 +13,13 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
-import { createRenameCommandId, renameSession, retainedRename } from './session-metadata'
+import {
+  createRenameCommandId,
+  readRenameCatalog,
+  renameNeedsReadback,
+  renameSession,
+  retainedRename,
+} from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
@@ -190,7 +196,11 @@ const SessionMetadata = ({
             intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
           )
           setError(
-            intent.current ? 'A previous rename is unconfirmed. Save retries that title.' : null,
+            intent.current
+              ? renameNeedsReadback(summary.session_id)
+                ? 'Rename acknowledged. Waiting for the current title. Save retries the same request.'
+                : 'A previous rename is unconfirmed. Save retries that title.'
+              : null,
           )
           setEditing(true)
         }}
@@ -283,14 +293,16 @@ export function SessionCatalogSurface({
       state.afterActivity ?? null,
     ],
     queryFn: ({ signal }) =>
-      productTransport.readSessions(
-        {
-          sort: state.sort ?? 'activity',
-          includeArchived: state.archived ?? false,
-          afterSession: state.afterSession,
-          afterActivity: state.afterActivity,
-        },
-        signal,
+      readRenameCatalog(() =>
+        productTransport.readSessions(
+          {
+            sort: state.sort ?? 'activity',
+            includeArchived: state.archived ?? false,
+            afterSession: state.afterSession,
+            afterActivity: state.afterActivity,
+          },
+          signal,
+        ),
       ),
     gcTime: 0,
   })
