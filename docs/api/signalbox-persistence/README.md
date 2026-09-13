@@ -41,7 +41,7 @@
 | repo_watch_command | 1 | 0 | 0 | [repo_watch_command](repo_watch_command.md) |
 | review_orchestration | 11 | 0 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 10 | 0 | 0 | [review_workflow](review_workflow.md) |
-| runner_protocol | 33 | 0 | 1 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md), [functions](runner_protocol/functions.md) |
+| runner_protocol | 35 | 0 | 1 | [types](runner_protocol/types.md), [types-2](runner_protocol/types-2.md), [functions](runner_protocol/functions.md) |
 | scheduler | 2 | 0 | 0 | [scheduler](scheduler.md) |
 | search | 3 | 0 | 0 | [search](search.md) |
 | session | 4 | 0 | 0 | [session](session.md) |
@@ -54,6 +54,7 @@
 | session_metadata | 5 | 0 | 0 | [session_metadata](session_metadata.md) |
 | session_placement | 3 | 0 | 0 | [session_placement](session_placement.md) |
 | session_timeline | 3 | 0 | 0 | [session_timeline](session_timeline.md) |
+| session_titles | 3 | 0 | 0 | [session_titles](session_titles.md) |
 | session_workspace | 1 | 0 | 1 | [session_workspace](session_workspace.md) |
 | start_eligible_turn | 9 | 0 | 0 | [start_eligible_turn](start_eligible_turn.md) |
 | startup | 4 | 0 | 0 | [startup](startup.md) |

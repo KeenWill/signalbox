@@ -536,6 +536,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 .map(|path| ignorecase_path(path))
                 .collect::<BTreeSet<_>>()
         });
+        let mut ignores = crate::ignore::IgnoreRules::new(&self.repository_authority)?;
         let mut pending = vec![PathBuf::from(".")];
         let mut untracked = Vec::new();
         let mut inspected = 0_usize;
@@ -549,6 +550,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 untracked.push(directory);
                 continue;
             }
+            ignores.add_directory(&self.filesystem, &self.root, &self.root_path, &directory)?;
             let remaining_entries = MAX_WORKTREE_INSPECTIONS.saturating_sub(inspected);
             let remaining_path_bytes = MAX_WORKTREE_PATH_BYTES.saturating_sub(inspected_path_bytes);
             let requested_entries = remaining_entries.saturating_add(1);
@@ -584,6 +586,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 }
                 match entry.kind {
                     WorkspaceEntryKind::Directory => {
+                        if ignores.excludes(&entry.path, true, ignorecase) {
+                            continue;
+                        }
                         if index
                             .get_path(&entry.path, 0)
                             .is_none_or(|indexed| indexed.mode != GITLINK_MODE)
@@ -598,7 +603,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                             || tracked_paths.contains(&entry.path),
                             |keys| keys.contains(&ignorecase_path(&entry.path)),
                         );
-                        if !path_is_tracked {
+                        if !path_is_tracked && !ignores.excludes(&entry.path, false, ignorecase) {
                             untracked.push(entry.path);
                         }
                     }

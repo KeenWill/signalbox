@@ -2,7 +2,7 @@
 #
 # Replace paths with absolute paths owned by the runner's effective user. The
 # runner reads credential structure at startup but does not read secret bytes
-# until a later execution-capable milestone admits a credentialed dispatch.
+# for the pure echo child.
 version = 1
 capability_classes = ["echo"]
 tools = ["echo"]
@@ -16,7 +16,7 @@ git_author_name = "Signalbox Runner"
 git_author_email = "runner@example.invalid"
 
 # This exact profile name is admitted by signalboxd's local runner
-# catalog. Its policy authorizes no tool while runner execution is absent.
+# catalog. Pure echo execution requires no credential approval.
 [credentials.github-runner]
 file = "/run/secrets/signalbox-github-token"
 injection_env = "GH_TOKEN"

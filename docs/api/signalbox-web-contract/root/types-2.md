@@ -110,6 +110,7 @@ pub enum WebUsageCallKind {
     ModelCall,
     ApprovalJudge,
     ContextCompaction,
+    SessionTitle,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

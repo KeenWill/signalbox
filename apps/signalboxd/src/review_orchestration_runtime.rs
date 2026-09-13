@@ -43,9 +43,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::session_template_configuration::{
-    REVIEW_CONCERNS, REVIEW_IMPORT_TEMPLATE_NAME, REVIEW_JUDGMENT_TEMPLATE_NAME,
-    REVIEW_PUBLICATION_TEMPLATE_NAME, REVIEW_REPAIR_TEMPLATE_NAME, ReviewConcernTemplateSelection,
-    ReviewLibrarySelection, ReviewStageTemplateSelection, SessionTemplateConfiguration,
+    REVIEW_CONCERNS, REVIEW_IMPORT_TEMPLATE_NAME, REVIEW_PUBLICATION_TEMPLATE_NAME,
+    REVIEW_REPAIR_TEMPLATE_NAME, ReviewConcernTemplateSelection, ReviewLibrarySelection,
+    ReviewStageTemplateSelection, SessionTemplateConfiguration,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -904,7 +904,10 @@ fn authenticate_frozen_attempt_templates(
         concern_set_version: attempt.concern_set_version().clone(),
         stages: ReviewStageTemplateSelection {
             import: configured_template_name(REVIEW_IMPORT_TEMPLATE_NAME)?,
-            judgment: configured_template_name(REVIEW_JUDGMENT_TEMPLATE_NAME)?,
+            judgment: templates
+                .review_judgment_template_name()
+                .ok_or(ReviewOrchestrationRuntimeError::Rejected)?
+                .clone(),
             repair: configured_template_name(REVIEW_REPAIR_TEMPLATE_NAME)?,
             publication: configured_template_name(REVIEW_PUBLICATION_TEMPLATE_NAME)?,
         },
@@ -952,6 +955,10 @@ async fn build_submission(
     templates: &SessionTemplateConfiguration,
     attempt: &ReviewOrchestrationAttempt,
 ) -> Result<ClientSubmission, ReviewOrchestrationRuntimeError> {
+    let judgment_template = templates
+        .review_judgment_template_name()
+        .ok_or(ReviewOrchestrationRuntimeError::Rejected)?
+        .as_str();
     match request {
         ClientRequest::RecordReviewImportOutcome {
             pass_id,
@@ -1098,7 +1105,7 @@ async fn build_submission(
                 pool,
                 templates,
                 ReviewPassId::from_uuid(analysis_pass_id.into_uuid()),
-                REVIEW_JUDGMENT_TEMPLATE_NAME,
+                judgment_template,
             )
             .await?;
             let mut converted = Vec::with_capacity(members.len());
@@ -1168,13 +1175,7 @@ async fn build_submission(
                         &finding,
                         event_pass_id.ok_or(ReviewOrchestrationRuntimeError::InvalidRequest)?,
                     )?;
-                    authenticate_event_template(
-                        pool,
-                        templates,
-                        &event,
-                        REVIEW_JUDGMENT_TEMPLATE_NAME,
-                    )
-                    .await?;
+                    authenticate_event_template(pool, templates, &event, judgment_template).await?;
                     ReviewJudgmentEffectOutcome::Applied(Box::new(
                         ReviewJudgmentEffectSuccess::new(
                             event,

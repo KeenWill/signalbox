@@ -16,6 +16,7 @@ pub use file_media::DaemonFileMediaExecutor;
 mod git_push;
 mod pinned_file_system;
 mod retained_workspaces;
+mod review_diff;
 mod session_status;
 mod session_workspace_roots;
 mod shared_executor;
@@ -457,6 +458,9 @@ where
             delegation_catalog,
         ];
         catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
+        if workspace_bound.is_some() {
+            catalogs.push(review_diff::catalog()?);
+        }
         catalogs.extend(
             workspace_bound
                 .iter()
@@ -474,6 +478,7 @@ where
             executor: DaemonToolExecutor {
                 current_time,
                 echo,
+                runner_dispatch: None,
                 web_fetch,
                 web_search,
                 session_status,

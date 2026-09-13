@@ -590,6 +590,10 @@ web_search = "delegated"
 # [approval_judge]
 # selection_id = "c70bd4e1-3699-458c-ae03-310a77763807"
 
+# Session titles select one configured model and its settings profile.
+# [session_titles]
+# selection_id = "a5fec003-0edd-4118-96d1-18af31157bd3"
+
 # `provider_compaction = true` is an exact per-target capability. Omission is
 # fail-closed: the adapter neither enables server compaction nor replays opaque
 # compaction blocks for that resolved target.

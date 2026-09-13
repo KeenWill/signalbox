@@ -444,6 +444,7 @@ impl RunnerStateRoot {
                 });
             }
         };
+        journal.validate_owner(&state)?;
         Ok(Self {
             directory,
             state,
@@ -459,6 +460,52 @@ impl RunnerStateRoot {
     /// Projects the replayed durable journal into the next resume inventory.
     pub fn reconnect_inventory(&self) -> signalbox_runner_wire::ReconnectInventory {
         self.journal.reconnect_inventory()
+    }
+
+    /// Fsyncs the exact claimed lease phase before its named execution step.
+    pub fn record_lease_phase(
+        &mut self,
+        phase: signalbox_runner_wire::LeasePhase,
+    ) -> Result<(), RunnerStateError> {
+        match &self.state {
+            RunnerState::Enrolled { receipt }
+                if receipt.runner_id() == phase.correlation.runner_id
+                    && (receipt.registration_revision()
+                        == phase.correlation.registration_revision
+                        || self
+                            .journal
+                            .reconnect_inventory()
+                            .lease
+                            .as_ref()
+                            .is_some_and(|retained| retained.correlation == phase.correlation))
+                    && receipt.authority() == EnrollmentAuthority::Active => {}
+            _ => return Err(RunnerStateError::InvalidTransition),
+        }
+        self.journal.record_phase(&self.directory, phase)
+    }
+
+    /// Fsyncs one exact terminal envelope before it can be sent to the daemon.
+    pub fn record_terminal_result(
+        &mut self,
+        result: signalbox_runner_wire::RetainedResult,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.record_result(&self.directory, result)
+    }
+
+    /// Discards retained execution evidence only after its exact acknowledgement.
+    pub fn acknowledge_terminal_result(
+        &mut self,
+        correlation: &signalbox_runner_wire::LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_result(&self.directory, correlation)
+    }
+
+    pub(crate) fn discard_reconciled_lease(
+        &mut self,
+        correlation: &signalbox_runner_wire::LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.discard_lease(&self.directory, correlation)
     }
 
     /// Atomically fsyncs the first exact daemon-issued receipt.

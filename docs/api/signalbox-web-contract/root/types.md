@@ -18,6 +18,7 @@ pub struct WebContractIdentity {
 pub struct WebContractCapabilities {
     pub bounded_json: bool,
     pub same_origin_json_mutations: bool,
+    pub session_title_generation: bool,
     pub ndjson_streaming: bool,
     pub immutable_blob_content: bool,
     pub blob_derivations: bool,
@@ -149,6 +150,15 @@ pub struct WebCreateSessionRequest {
 pub struct WebCreateSessionResponse {
     pub session_id: WebSessionId,
     pub summary: WebSessionCatalogSummary,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSessionTitleSuggestion
+
+```rust
+pub struct WebSessionTitleSuggestion {
+    pub title: string::String,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

@@ -568,6 +568,52 @@ impl runner_protocol::RunnerProtocolStore {
     >;
 }
 impl runner_protocol::RunnerProtocolStore {
+    pub async fn runner_tool_posture(
+        &self,
+        session: signalbox_domain::SessionId,
+        tool: &signalbox_domain::ToolName,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ToolApprovalPosture>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn offer_tool_dispatch(
+        &self,
+        authority: &signalbox_domain::ToolDispatchAuthority,
+        lease_id: signalbox_domain::RunnerLeaseId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::RunnerLease>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn load_attempt_lease(
+        &self,
+        attempt: signalbox_domain::ToolAttemptId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::RunnerLease>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn pending_tool_lease(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+    ) -> result::Result<
+        option::Option<signalbox_domain::RunnerLease>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn claim_tool_lease(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        correlation: signalbox_domain::RunnerLeaseCorrelation,
+    ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
+    pub async fn record_tool_lease_result(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        correlation: signalbox_domain::RunnerLeaseCorrelation,
+        observation: signalbox_domain::ToolAttemptObservation,
+    ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
+}
+impl runner_protocol::RunnerProtocolStore {
     pub async fn replacement_workspace_releases(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
@@ -647,6 +693,19 @@ impl runner_protocol::RunnerProtocolStore {
     ) -> result::Result<
         runner_protocol::RunnerRecoveryOutcome<signalbox_domain::PromotePendingRunnerResult>,
         runner_protocol::RunnerRecoveryError,
+    >;
+}
+impl runner_protocol::RunnerProtocolStore {
+    pub async fn reconcile_tool_resume(
+        &self,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
+        observed: runner_protocol::IssuedRunnerEnrollmentIdentities,
+        prior_revision: runner_protocol::RunnerRegistrationRevision,
+        advertisement: &signalbox_domain::RunnerAdvertisement,
+        evidence: option::Option<runner_protocol::RunnerLeaseResumeEvidence>,
+    ) -> result::Result<
+        runner_protocol::RunnerLeaseResumeOutcome,
+        runner_protocol::RunnerProtocolStoreError,
     >;
 }
 ```
