@@ -86,6 +86,18 @@ function Preview() {
   const search = useLocation({ select: (location) => location.searchStr })
   const navigate = useNavigate()
   const query = new URLSearchParams(search)
+  if (query.get('preview') === 'attention-costs')
+    return (
+      <ol aria-label="Attention cost rows">
+        {[SEARCH_USAGE_SCENARIO_SESSION_ID, '00000000-0000-0000-0000-000000000995'].map(
+          (sessionId) => (
+            <li key={sessionId}>
+              <AttentionCost sessionId={sessionId} />
+            </li>
+          ),
+        )}
+      </ol>
+    )
   if (query.get('preview') === 'cost')
     return <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
   if (query.has('http')) return <UsageSurface />

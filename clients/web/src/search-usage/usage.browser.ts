@@ -301,3 +301,36 @@ test('never presents cached scenario usage as server usage during failed reads',
   await expect(rows).toHaveAttribute('data-total-loaded', '0')
   await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
 })
+
+test('distinguishes equal Attention costs by session in button navigation', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const otherSessionId = '00000000-0000-0000-0000-000000000995'
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/summary')
+      return route.fulfill({ json: { groups: [], truncated: false } })
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto('/src/search-usage/preview.html?preview=attention-costs')
+  const first = page.getByRole('button', {
+    name: `Cost for session ${SEARCH_USAGE_SCENARIO_SESSION_ID}: $0`,
+    exact: true,
+  })
+  const second = page.getByRole('button', {
+    name: `Cost for session ${otherSessionId}: $0`,
+    exact: true,
+  })
+  await expect(first).toHaveText('$0')
+  await expect(second).toHaveText('$0')
+  await first.focus()
+  await page.keyboard.press('Enter')
+  await expect(first).toHaveAttribute('aria-expanded', 'true')
+  await expect(second).toHaveAttribute('aria-expanded', 'false')
+  await page.keyboard.press('Tab')
+  await expect(second).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(second).toHaveAttribute('aria-expanded', 'true')
+})
