@@ -1891,6 +1891,23 @@ where
         Ok(Err(error)) => return Err(error),
         Err(_) => return Err(RunnerProtocolRuntimeError::HandshakeTimeout),
     };
+    let mut busy_lease = match &first.message {
+        Message::Resume(request) => request
+            .inventory
+            .lease
+            .as_ref()
+            .map(|lease| lease.correlation.clone()),
+        _ => None,
+    };
+    let mut busy_provision = match &first.message {
+        Message::Resume(request) => match &request.inventory.workspace_operation {
+            Some(signalbox_runner_wire::WorkspaceOperation::Provision { correlation, .. }) => {
+                Some(correlation.authorization_id)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     let context = match first.message {
         Message::Enroll(request) => match service.enroll(request).await {
             Ok(response) => {
@@ -1920,6 +1937,27 @@ where
                         enrollment,
                         epoch: response.connection_epoch,
                     };
+                    if response.directives.lease.as_ref().is_some_and(|directive| {
+                        matches!(
+                            directive.action,
+                            DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale
+                        )
+                    }) {
+                        busy_lease = None;
+                    }
+                    if response
+                        .directives
+                        .workspace_operation
+                        .as_ref()
+                        .is_some_and(|directive| {
+                            matches!(
+                                directive.action,
+                                DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale
+                            )
+                        })
+                    {
+                        busy_provision = None;
+                    }
                     if let Err(error) =
                         write_message(&mut writer, Message::Resumed(Box::new(response))).await
                     {
@@ -2036,14 +2074,21 @@ where
                     Message::OperationFailed(failure) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::OperationFailed, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.provisioning_failed(context.enrollment, failure).await {
-                            Ok(recorded) => write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?,
+                            Ok(recorded) => {
+                                if let signalbox_runner_wire::OperationCorrelation::Provision(correlation) = &recorded.correlation
+                                    && busy_provision == Some(correlation.authorization_id) { busy_provision = None; }
+                                write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?;
+                            },
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
                     }
                     Message::WorkspaceReady(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.workspace_ready(context.enrollment, receipt).await {
-                            Ok(Some(recorded)) => write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?,
+                            Ok(Some(recorded)) => {
+                                if busy_provision == Some(recorded.correlation.authorization_id) { busy_provision = None; }
+                                write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?;
+                            },
                             Ok(None) => {},
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
@@ -2096,7 +2141,10 @@ where
                     }
                     Message::Result(result) => {
                         match service.record_tool_result(context.enrollment, context.epoch, result).await {
-                            Ok(recorded) => write_message(&mut writer, Message::ResultRecorded(recorded)).await?,
+                            Ok(recorded) => {
+                                if busy_lease.as_ref() == Some(&recorded.correlation) { busy_lease = None; }
+                                write_message(&mut writer, Message::ResultRecorded(recorded)).await?;
+                            },
                             Err(failure) => {
                                 terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::Result, context.epoch, failure).await?;
                                 return Ok(());
@@ -2188,10 +2236,11 @@ where
                     }
                 }
             }
-            () = lease_changed(&mut lease_changes) => {
+            () = lease_changed(&mut lease_changes), if busy_provision.is_none() && busy_lease.is_none() => {
                 if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
                     let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
                     if sent_lease != Some(identity) {
+                        busy_lease = Some(offer.correlation.clone());
                         write_message(&mut writer, Message::LeaseOffer(offer)).await?;
                         sent_lease = Some(identity);
                     }
@@ -2209,8 +2258,10 @@ where
                         }
                         let operation = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next();
                         if let Some(operation) = operation
+                            && busy_lease.is_none() && busy_provision.is_none()
                             && sent_provisions.insert(operation.correlation.authorization_id)
                         {
+                            busy_provision = Some(operation.correlation.authorization_id);
                             write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
                         }
                         for release in service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
@@ -2863,9 +2914,32 @@ mod tests {
     #[derive(Clone)]
     struct EnrollmentService {
         response: Enrolled,
+        queued_work: Option<Arc<QueuedRunnerWork>>,
+    }
+
+    struct QueuedRunnerWork {
+        provision: signalbox_runner_wire::WorkspaceProvision,
+        offer: signalbox_runner_wire::LeaseOffer,
+        changes: watch::Sender<()>,
     }
 
     impl RunnerRegistrationService for EnrollmentService {
+        fn lease_changes(&self) -> Option<watch::Receiver<()>> {
+            self.queued_work
+                .as_ref()
+                .map(|work| work.changes.subscribe())
+        }
+        fn pending_tool_offer(
+            &self,
+            _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
+        ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::LeaseOffer>> {
+            Box::pin(std::future::ready(Ok(self
+                .queued_work
+                .as_ref()
+                .map(|work| work.offer.clone()))))
+        }
+
         fn promotion_receipt(
             &self,
             _enrollment: CanonicalUuid,
@@ -2908,7 +2982,11 @@ mod tests {
             &self,
             _enrollment: CanonicalUuid,
         ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>> {
-            Box::pin(std::future::ready(Ok(Vec::new())))
+            Box::pin(std::future::ready(Ok(self
+                .queued_work
+                .as_ref()
+                .map(|work| vec![work.provision.clone()])
+                .unwrap_or_default())))
         }
 
         fn workspace_ready(
@@ -3399,11 +3477,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisioning_holds_a_later_lease_offer_for_another_session() {
+        use signalbox_runner_wire::{
+            EffectClass, LeaseOffer, ProvisionCorrelation, ResultBounds, SandboxProfile,
+            WorkspaceProvision,
+        };
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let response = enrolled_response(request_id, &advertisement);
+        let mut correlation = canonical_lease_correlation();
+        correlation.runner_id = response.runner_id;
+        let provision = WorkspaceProvision {
+            correlation: ProvisionCorrelation {
+                authorization_id: identity(5),
+                session_id: identity(6),
+                runner_id: response.runner_id,
+                placement_revision: correlation.placement_revision,
+                registration_revision: response.registration_revision,
+                repository: None,
+                sandbox_profile: SandboxProfile::Ambient,
+                credential_profile: None,
+            },
+            recovery: None,
+        };
+        assert_ne!(provision.correlation.session_id, correlation.session_id);
+        let (changes, _) = watch::channel(());
+        let work = Arc::new(QueuedRunnerWork {
+            provision: provision.clone(),
+            changes,
+            offer: LeaseOffer {
+                correlation,
+                effect_class: EffectClass::Pure,
+                credential_profile: None,
+                grant_revision: None,
+                normalized_arguments: serde_json::json!({"text":"echo"}),
+                result_bounds: ResultBounds::version_one(),
+            },
+        });
+        let service = EnrollmentService {
+            response,
+            queued_work: Some(Arc::clone(&work)),
+        };
+        let (server, client) = UnixStream::pair().expect("local wire");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve_connection(server, service, shutdown));
+        let (reader, mut writer) = client.into_split();
+        let mut reader = BufReader::new(reader);
+        write_message(
+            &mut writer,
+            Message::Enroll(Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement,
+            }),
+        )
+        .await
+        .expect("enroll");
+        assert!(matches!(
+            read_frame(&mut reader).await.expect("receipt").message,
+            Message::Enrolled(_)
+        ));
+        assert!(matches!(
+            read_frame(&mut reader).await.expect("challenge").message,
+            Message::Heartbeat(_)
+        ));
+        assert_eq!(
+            read_frame(&mut reader).await.expect("provision").message,
+            Message::WorkspaceProvision(provision)
+        );
+        work.changes.send_replace(());
+        // The notification arrives while the first workspace is still awaiting its ready receipt.
+        assert!(
+            timeout(Duration::from_millis(50), read_frame(&mut reader))
+                .await
+                .is_err(),
+            "a second session's offer must remain queued while provisioning is unsettled"
+        );
+        drop(reader);
+        drop(writer);
+        server
+            .await
+            .expect("connection task joined")
+            .expect("closed peer is handled");
+    }
+
+    #[tokio::test]
     async fn enrollment_returns_the_exact_durable_service_receipt() {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let response = enrolled_response(request_id, &advertisement);
         let service = EnrollmentService {
+            queued_work: None,
             response: response.clone(),
         };
         let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
@@ -3444,7 +3608,10 @@ mod tests {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let response = enrolled_response(request_id, &advertisement);
-        let service = EnrollmentService { response };
+        let service = EnrollmentService {
+            response,
+            queued_work: None,
+        };
         let (_shutdown_sender, shutdown) = watch::channel(false);
         let future = RunnerProtocolRuntime::new(listener, service).run(shutdown);
 
@@ -3474,7 +3641,10 @@ mod tests {
             enrollment: response.enrollment_id,
             epoch: response.connection_epoch,
         };
-        let service = EnrollmentService { response };
+        let service = EnrollmentService {
+            response,
+            queued_work: None,
+        };
         let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
         let (_server_reader, mut server_writer) = server.into_split();
         let (client_reader, _client_writer) = client.into_split();
@@ -3506,6 +3676,7 @@ mod tests {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let service = EnrollmentService {
+            queued_work: None,
             response: enrolled_response(request_id, &advertisement),
         };
         let (server, _client) = UnixStream::pair().expect("a local runner stream pair exists");
@@ -3531,6 +3702,7 @@ mod tests {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let service = EnrollmentService {
+            queued_work: None,
             response: enrolled_response(request_id, &advertisement),
         };
         let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
@@ -3568,7 +3740,10 @@ mod tests {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let response = enrolled_response(request_id, &advertisement);
-        let service = EnrollmentService { response };
+        let service = EnrollmentService {
+            response,
+            queued_work: None,
+        };
         let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
         let (_shutdown_sender, shutdown) = watch::channel(false);
         let server = serve_connection(server, service, shutdown);
@@ -3615,6 +3790,7 @@ mod tests {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let service = EnrollmentService {
+            queued_work: None,
             response: enrolled_response(request_id, &advertisement),
         };
         let epoch = PositiveU64::try_new(7).expect("the fixture epoch is positive");
@@ -3658,6 +3834,7 @@ mod tests {
         let correlation = workspace_provision_correlation();
         let advertisement = empty_advertisement();
         let service = EnrollmentService {
+            queued_work: None,
             response: enrolled_response(correlation.authorization_id, &advertisement),
         };
         let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
@@ -3700,6 +3877,7 @@ mod tests {
         let correlation = workspace_provision_correlation();
         let advertisement = empty_advertisement();
         let service = EnrollmentService {
+            queued_work: None,
             response: enrolled_response(correlation.authorization_id, &advertisement),
         };
         let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
@@ -3754,6 +3932,7 @@ mod tests {
         let advertisement = empty_advertisement();
         let response = enrolled_response(request_id, &advertisement);
         let service = EnrollmentService {
+            queued_work: None,
             response: response.clone(),
         };
         let (shutdown_sender, shutdown) = watch::channel(false);
@@ -3791,7 +3970,10 @@ mod tests {
         let request_id = identity(1);
         let advertisement = empty_advertisement();
         let response = enrolled_response(request_id, &advertisement);
-        let service = EnrollmentService { response };
+        let service = EnrollmentService {
+            response,
+            queued_work: None,
+        };
         let (shutdown_sender, shutdown) = watch::channel(false);
         let runtime = tokio::spawn(RunnerProtocolRuntime::new(listener, service).run(shutdown));
         let stalled = UnixStream::connect(&path)

@@ -29,6 +29,8 @@ rust_binary(
 
 rust_unit_test(
     name = "unit_tests",
+    # Forking fixture children can retain another test's root lock until exec.
+    args = ["--test-threads=1"],
     crate = ":signalbox_runner",
 )
 
