@@ -1674,25 +1674,36 @@ where
         let mut receive_buffer = Vec::new();
         let mut lease_changes = service.lease_changes();
         let mut sent_lease = None;
+        let mut shutdown_requested = false;
         loop {
+        if shutdown_requested && sent_lease.is_none() {
+            if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
+                write_message(&mut writer, Message::LeaseOffer(offer)).await?;
+                sent_lease = Some(identity);
+            } else {
+                if transition_or_reject_not_current(
+                    &service,
+                    context,
+                    &mut writer,
+                    RunnerInboundFrameKind::Shutdown,
+                    context.epoch,
+                    RunnerConnectionTransition::DaemonShutdown,
+                ).await? {
+                    write_message(&mut writer, Message::Shutdown(Shutdown {
+                        connection_epoch: context.epoch,
+                        reason: ShutdownReason::DaemonShutdown,
+                    })).await?;
+                }
+                return Ok(());
+            }
+        }
         tokio::select! {
             biased;
-            changed = shutdown.changed() => {
+            changed = shutdown.changed(), if !shutdown_requested => {
                 if changed.is_err() || *shutdown.borrow() {
-                    if transition_or_reject_not_current(
-                        &service,
-                        context,
-                        &mut writer,
-                        RunnerInboundFrameKind::Shutdown,
-                        context.epoch,
-                        RunnerConnectionTransition::DaemonShutdown,
-                    ).await? {
-                        write_message(&mut writer, Message::Shutdown(Shutdown {
-                            connection_epoch: context.epoch,
-                            reason: ShutdownReason::DaemonShutdown,
-                        })).await?;
-                    }
-                    return Ok(());
+                    shutdown_requested = true;
+                    continue;
                 }
             }
             frame = read_frame_buffered(&mut reader, &mut receive_buffer) => {
@@ -1793,7 +1804,10 @@ where
                     }
                     Message::Result(result) => {
                         match service.record_tool_result(context.enrollment, context.epoch, result).await {
-                            Ok(recorded) => write_message(&mut writer, Message::ResultRecorded(recorded)).await?,
+                            Ok(recorded) => {
+                                write_message(&mut writer, Message::ResultRecorded(recorded)).await?;
+                                sent_lease = None;
+                            },
                             Err(failure) => {
                                 terminalize_protocol_rejection(&service, context, &mut writer, RunnerInboundFrameKind::Result, context.epoch, failure).await?;
                                 return Ok(());
