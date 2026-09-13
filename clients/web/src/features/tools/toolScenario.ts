@@ -111,6 +111,13 @@ const jsonCase = (
 }
 export const jsonExamples = [
   jsonCase(
+    'json_multiline_fields',
+    {},
+    Object.fromEntries(
+      Array.from({ length: 32 }, (_, index) => [`field_${index}`, 'a\nb\rc\r\nd']),
+    ),
+  ),
+  jsonCase(
     'json_oversized',
     { description: 'detail '.repeat(1000), last_field: 'end' },
     {},

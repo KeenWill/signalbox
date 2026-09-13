@@ -11,6 +11,19 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each(['\n', '\r', '\r\n'])('shares the field-list line budget for %j breaks', (separator) => {
+    const values = Object.fromEntries(
+      Array.from({ length: 32 }, (_, index) => [
+        `field_${index}`,
+        ['a', 'b', 'c', 'd', 'e'].join(separator),
+      ]),
+    )
+    const markup = render(toolExample('unknown_multiline', {}, values))
+    const rows = Array.from(markup.matchAll(/<dd>(.*?)<\/dd>/gs), (match) => match[1] ?? '')
+    expect(rows.reduce((lines, value) => lines + value.split(/\r\n|\r|\n/u).length, 0)).toBe(32)
+    expect(markup).toContain('Showing part of the details')
+  })
+
   it('labels an empty structured string as empty text', () => {
     const markup = render(
       toolExample(

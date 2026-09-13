@@ -71,6 +71,13 @@ for (const example of jsonExamples) {
     await expect(tool.locator('pre')).toHaveCount(0)
     expect((await tool.textContent())?.length).toBeLessThan(6000)
     expect(await tool.locator('dt').count()).toBeLessThanOrEqual(32)
+    if (example.name === 'json_multiline_fields') {
+      const values = await tool.locator('dd').allTextContents()
+      expect(
+        values.reduce((lines, value) => lines + value.split(/\r\n|\r|\n/u).length, 0),
+      ).toBeLessThanOrEqual(32)
+      await expect(tool).toContainText('Showing part of the details')
+    }
     const raw = tool.getByRole('button', { name: 'Raw', exact: true })
     await raw.focus()
     await page.keyboard.press('Enter')

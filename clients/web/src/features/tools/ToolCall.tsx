@@ -123,19 +123,21 @@ function valueSummary(value: unknown): string {
 function FieldList({ value }: { value: Fields }) {
   const entries = Object.entries(value)
   let remaining = ARTIFACT_PREVIEW_CHARACTERS
+  let remainingLines = ARTIFACT_PREVIEW_LINES
   const rows: { key: string; label: string; text: string }[] = []
   let trimmed = false
   for (const [key, item] of entries) {
-    if (rows.length === ARTIFACT_PREVIEW_LINES || remaining === 0) {
+    if (remainingLines === 0 || remaining === 0) {
       trimmed = true
       break
     }
     const label = Array.from(fieldLabel(key)).slice(0, remaining).join('')
     remaining -= Array.from(label).length
     const summary = valueSummary(item)
-    const preview = previewText(summary)
+    const preview = previewText(summary, remainingLines)
     const text = Array.from(preview.content).slice(0, remaining).join('')
     remaining -= Array.from(text).length
+    remainingLines -= text.split(/\r\n|\r|\n/u).length
     trimmed ||= label !== fieldLabel(key) || text !== summary
     rows.push({ key, label, text: summary === '' ? 'Empty text' : text })
   }

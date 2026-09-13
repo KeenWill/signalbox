@@ -38,7 +38,7 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
   }
 }
 
-export const previewText = (text: string) => {
+export const previewText = (text: string, maxLines = ARTIFACT_PREVIEW_LINES) => {
   let characters = 0
   let prefixCharacters = 0
   let lineBreaks = 0
@@ -49,7 +49,7 @@ export const previewText = (text: string) => {
     characters += 1
     if (stopped) continue
     if (character === '\r' || (character === '\n' && previous !== '\r')) lineBreaks += 1
-    if (prefixCharacters === ARTIFACT_PREVIEW_CHARACTERS || lineBreaks === ARTIFACT_PREVIEW_LINES) {
+    if (prefixCharacters === ARTIFACT_PREVIEW_CHARACTERS || lineBreaks === maxLines) {
       stopped = true
       continue
     }
