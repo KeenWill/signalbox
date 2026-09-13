@@ -1170,3 +1170,32 @@ test('a 413 rename rejection permits a corrected title with a new identity', asy
   await expect.poll(() => requests.length).toBe(2)
   expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
 })
+
+for (const finish of ['Save', 'Cancel', 'Escape']) {
+  test(`rename selects its row for keyboard navigation after ${finish}`, async ({ page }) => {
+    await useCatalogFixture(page)
+    await page.route(`**/api/sessions/${secondSessionId}/metadata`, (route) =>
+      route.fulfill({ status: 204 }),
+    )
+    await page.goto('/sessions')
+    await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeVisible()
+    await page.keyboard.press('j')
+    await expect(page.getByRole('button', { name: /Release verification/ })).toBeFocused()
+    const rename = page.getByRole('button', {
+      name: `Rename session ${secondSessionId}`,
+      exact: true,
+    })
+    await rename.click()
+    const input = page.getByRole('textbox', { name: 'Session title', exact: true })
+    await expect(input).toBeFocused()
+    if (finish === 'Escape') await input.press('Escape')
+    else await page.getByRole('button', { name: finish, exact: true }).click()
+    await expect(rename).toBeFocused()
+    await page.keyboard.press('j')
+    await expect(page.getByRole('button', { name: /^Catalog session 3 / })).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get('session'))
+      .toBe(continuationSummaries[0]?.session_id)
+  })
+}

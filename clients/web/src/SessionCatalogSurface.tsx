@@ -94,9 +94,11 @@ const SessionTitle = ({
 const SessionMetadata = ({
   summary,
   canRename,
+  onRename,
 }: {
   summary: SessionSummary
   canRename: boolean
+  onRename: () => void
 }) => {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
@@ -179,6 +181,7 @@ const SessionMetadata = ({
         ref={renameButton}
         aria-label={`Rename session ${summary.session_id}`}
         onClick={() => {
+          onRename()
           intent.current = retainedRename(summary.session_id)
           setTitle(
             intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
@@ -259,6 +262,7 @@ export function SessionCatalogSurface({
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
+  const renameSelection = useRef<string | null>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const errorHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
@@ -332,7 +336,9 @@ export function SessionCatalogSurface({
     return () => onTimelineIds([])
   }, [listed, onTimelineIds])
   useEffect(() => {
-    if (keyboardSelection && overlay === null)
+    const openingRename = renameSelection.current === keyboardSelection
+    renameSelection.current = null
+    if (keyboardSelection && overlay === null && !openingRename)
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
   useEffect(() => {
@@ -599,6 +605,11 @@ export function SessionCatalogSurface({
                     </button>
                     <SessionMetadata
                       summary={summary}
+                      onRename={() => {
+                        renameSelection.current =
+                          keyboardSelection === summary.session_id ? null : summary.session_id
+                        dispatch(actions.timelineSelected(summary.session_id))
+                      }}
                       canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
                     />
                   </li>
