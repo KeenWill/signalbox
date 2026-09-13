@@ -209,3 +209,9 @@ export const partialApproval = {
   turn_id: '00000000-0000-7000-8000-000000000002',
   approval_judge_escalated: false,
 }
+
+export const emptyStructuredRead = toolExample(
+  'file_read',
+  {},
+  { status: 'structured', body: {}, truncated: false, cursor: null },
+)[1]

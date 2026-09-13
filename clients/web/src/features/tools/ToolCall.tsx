@@ -296,7 +296,11 @@ function MediaRead({ arguments: args, result, resultExcerpt }: RendererProps) {
           {result.body !== null &&
           typeof result.body === 'object' &&
           !Array.isArray(result.body) ? (
-            <FieldList value={fields(result.body)} />
+            Object.keys(result.body).length === 0 ? (
+              <p>No fields</p>
+            ) : (
+              <FieldList value={fields(result.body)} />
+            )
           ) : (
             <p>{previewText(valueSummary(result.body)).content}</p>
           )}

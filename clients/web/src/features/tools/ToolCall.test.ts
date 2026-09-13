@@ -11,6 +11,29 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([0, 10])(
+    'labels a structured empty file body only with a complete excerpt at offset %s',
+    (offset) => {
+      const [, tool] = toolExample(
+        'file_read',
+        {},
+        { status: 'structured', body: {}, truncated: false, cursor: null },
+      )
+      if (tool.evidence.type !== 'physical_attempt' || !tool.evidence.result)
+        throw new Error('Result fixture required')
+      const result = {
+        ...tool.evidence.result,
+        offset_bytes: String(offset),
+        total_bytes: String(Number(tool.evidence.result.total_bytes) + offset),
+      }
+      const markup = renderToStaticMarkup(
+        createElement(ToolCall, { tool: { ...tool, evidence: { ...tool.evidence, result } } }),
+      )
+      expect(markup.includes('No fields')).toBe(offset === 0)
+      if (offset === 0) expect(markup).toContain('aria-label="File contents"')
+    },
+  )
+
   it.each([0, 128])('shows paged file_read output at byte %s', (offset) => {
     const [, tool] = toolExample('file_read', { view: 'text' }, {})
     if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')

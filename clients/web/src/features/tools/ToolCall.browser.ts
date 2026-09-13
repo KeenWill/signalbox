@@ -112,3 +112,22 @@ test('keeps a fetched approval rationale visible without a Raw toggle', async ({
   await expect(approval).not.toContainText('available in Raw')
   await expect(approval.getByRole('button', { name: 'Raw', exact: true })).toHaveCount(0)
 })
+
+test('labels a completely parsed empty structured file body', async ({ page }) => {
+  await page.goto('/src/features/tools/scenario.html?empty-read')
+  const tool = page
+    .getByRole('article', { name: 'Tool file_read', exact: true })
+    .filter({ has: page.getByRole('region', { name: 'File contents', exact: true }) })
+  await expect(tool.getByRole('region', { name: 'File contents', exact: true })).toHaveText(
+    'No fields',
+  )
+  await expect(tool.locator('pre')).toHaveCount(0)
+  await tool.getByRole('button', { name: 'Raw', exact: true }).click()
+  await expect(
+    page
+      .getByRole('article', { name: 'Tool file_read', exact: true })
+      .first()
+      .getByRole('region', { name: 'Output', exact: true })
+      .locator('code'),
+  ).toHaveText('{"status":"structured","body":{},"truncated":false,"cursor":null}')
+})
