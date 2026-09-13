@@ -92,3 +92,17 @@ test('the attention URL redirects to Sessions without a separate navigation entr
   ).toHaveCount(0)
   await expect(page.getByRole('checkbox', { name: 'Needs attention', exact: true })).toBeVisible()
 })
+
+test('keyboard selection follows visible attention rows', async ({ page }) => {
+  await installSessions(page)
+  await page.goto('/sessions')
+  await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
+  const row = page.getByRole('link').filter({ hasText: waitingSession })
+  await expect(row).toBeVisible()
+  await page.getByRole('main').focus()
+  await page.keyboard.press('j')
+  await expect(row).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`session=${waitingSession}`))
+})

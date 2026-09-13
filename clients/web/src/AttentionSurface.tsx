@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, Navigate } from '@tanstack/react-router'
 import { ArrowRight, Radio, RefreshCw } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { enumLabel, productLabels } from './labels'
@@ -41,9 +41,14 @@ export function AttentionSurface({
   return <Navigate to="/$surface" params={{ surface: 'sessions' }} replace />
 }
 
-export function AttentionSessions() {
+export function AttentionSessions({
+  onTimelineIds,
+}: {
+  onTimelineIds: (ids: readonly string[]) => void
+}) {
   const dispatch = useAppDispatch()
-  const phase = useAppSelector(selectApp).attentionSync
+  const { attentionSync: phase, selectedTimeline, overlay } = useAppSelector(selectApp)
+  const sessionLinks = useRef(new Map<string, HTMLAnchorElement>())
   const queryClient = useQueryClient()
   const [after, setAfter] = useState<string | null>(null)
   const [monitorGeneration, setMonitorGeneration] = useState(0)
@@ -78,8 +83,17 @@ export function AttentionSessions() {
     },
     gcTime: 0,
   })
-  const needingAttention =
-    attention.data?.summaries.filter((summary) => summary.action !== null) ?? []
+  const needingAttention = useMemo(
+    () => attention.data?.summaries.filter((summary) => summary.action !== null) ?? [],
+    [attention.data],
+  )
+  useEffect(() => {
+    onTimelineIds(needingAttention.map((summary) => summary.session_id))
+    return () => onTimelineIds([])
+  }, [needingAttention, onTimelineIds])
+  useEffect(() => {
+    if (selectedTimeline && overlay === null) sessionLinks.current.get(selectedTimeline)?.focus()
+  }, [selectedTimeline, overlay])
 
   useEffect(() => {
     void monitorGeneration
@@ -211,6 +225,11 @@ export function AttentionSessions() {
                   <li key={summary.session_id} className={`attention-${summary.state}`}>
                     <Link
                       className="attention-session-link"
+                      ref={(link) => {
+                        if (link) sessionLinks.current.set(summary.session_id, link)
+                        else sessionLinks.current.delete(summary.session_id)
+                      }}
+                      onFocus={() => dispatch(actions.timelineSelected(summary.session_id))}
                       to="/$surface"
                       params={{ surface: 'sessions' }}
                       search={{ session: summary.session_id, workspace: true }}

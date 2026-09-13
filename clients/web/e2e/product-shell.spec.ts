@@ -26,11 +26,6 @@ const settingsPreferenceFixture = {
   restoreAction: 'Restore defaults',
 } as const
 
-const emptyAttentionFixture = {
-  continuation_after_session_id: null,
-  cursor: '0',
-  summaries: [],
-} as const
 const emptySessionCatalogFixture = {
   continuation: null,
   cursor: '0',
@@ -39,22 +34,16 @@ const emptySessionCatalogFixture = {
   total: '0',
 } as const
 
-const useDeterministicAttention = async (page: Page) => {
-  await page.route('**/api/attention/follow', (route) =>
-    route.fulfill({
-      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
-      contentType: 'application/x-ndjson',
-    }),
+const useDeterministicCatalog = async (page: Page) => {
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({ json: emptySessionCatalogFixture }),
   )
-  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+  await page.route('**/api/sessions/rates**', (route) => route.fulfill({ json: { sessions: [] } }))
 }
 
 const useDeterministicBootstrap = async (page: Page) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
-  await page.route('**/api/sessions?**', (route) =>
-    route.fulfill({ json: emptySessionCatalogFixture }),
-  )
-  await useDeterministicAttention(page)
+  await useDeterministicCatalog(page)
 }
 
 const useRecoveringBootstrap = async (page: Page) => {
@@ -246,19 +235,16 @@ test('applies saved visual preferences before the first rendered frame', async (
     .toBe('light:comfortable')
 })
 
-test('opens the product at Attention after bootstrap admission', async ({ page }) => {
+test('opens the product at Sessions after bootstrap admission', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/')
 
-  await expect(page).toHaveURL(/\/attention$/)
-  await expect(page).toHaveTitle('Attention · Signalbox')
-  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveTitle('Sessions · Signalbox')
+  await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
   await expect(page.locator('.product-connection')).toHaveCount(0)
-  await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
-    'aria-current',
-    'page',
-  )
+  await expect(page.getByRole('link', { name: /Sessions/ })).toHaveAttribute('aria-current', 'page')
   const sessionsLink = page.getByRole('link', { name: /Sessions/ })
   await sessionsLink.focus()
   await page.keyboard.press('j')
@@ -266,7 +252,7 @@ test('opens the product at Attention after bootstrap admission', async ({ page }
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('navigates from Attention to Sessions with the shared semantic link', async ({ page }) => {
+test('redirects Attention to Sessions with the shared semantic link', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
@@ -292,7 +278,7 @@ test('restores the scenario title after leaving product routes', async ({ page }
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
-  await expect(page).toHaveTitle('Attention · Signalbox')
+  await expect(page).toHaveTitle('Sessions · Signalbox')
 
   await page.goto('/scenario/streaming')
 
@@ -429,8 +415,8 @@ test('sets route-aware product document titles', async ({ page }) => {
   await page.goto('/search')
   await expect(page).toHaveTitle('Search · Signalbox')
 
-  await page.getByRole('link', { name: /Attention/ }).click()
-  await expect(page).toHaveTitle('Attention · Signalbox')
+  await page.getByRole('link', { name: /Sessions/ }).click()
+  await expect(page).toHaveTitle('Sessions · Signalbox')
 })
 
 test('uses a navigation sheet on a phone viewport with a semantic close control', async ({
@@ -782,7 +768,7 @@ test('suspends product hotkeys while the command palette owns input', async ({ p
   await expect(palette).toBeVisible()
   await page.keyboard.press('g')
   await page.keyboard.press('s')
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(palette).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -801,7 +787,7 @@ test('clears scenario-only help when browser history returns to the product shel
   await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
   await page.goBack()
 
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.keyboard.press('g')
   await page.keyboard.press('s')
@@ -852,7 +838,7 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   await page.getByRole('button', { name: 'Open command palette' }).focus()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -864,7 +850,7 @@ test('suppresses product navigation sequences while an overlay owns input', asyn
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.keyboard.press('g')
   await page.keyboard.press('s')
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
 })
 
@@ -877,7 +863,7 @@ test('leaves unavailable scenario sequences inert on product routes', async ({ p
   await page.keyboard.press('g')
   await page.keyboard.press('g')
 
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(paletteButton).toBeFocused()
 })
 
@@ -900,7 +886,7 @@ test('restores focus before focus layout hides product navigation', async ({ pag
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
-  await page.getByRole('link', { name: 'Attention' }).focus()
+  await page.getByRole('link', { name: 'Sessions' }).focus()
   await page.keyboard.press('Shift+W')
 
   await expect(page.locator('.product-shell')).toHaveClass(/layout-focus/)
@@ -927,9 +913,9 @@ test('retries an initial bootstrap failure', async ({ page }) => {
   const expectedFailureMessage =
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
   await useBootstrapRecoveringAfterOneOutage(page)
-  // Attention reads start as soon as the retried bootstrap is admitted; serving them
+  // Catalog reads start as soon as the retried bootstrap is admitted; serving them
   // deterministically keeps the staged outage the only console error this scenario sees.
-  await useDeterministicAttention(page)
+  await useDeterministicCatalog(page)
   await page.goto('/attention')
 
   // A refused admission answers with a status, so `readBootstrap` raises a plain error and the
@@ -1126,7 +1112,7 @@ test('does not start Attention reads for incompatible bootstrap values', async (
 
 test('retries a transient Attention bootstrap failure in place', async ({ page }) => {
   const admission = await useBootstrapRecoveringAfterOneOutage(page)
-  await useDeterministicAttention(page)
+  await useDeterministicCatalog(page)
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
@@ -1569,7 +1555,7 @@ test('does not run product navigation sequences while a modal owns focus', async
   await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('g')
   await page.keyboard.press('s')
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(palette).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1660,9 +1646,9 @@ test('omits Scenario Studio from the phone navigation sheet', async ({ page }) =
 test('retries a transient bootstrap failure without reloading', async ({ page }) => {
   const problems = watchBrowser(page)
   const scenario = await useRecoveringBootstrap(page)
-  // Attention reads start as soon as the retried bootstrap is admitted; serving them
+  // Catalog reads start as soon as the retried bootstrap is admitted; serving them
   // deterministically keeps the staged bootstrap outage the only console error this scenario sees.
-  await useDeterministicAttention(page)
+  await useDeterministicCatalog(page)
   await page.goto('/attention')
 
   await expect(page.getByText('Daemon unavailable')).toBeVisible()
@@ -1989,8 +1975,8 @@ test('the wordmark returns home with keyboard activation', async ({ page }, test
   await expect(home).toHaveAttribute('href', '/attention')
   await home.focus()
   await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(/\/attention$/)
-  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('wordmark-home.png') })
 })
 
@@ -2006,10 +1992,10 @@ test('the sidebar rail remembers collapse and keeps keyboard navigation', async 
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '56px')
   await page.reload()
   await expect(page.getByRole('button', { name: 'Expand sidebar', exact: true })).toBeVisible()
-  const attention = page.getByRole('link', { name: 'Attention', exact: true })
+  const attention = page.getByRole('link', { name: 'Sessions', exact: true })
   await attention.focus()
   await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveURL(/\/sessions$/)
   await page.screenshot({ path: testInfo.outputPath('sidebar-rail.png') })
   await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '218px')

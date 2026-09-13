@@ -190,9 +190,10 @@ export function SessionCatalogSurface({
     return rows
   }, [sessions.data, rates.data, lifecycleFilter, pageOrder, rateById])
   useEffect(() => {
+    if (needsAttention) return
     onTimelineIds(listed.map((row) => row.session_id))
     return () => onTimelineIds([])
-  }, [listed, onTimelineIds])
+  }, [listed, needsAttention, onTimelineIds])
   useEffect(() => {
     if (keyboardSelection && overlay === null)
       sessionButtons.current.get(keyboardSelection)?.focus()
@@ -272,7 +273,7 @@ export function SessionCatalogSurface({
     return (
       <div className="surface-body catalog-surface">
         {attentionFilter}
-        <AttentionSessions />
+        <AttentionSessions onTimelineIds={onTimelineIds} />
       </div>
     )
 
