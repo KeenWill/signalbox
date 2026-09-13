@@ -101,7 +101,7 @@ export function AttentionSessions({
     gcTime: 0,
   })
   const needingAttention = useMemo(
-    () => attention.data?.summaries.filter((summary) => summary.action !== null) ?? [],
+    () => attention.data?.summaries.filter((summary) => summary.action != null) ?? [],
     [attention.data],
   )
   const previousRows = useRef(needingAttention)

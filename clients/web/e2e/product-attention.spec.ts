@@ -37,7 +37,6 @@ const attentionFixture = {
       state: 'blocked',
     },
     {
-      action: null,
       current_turn_id: null,
       goal_block: null,
       judge: { actionable: '0', completed: '12', escalated: '1', failed: '1' },
