@@ -622,12 +622,13 @@ excerpt. Physical attempts without a result or failure excerpt show their
 current state. Later batch members load on demand at the batch position as
 separate tool chips. A cursor advancing to another member is exposed outside the
 preceding tool disclosure; same-member argument, output and failure fields
-remain inside that disclosure. Goal-text cursors do not belong to tool
-disclosures, including cursors returned after reading tool text; nested reading
-controls stop before a goal field. Repeated terminal outcomes for the same turn
-and cause appear once at their first chronological position. Bookkeeping is
-hidden until Events is selected. Raw detail pages remain available to validate
-body continuations.
+remain inside that disclosure. Tool reading controls name their argument, output
+or failure path. Goal-only batch continuations do not stop automatic history
+scans. Goal-text cursors do not belong to tool disclosures, including cursors
+returned after reading tool text; nested reading controls stop before a goal
+field. Repeated terminal outcomes for the same turn and cause appear once at
+their first chronological position. Bookkeeping is hidden until Events is
+selected. Raw detail pages remain available to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

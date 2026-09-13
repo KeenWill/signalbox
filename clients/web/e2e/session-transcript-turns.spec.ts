@@ -269,8 +269,14 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   await chips.last().click()
   const slots = transcript.locator('.session-tool-slot')
   await expect(slots.first().getByText('Failure · Attempt lost on restart')).toBeVisible()
-  await slots.first().getByRole('button', { name: 'Read more', exact: true }).click()
-  await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
+  await slots
+    .first()
+    .getByRole('button', { name: /^Read more(?: .+)?$/ })
+    .click()
+  await slots
+    .last()
+    .getByRole('button', { name: /^Read more(?: .+)?$/ })
+    .click()
   await expect(slots.first().getByRole('region', { name: 'Failure', exact: true })).toContainText(
     'Runner disconnected during the release check.',
   )
@@ -431,7 +437,7 @@ test('keeps an open request disclosure and its continued text when physical atte
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const chips = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
   await chips.click()
-  await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+  await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
   await expect(continued).toContainText(text.slice(split))
   const retained = await continued.elementHandle()
@@ -465,6 +471,234 @@ test('keeps an open request disclosure and its continued text when physical atte
   await chips.last().click()
   await expect(chips.first()).toHaveAttribute('aria-expanded', 'false')
   await expect(chips.last()).toHaveAttribute('aria-expanded', 'true')
+  expect(problems).toEqual([])
+})
+
+test('distinguishes proposal arguments from the continuation that reaches tool output', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  const attempts = retriedToolItems()
+  const pending = attempts[1]
+  const first = attempts[4]
+  if (pending?.body.type !== 'tool_batch' || !first) throw new Error('Attempt fixture missing')
+  const text = '{"cmd":"release status --json --verbose"}'
+  const split = 16
+  const cursor = {
+    type: 'more_body' as const,
+    body: {
+      address: pending.address,
+      field: 'tool_arguments' as const,
+      member_index: 0,
+      offset_bytes: String(split),
+    },
+  }
+  const proposal = {
+    ...pending,
+    projected_body_bytes: 128 + split,
+    body: {
+      ...pending.body,
+      tools: pending.body.tools.map((tool) => ({
+        ...tool,
+        arguments: {
+          text: text.slice(0, split),
+          offset_bytes: '0',
+          total_bytes: String(text.length),
+          continuation: cursor.body,
+        },
+      })),
+    },
+  }
+  const entries = [attempts[0], proposal].filter((item) => item !== undefined)
+  await turnApi(page, undefined, entries)
+  let release = () => {}
+  const growth = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${detailSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            { kind: 'snapshot', snapshot: { ...detailLive, observed_through: '2' } },
+            {
+              kind: 'durable',
+              cursor: '3',
+              address: { event_sequence: '3' },
+              event_kind: 'tool_batch_transition',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/timeline')) {
+      const window = transcriptFixture(url, entries.length) as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind =
+          entries.find((entry) => entry.address.event_sequence === item.address.event_sequence)
+            ?.kind ?? item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      (url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) === '2'
+    ) {
+      const continued = url.searchParams.get('cursor_field') === 'tool_arguments'
+      return route.fulfill({
+        json: detailPage(
+          [
+            continued
+              ? {
+                  ...proposal,
+                  projected_body_bytes: 128 + text.length - split,
+                  body: {
+                    ...proposal.body,
+                    tools: proposal.body.tools.map((tool) => ({
+                      ...tool,
+                      arguments: {
+                        text: text.slice(split),
+                        offset_bytes: String(split),
+                        total_bytes: String(text.length),
+                        continuation: null,
+                      },
+                    })),
+                  },
+                }
+              : proposal,
+          ],
+          continued ? null : cursor,
+        ),
+      })
+    }
+    if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '3') {
+      const item = entries.find((entry) => entry.address.event_sequence === '3')
+      if (item?.body.type !== 'tool_batch') throw new Error('Result fixture missing')
+      const field = url.searchParams.get('cursor_field')
+      if (field === 'tool_result') {
+        if (first.body.type !== 'tool_batch') throw new Error('Result fixture missing')
+        return route.fulfill({
+          json: detailPage([
+            {
+              ...first,
+              address: item.address,
+              projected_body_bytes: toolResultItem().projected_body_bytes,
+              body: {
+                ...first.body,
+                tools: first.body.tools.map((tool) => ({ ...tool, arguments: null })),
+              },
+            },
+          ]),
+        })
+      }
+      const continued = field === 'tool_arguments'
+      return route.fulfill({
+        json: detailPage(
+          [
+            {
+              ...item,
+              projected_body_bytes: 128 + (continued ? text.length - split : split),
+              body: {
+                ...item.body,
+                tools: item.body.tools.map((tool) => ({
+                  ...tool,
+                  arguments: continued
+                    ? {
+                        text: text.slice(split),
+                        offset_bytes: String(split),
+                        total_bytes: String(text.length),
+                        continuation: null,
+                      }
+                    : tool.arguments,
+                })),
+              },
+            },
+          ],
+          continued
+            ? { ...resultCursor, body: { ...resultCursor.body, address: item.address } }
+            : { ...cursor, body: { ...cursor.body, address: item.address } },
+        ),
+      })
+    }
+    if (url.pathname === `/api/sessions/${detailSessionId}` || url.pathname.endsWith('/live'))
+      return route.fulfill({ json: transcriptFixture(url, entries.length) })
+    return route.fallback()
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const chips = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
+  await chips.click()
+  await expect(
+    transcript.getByRole('button', { name: 'Read more arguments', exact: true }),
+  ).toBeVisible()
+  if (first.body.type !== 'tool_batch') throw new Error('Physical attempt missing')
+  const address = { event_sequence: '3' }
+  entries.push({
+    ...first,
+    address,
+    projected_body_bytes: 128 + split,
+    body: {
+      ...first.body,
+      tools: first.body.tools.map((tool) => ({
+        ...tool,
+        arguments: {
+          text: text.slice(0, split),
+          offset_bytes: '0',
+          total_bytes: String(text.length),
+          continuation: { ...cursor.body, address },
+        },
+        evidence:
+          tool.evidence.type === 'physical_attempt'
+            ? { ...tool.evidence, result: null }
+            : tool.evidence,
+      })),
+    },
+  })
+  release()
+  await expect(chips).toHaveText('exec_command · Completed')
+  const argumentsReader = transcript.getByRole('button', {
+    name: 'Read more arguments',
+    exact: true,
+  })
+  const outputReader = transcript.getByRole('button', {
+    name: 'Read more arguments and output',
+    exact: true,
+  })
+  await expect(argumentsReader).toBeVisible()
+  await expect(outputReader).toBeVisible()
+  await expect(transcript.getByRole('button', { name: /^Read more/ })).toHaveCount(2)
+  await argumentsReader.click()
+  const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await expect(continued).toContainText(text.slice(split))
+  await expect(
+    continued.getByRole('button', { name: 'Continue reading', exact: true }),
+  ).toHaveCount(0)
+  await continued.getByRole('button', { name: 'Close details', exact: true }).click()
+  await outputReader.click()
+  await expect(continued).toContainText(text.slice(split))
+  await continued.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(continued.getByRole('region', { name: 'Output', exact: true })).toContainText(
+    'passed',
+  )
+  await page.screenshot({ path: testInfo.outputPath('distinct-tool-continuations.png') })
   expect(problems).toEqual([])
 })
 
@@ -647,7 +881,7 @@ for (const afterOutput of [false, true]) {
     expect(reads).toEqual([])
     if (afterOutput) {
       await chips.getByRole('button', { name: /^exec_command(?: · .+)?$/ }).click()
-      await chips.getByRole('button', { name: 'Read more', exact: true }).click()
+      await chips.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
       await expect(chips.getByText('First tool output', { exact: true })).toBeVisible()
     }
     await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
@@ -678,67 +912,83 @@ for (const afterOutput of [false, true]) {
   })
 }
 
-test('automatically scans past goal-only batch windows to earlier conversation', async ({
-  page,
-}) => {
-  const reads: string[] = []
-  const goal = detailExcerpt('Earlier goal outcome')
-  const batch = detailItems[1]
-  if (batch?.body.type !== 'tool_batch') throw new Error('Batch fixture missing')
-  await page.route('**/api/**', (route) => {
-    const url = new URL(route.request().url())
-    if (url.pathname.endsWith('/follow'))
-      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
-    if (url.pathname === '/api/attention')
-      return route.fulfill({
-        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
-      })
-    const payload = transcriptFixture(url)
-    if (url.pathname.endsWith('/timeline')) {
-      if (url.searchParams.get('max_items') === '8')
-        reads.push(url.searchParams.get('anchor') ?? '')
-      const window = payload as WebSessionTimelineWindow
-      const items = window.items.map((item) => {
-        const kind = Number(item.address.event_sequence) > 99984 ? batch.kind : item.kind
-        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
-      })
-      return route.fulfill({
-        json: {
-          ...window,
-          items,
-          projected_structured_bytes: items.reduce(
-            (sum, item) => sum + item.projected_structured_bytes,
-            0,
-          ),
-        },
-      })
-    }
-    if (
-      url.pathname.endsWith('/timeline-detail') &&
-      Number(url.searchParams.get('first')) > 99984
-    ) {
-      const item = {
-        ...batch,
-        address: { event_sequence: url.searchParams.get('first') ?? '' },
-        projected_body_bytes: 128 + Number(goal.total_bytes),
-        body: {
-          ...batch.body,
-          tools: [],
-          goal_events: [{ type: 'achieved' as const, generation: '1', text: goal }],
-        },
+for (const continuedGoal of [false, true]) {
+  test(`automatically scans past goal-only batch windows${continuedGoal ? ' with goal continuations' : ''} to earlier conversation`, async ({
+    page,
+  }) => {
+    const reads: string[] = []
+    const goal = detailExcerpt('Earlier goal outcome')
+    const batch = detailItems[1]
+    if (batch?.body.type !== 'tool_batch') throw new Error('Batch fixture missing')
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url)
+      if (url.pathname.endsWith('/timeline')) {
+        if (url.searchParams.get('max_items') === '8')
+          reads.push(url.searchParams.get('anchor') ?? '')
+        const window = payload as WebSessionTimelineWindow
+        const items = window.items.map((item) => {
+          const kind = Number(item.address.event_sequence) > 99984 ? batch.kind : item.kind
+          return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+        })
+        return route.fulfill({
+          json: {
+            ...window,
+            items,
+            projected_structured_bytes: items.reduce(
+              (sum, item) => sum + item.projected_structured_bytes,
+              0,
+            ),
+          },
+        })
       }
-      const detail = detailPage([item])
-      return route.fulfill({ json: { ...detail, session_id: transcriptSessionId } })
-    }
-    return route.fulfill({ json: payload })
+      if (
+        url.pathname.endsWith('/timeline-detail') &&
+        Number(url.searchParams.get('first')) > 99984
+      ) {
+        const address = { event_sequence: url.searchParams.get('first') ?? '' }
+        const continuation = continuedGoal
+          ? {
+              type: 'more_body' as const,
+              body: { address, field: 'goal_text' as const, member_index: 0, offset_bytes: '8' },
+            }
+          : null
+        const text = continuation
+          ? {
+              ...goal,
+              text: goal.text.slice(0, 8),
+              continuation: continuation.body,
+            }
+          : goal
+        const item = {
+          ...batch,
+          address,
+          projected_body_bytes: 128 + text.text.length,
+          body: {
+            ...batch.body,
+            tools: [],
+            goal_events: [{ type: 'achieved' as const, generation: '1', text }],
+          },
+        }
+        const detail = detailPage([item], continuation)
+        return route.fulfill({ json: { ...detail, session_id: transcriptSessionId } })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await expect(transcript.getByText('Message 99984', { exact: true })).toBeVisible()
+    expect(reads).toEqual(['latest', 'before', 'before'])
+    await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
+    expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
   })
-  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
-  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await expect(transcript.getByText('Message 99984', { exact: true })).toBeVisible()
-  expect(reads).toEqual(['latest', 'before', 'before'])
-  await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
-  expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
-})
+}
 
 test('does not offer a goal-text continuation inside a tool disclosure', async ({ page }) => {
   const item = detailItems[1]
@@ -774,7 +1024,7 @@ test('does not offer a goal-text continuation inside a tool disclosure', async (
   await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
     'release status',
   )
-  await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await expect(transcript.getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
   await expect(
     transcript.getByRole('button', { name: 'Show more tools', exact: true }),
   ).toHaveCount(0)
@@ -843,7 +1093,7 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const chips = transcript.getByRole('region', { name: 'Tools used' })
   await chips.getByRole('button', { name: /^exec_command(?: · .+)?$/ }).click()
-  await chips.getByRole('button', { name: 'Read more', exact: true }).click()
+  await chips.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   await expect(chips.getByText('tool', { exact: true })).toBeVisible()
   await chips.getByRole('button', { name: 'Continue reading', exact: true }).click()
   await expect(chips.getByText('output', { exact: true })).toBeVisible()
@@ -946,9 +1196,9 @@ test('identifies payload-free physical attempt states after a successful retry',
   await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
     'Failure · Attempt lost on restart',
   )
-  await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await expect(slots.first().getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
   await expect(slots.last().locator('.session-turn-outcome')).toHaveText('Completed')
-  await expect(slots.last().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await expect(slots.last().getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
   await slots.first().locator('.session-turn-outcome').scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
   expect(problems).toEqual([])
@@ -1006,7 +1256,7 @@ for (const [state, label] of [
     )
     await expect(details.getByText(label, { exact: true })).toBeVisible()
     await expect(details.getByRole('region', { name: 'Failure', exact: true })).toHaveCount(0)
-    await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+    await expect(transcript.getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
     await page.screenshot({ path: testInfo.outputPath(`${state}-tool-state.png`) })
   })
 }
