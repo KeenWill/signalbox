@@ -265,7 +265,7 @@ impl fmt::Display for WebHttpRuntimeError {
 
 impl Error for WebHttpRuntimeError {}
 
-/// Suggestion work submitted to the daemon incarnation's runtime task set.
+/// Title work submitted to the daemon incarnation's runtime task set.
 pub type SessionTitleTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 /// Bound browser HTTP runtime.

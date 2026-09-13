@@ -2022,11 +2022,15 @@ async fn run_hub_incarnation(
         signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.clone()),
         eligibility_nudge.clone(),
     );
+    // One handoff slot; the incarnation task set owns execution and drain.
+    let (title_tasks, mut pending_titles) =
+        tokio::sync::mpsc::channel::<signalboxd::web_http::SessionTitleTask>(1);
     let invocation_processes =
         signalboxd::credential_invocations::CredentialInvocationProcesses::new(
             pool.clone(),
             eligibility_nudge.clone(),
-        );
+        )
+        .with_session_title_tasks(title_tasks.clone());
 
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
@@ -2926,9 +2930,6 @@ async fn run_hub_incarnation(
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
-    // One handoff slot; the incarnation task set owns execution and drain.
-    let (title_tasks, mut pending_titles) =
-        tokio::sync::mpsc::channel::<signalboxd::web_http::SessionTitleTask>(1);
     let web_http_runtime = web_http_runtime.with_session_title_tasks(title_tasks);
     let mut runtime_tasks = JoinSet::new();
     let supervision_pool = pool.clone();
@@ -3158,7 +3159,7 @@ async fn run_hub_incarnation(
             }
         };
 
-        // Unstarted suggestions cannot cross an incarnation boundary.
+        // Unstarted title tasks cannot cross an incarnation boundary.
         pending_titles.close();
         while pending_titles.try_recv().is_ok() {}
         let _ = workflow_shutdown.send(());

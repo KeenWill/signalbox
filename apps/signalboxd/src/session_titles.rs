@@ -77,6 +77,35 @@ impl SessionTitles {
         self.processes.retain_initial_title(session, turn);
     }
 
+    pub(crate) async fn start_initial(&self, session: SessionId, turn: TurnId) {
+        match self.prepare(session, Some(turn)).await {
+            Ok(Some(prepared)) => self.submit_initial(prepared).await,
+            Ok(None) => {}
+            Err(TitleError::Unavailable | TitleError::Database) => {
+                self.defer_initial(session, turn);
+            }
+            Err(error) => {
+                tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title preparation failed");
+            }
+        }
+    }
+
+    pub(crate) async fn submit_initial(&self, prepared: PreparedTitle) {
+        let call = prepared.call.call;
+        let titles = self.clone();
+        if !self
+            .processes
+            .submit_title(Box::pin(async move {
+                if let Err(error) = titles.generate_prepared(prepared).await {
+                    tracing::warn!(?error, "initial session title generation failed");
+                }
+            }))
+            .await
+        {
+            self.close_before_send(call, TitleError::Unavailable).await;
+        }
+    }
+
     pub(crate) fn new(
         pool: sqlx::PgPool,
         models: Arc<HubModelConfiguration>,

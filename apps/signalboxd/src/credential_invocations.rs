@@ -25,6 +25,7 @@ pub struct CredentialInvocationProcesses {
     eligibility_nudge: InProcessEligibilityNudge,
     observed: Arc<Mutex<BTreeMap<ModelCallId, ObservedInvocation>>>,
     pending_titles: Arc<Mutex<BTreeMap<SessionId, TurnId>>>,
+    title_tasks: Option<tokio::sync::mpsc::Sender<crate::web_http::SessionTitleTask>>,
 }
 
 enum ObservedInvocation {
@@ -39,6 +40,23 @@ impl CredentialInvocationProcesses {
             eligibility_nudge,
             observed: Arc::default(),
             pending_titles: Arc::default(),
+            title_tasks: None,
+        }
+    }
+
+    /// Submits automatic title work to the daemon incarnation's runtime task set.
+    pub fn with_session_title_tasks(
+        mut self,
+        tasks: tokio::sync::mpsc::Sender<crate::web_http::SessionTitleTask>,
+    ) -> Self {
+        self.title_tasks = Some(tasks);
+        self
+    }
+
+    pub(crate) async fn submit_title(&self, task: crate::web_http::SessionTitleTask) -> bool {
+        match &self.title_tasks {
+            Some(tasks) => tasks.send(task).await.is_ok(),
+            None => false,
         }
     }
 
@@ -65,12 +83,7 @@ impl CredentialInvocationProcesses {
                     }
                     if let Some(titles) = configuration.session_titles(self.pool.clone()) {
                         for prepared in self.prepare_pending_titles(&titles).await {
-                            let titles = titles.clone();
-                            tokio::spawn(async move {
-                                if let Err(error) = titles.generate_prepared(prepared).await {
-                                    tracing::warn!(?error, "recovered initial session title generation failed");
-                                }
-                            });
+                            titles.submit_initial(prepared).await;
                         }
                     }
                 }
@@ -288,6 +301,42 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn runtime_abort_drains_automatic_title_work() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let (tasks, mut pending) = tokio::sync::mpsc::channel(1);
+        let processes =
+            CredentialInvocationProcesses::new(pool, nudge).with_session_title_tasks(tasks);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (held, mut ended) = tokio::sync::oneshot::channel::<()>();
+        assert!(
+            processes
+                .submit_title(Box::pin(async move {
+                    started.send(()).expect("fixture observes execution");
+                    std::future::pending::<()>().await;
+                    drop(held);
+                }))
+                .await
+        );
+        let mut runtime_tasks = tokio::task::JoinSet::new();
+        runtime_tasks.spawn(pending.recv().await.expect("runtime receives title task"));
+        ready.await.expect("generation started");
+        assert!(matches!(
+            ended.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        runtime_tasks.abort_all();
+        while runtime_tasks.join_next().await.is_some() {}
+        assert!(
+            ended.await.is_err(),
+            "runtime drain drops automatic generation"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn contended_initial_title_is_restored_after_restart_without_another_turn()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -435,6 +484,21 @@ mod tests {
             PrepareSessionTitleOutcome::Prepared
         );
         let processes = CredentialInvocationProcesses::new(pool.clone(), nudge.clone());
+        let unavailable = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
+        unavailable.close().await;
+        let failed_titles = crate::session_titles::SessionTitles::new(
+            unavailable,
+            models.clone(),
+            crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
+            processes.clone(),
+        );
+        failed_titles.start_initial(session, turn).await;
+        assert_eq!(
+            *processes.pending_titles.lock().expect("pending titles"),
+            BTreeMap::from([(session, turn)]),
+            "a pre-claim database failure retains completed-turn work"
+        );
         let titles = crate::session_titles::SessionTitles::new(
             pool.clone(),
             models.clone(),
@@ -445,8 +509,7 @@ mod tests {
             titles.prepare(session, Some(turn)).await,
             Err(crate::session_titles::TitleError::Unavailable)
         ));
-        titles.defer_initial(session, turn);
-        titles.defer_initial(session, turn);
+        titles.start_initial(session, turn).await;
         assert!(processes.prepare_pending_titles(&titles).await.is_empty());
         assert_eq!(
             processes
