@@ -73,3 +73,56 @@
   box-shadow: 0 8px 24px #0003;
   overflow-wrap: anywhere;
 }
+
+.surface-body > .session-composer {
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+.surface-body > .session-composer:focus-within {
+  border-color: var(--accent);
+}
+.surface-body > .session-composer textarea {
+  min-height: 3rem;
+  max-height: 30dvh;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  line-height: 1.5;
+  font-size: 0.85rem;
+}
+.surface-body .session-composer-actions {
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.session-attachment-affordance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+}
+.session-attachment-affordance button {
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+}
+.session-attachment-affordance svg {
+  width: 16px;
+  height: 16px;
+}
+.surface-body .session-composer-actions > button {
+  border-radius: 6px;
+}
+@media (max-width: 760px) {
+  .surface-body .session-composer-actions > [role="status"] {
+    flex-basis: 100%;
+  }
+  #session-composer-help {
+    flex-basis: 100%;
+  }
+}
