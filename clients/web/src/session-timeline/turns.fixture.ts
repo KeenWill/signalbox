@@ -50,7 +50,14 @@ export async function turnApi(page: Page, turnId = detailTurnId, entries = detai
             (url.searchParams.get('cursor_address') ?? url.searchParams.get('first') ?? '1'),
         )
       if (url.searchParams.get('cursor_field') === 'tool_result')
-        return route.fulfill({ json: detailPage([withTurn(toolResultItem())]) })
+        return route.fulfill({
+          json: detailPage([
+            {
+              ...withTurn(toolResultItem()),
+              address: { event_sequence: url.searchParams.get('cursor_address') ?? '2' },
+            },
+          ]),
+        })
       const items = item
         ? [
             item.body.type === 'user_input'
@@ -59,7 +66,12 @@ export async function turnApi(page: Page, turnId = detailTurnId, entries = detai
           ]
         : []
       return route.fulfill({
-        json: detailPage(items, item?.body.type === 'tool_batch' ? resultCursor : null),
+        json: detailPage(
+          items,
+          item?.body.type === 'tool_batch'
+            ? { ...resultCursor, body: { ...resultCursor.body, address: item.address } }
+            : null,
+        ),
       })
     }
     if (url.pathname === `/api/sessions/${detailSessionId}`)

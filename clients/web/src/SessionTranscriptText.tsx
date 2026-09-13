@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from '@tanstack/react-router'
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import { type CommandContext, invokeCommand } from './commands'
 import type {
@@ -20,7 +20,7 @@ import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
   groupTranscriptTurns,
   type TranscriptTurn,
-  toolContinuationSequence,
+  toolContinuations,
   turnSummaryParts,
 } from './session-timeline/turns'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
@@ -97,6 +97,7 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
 }
 
 export interface SessionTranscriptTextProps {
+  scrollRef?: RefObject<HTMLDivElement | null>
   sessionId: string
   first: string
   through: string
@@ -150,6 +151,7 @@ export function SessionTranscriptText(props: SessionTranscriptTextProps) {
 }
 
 function TranscriptWindow({
+  scrollRef,
   sessionId,
   observed,
   limits,
@@ -237,6 +239,7 @@ function TranscriptWindow({
           turn.messages.length > 0 ||
           turn.result ||
           turn.tools.length > 0 ||
+          turn.warnings.length > 0 ||
           turn.outcome,
       ),
     [entries, detail, turnModes, eventSequence],
@@ -326,6 +329,7 @@ function TranscriptWindow({
                     item.address.event_sequence === eventSequence)) ||
                 turn.messages.includes(item) ||
                 turn.result === item ||
+                turn.warnings.includes(item) ||
                 turn.outcome === item ||
                 (item.body.type === 'tool_batch' && turn.events.includes(item)),
             ),
@@ -395,6 +399,7 @@ function TranscriptWindow({
         <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
       <VirtualTranscript
+        scrollRef={scrollRef}
         ids={ids}
         initialEnd={initialAnchor.kind === 'latest'}
         onEndChange={(atEnd) => {
@@ -415,6 +420,7 @@ function TranscriptWindow({
                           (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
                         turn.messages.includes(item) ||
                         turn.result === item ||
+                        turn.warnings.includes(item) ||
                         turn.outcome === item ||
                         (item.body.type === 'tool_batch' && turn.events.includes(item)),
                     ),
@@ -530,6 +536,32 @@ function TurnContent({
       <ContinuedEvent sessionId={sessionId} page={page} limits={limits} />
     ) : null
   }
+  const moreTool = (tool: WebTimelineToolAttempt) =>
+    detailPages
+      .filter((candidate) => {
+        const cursor = candidate.continuation
+        const item = candidate.items.at(-1)
+        return (
+          cursor?.type === 'more_body' &&
+          ((item?.body.type === 'tool_batch' &&
+            item.body.tools.at(-1)?.request_id === tool.request_id) ||
+            toolContinuations(tool).some(
+              ({ continuation }) =>
+                cursor.body.address.event_sequence === continuation.address.event_sequence &&
+                cursor.body.field === continuation.field &&
+                cursor.body.member_index === continuation.member_index &&
+                cursor.body.offset_bytes === continuation.offset_bytes,
+            ))
+        )
+      })
+      .map((page) => (
+        <ContinuedEvent
+          key={JSON.stringify(page.continuation)}
+          sessionId={sessionId}
+          page={page}
+          limits={limits}
+        />
+      ))
   const events = [
     ...new Map(turn.events.map((event) => [event.address.event_sequence, event])).values(),
   ]
@@ -608,7 +640,7 @@ function TurnContent({
                     limits={limits}
                     renderTool={renderTool}
                   />
-                  {more(toolContinuationSequence(turn, entry))}
+                  {moreTool(entry)}
                 </div>
               ))}
             {detail === 'results' &&
@@ -622,7 +654,7 @@ function TurnContent({
                     limits={limits}
                     renderTool={renderTool}
                   />
-                  {more(toolContinuationSequence(turn, tool))}
+                  {moreTool(tool)}
                 </div>
               )}
           </section>

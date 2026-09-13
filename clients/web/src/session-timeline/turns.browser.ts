@@ -54,7 +54,9 @@ test('supplies loaded arguments and output to the tool renderer slot', async ({ 
   await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect(renderer).toHaveAttribute('data-detail', 'full')
   await page.getByRole('button', { name: 'Continue reading', exact: true }).click()
-  await expect(renderer).toContainText('passed')
+  await expect(renderer).toHaveCount(2)
+  await expect(renderer.first()).toContainText('release status')
+  await expect(renderer.last()).toContainText('passed')
 })
 
 test('unwinds turn expansion through the surface command and restores its focus', async ({

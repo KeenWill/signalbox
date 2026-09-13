@@ -5,7 +5,7 @@ import {
   detailTurnId,
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
-import { groupTranscriptTurns, toolContinuationSequence } from './turns'
+import { groupTranscriptTurns, toolContinuations, turnSummaryParts } from './turns'
 
 it('groups final text, user messages, and repeated tool evidence under the durable turn identity', () => {
   const turns = groupTranscriptTurns([
@@ -25,13 +25,30 @@ it('groups final text, user messages, and repeated tool evidence under the durab
   })
 })
 
-it('does not call a tool-producing response the final assistant result', () => {
+it('retains tool-producing assistant text as a non-final message in event order', () => {
   const response = detailItems[3]
-  if (response?.body.type !== 'model_call') throw new Error('model fixture missing')
-  const intermediate = { ...response, body: { ...response.body, model_call_id: detailCallId } }
-  const turn = groupTranscriptTurns([intermediate, ...detailItems.slice(0, 3)])[0]
-  expect(turn?.result).toBeUndefined()
-  expect(turn?.tools).toHaveLength(1)
+  const tool = detailItems[1]
+  if (response?.body.type !== 'model_call' || !tool) throw new Error('model/tool fixture missing')
+  const intermediate = {
+    ...response,
+    address: { event_sequence: '2' },
+    body: { ...response.body, model_call_id: detailCallId },
+  }
+  const turn = groupTranscriptTurns([
+    detailItems[0]!,
+    intermediate,
+    { ...tool, address: { event_sequence: '3' } },
+    response,
+    detailItems[4]!,
+  ])[0]
+  if (!turn) throw new Error('turn fixture missing')
+  expect(turn.messages).toEqual([detailItems[0], intermediate])
+  expect(turn.result).toBe(response)
+  expect(
+    turnSummaryParts(turn).map((part) =>
+      part.kind === 'message' ? part.item.address.event_sequence : 'tools',
+    ),
+  ).toEqual(['1', '2', 'tools', '4'])
 })
 
 it('keeps an unowned retired outcome visible without assigning it to a neighboring turn', () => {
@@ -58,8 +75,7 @@ it('requires a completed turn before presenting a completed model response as fi
   expect(groupTranscriptTurns(detailItems.slice(0, 4))[0]?.result).toBeUndefined()
 })
 
-it('preserves steering messages after the tools that precede them', async () => {
-  const { turnSummaryParts } = await import('./turns')
+it('preserves steering messages after the tools that precede them', () => {
   const input = detailItems[0]
   if (!input) throw new Error('input fixture missing')
   const turn = groupTranscriptTurns([
@@ -90,13 +106,33 @@ it('retains an unsuccessful turn outcome without a completed assistant response'
   expect(turn?.outcome).toEqual(failure)
 })
 
-it('continues merged result text at the event that supplied its excerpt', () => {
+it('retains every continuation from merged tool evidence', () => {
   const proposal = detailItems[1]
   const result = toolResultItem()
-  if (!proposal || result.body.type !== 'tool_batch') throw new Error('tool fixture missing')
+  if (proposal?.body.type !== 'tool_batch' || result.body.type !== 'tool_batch')
+    throw new Error('tool fixture missing')
+  const proposed = proposal.body.tools[0]
   const tool = result.body.tools[0]
-  if (!tool || tool.evidence.type !== 'physical_attempt' || !tool.evidence.result)
+  if (!proposed?.arguments || tool?.evidence.type !== 'physical_attempt' || !tool.evidence.result)
     throw new Error('result fixture missing')
+  const argumentsContinuation = {
+    address: { event_sequence: '2' },
+    field: 'tool_arguments' as const,
+    member_index: 0,
+    offset_bytes: '10',
+  }
+  const continuedProposal = {
+    ...proposal,
+    body: {
+      ...proposal.body,
+      tools: [
+        {
+          ...proposed,
+          arguments: { ...proposed.arguments, continuation: argumentsContinuation },
+        },
+      ],
+    },
+  }
   const continued = {
     ...tool,
     evidence: {
@@ -113,14 +149,17 @@ it('continues merged result text at the event that supplied its excerpt', () => 
     },
   }
   const turn = groupTranscriptTurns([
-    proposal,
+    continuedProposal,
     { ...result, address: { event_sequence: '6' }, body: { ...result.body, tools: [continued] } },
   ])[0]
   if (!turn?.tools[0]) throw new Error('grouped tool fixture missing')
-  expect(toolContinuationSequence(turn, turn.tools[0])).toBe('6')
+  expect(toolContinuations(turn.tools[0])).toEqual([
+    { field: 'arguments', continuation: argumentsContinuation },
+    { field: 'output', continuation: continued.evidence.result?.continuation },
+  ])
 })
 
-it('retains a provider failure when no response or only a generic failed outcome is loaded', () => {
+it('retains provider failures in event order without treating them as terminal outcomes', () => {
   const model = detailItems[3]
   const terminal = detailItems[4]
   if (model?.body.type !== 'model_call' || terminal?.body.type !== 'turn_lifecycle')
@@ -134,13 +173,24 @@ it('retains a provider failure when no response or only a generic failed outcome
       state: { type: 'terminal' as const, disposition: 'known_failed' as const },
     },
   }
-  expect(groupTranscriptTurns([failure])[0]?.outcome).toEqual(failure)
+  const failedTurn = groupTranscriptTurns([
+    failure,
+    { ...terminal, kind: 'turn_failed', body: { ...terminal.body, cause_code: 'failed' } },
+  ])[0]
+  expect(failedTurn?.warnings).toEqual([failure])
+  expect(failedTurn?.outcome?.body).toMatchObject({ cause_code: 'failed' })
+
+  const success = { ...model, address: { event_sequence: '6' } }
+  const completed = { ...terminal, address: { event_sequence: '7' } }
+  const retriedTurn = groupTranscriptTurns([failure, success, completed])[0]
+  if (!retriedTurn) throw new Error('retried turn fixture missing')
+  expect(retriedTurn.outcome).toBeUndefined()
+  expect(turnSummaryParts(retriedTurn).map((part) => part.kind)).toEqual(['message', 'message'])
   expect(
-    groupTranscriptTurns([
-      failure,
-      { ...terminal, kind: 'turn_failed', body: { ...terminal.body, cause_code: 'failed' } },
-    ])[0]?.outcome,
-  ).toEqual(failure)
+    turnSummaryParts(retriedTurn).map((part) =>
+      part.kind === 'message' ? part.item.address.event_sequence : 'tools',
+    ),
+  ).toEqual([failure.address.event_sequence, '6'])
 })
 
 it('keeps an intervening turn input before the earlier turn response', () => {
@@ -167,4 +217,25 @@ it('keeps an intervening turn input before the earlier turn response', () => {
   expect(turns[0]?.id).not.toBe(turns[2]?.id)
   expect(turns[0]?.result).toBeUndefined()
   expect(turns[2]?.result?.address.event_sequence).toBe('5')
+})
+
+it('merges repeated tool evidence into the first interleaved turn segment', () => {
+  const proposal = detailItems[1]
+  const input = detailItems[0]
+  const result = toolResultItem()
+  if (proposal?.body.type !== 'tool_batch' || input?.body.type !== 'user_input')
+    throw new Error('interleaved tool fixture missing')
+  const turns = groupTranscriptTurns([
+    proposal,
+    {
+      ...input,
+      address: { event_sequence: '3' },
+      body: { ...input.body, turn_id: '00000000-0000-0000-0000-000000000126' },
+    },
+    { ...result, address: { event_sequence: '4' } },
+  ])
+  expect(turns.map((turn) => turn.tools.length)).toEqual([1, 0, 0])
+  expect(turns[0]?.tools[0]?.evidence).toMatchObject({
+    result: { text: '{"release":"ready","checks":"passed"}' },
+  })
 })

@@ -1,6 +1,7 @@
 import { turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
 import {
+  detailCallId,
   detailExcerpt,
   detailItems,
   detailPage,
@@ -283,4 +284,42 @@ test('All details retains earlier message chunks through continuation failures a
   await input.getByRole('button', { name: 'Retry details' }).click()
   await expect(input.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
   await expect(input.getByRole('button', { name: 'Continue reading' })).toHaveCount(0)
+})
+
+test('preserves assistant text before its tool without treating it as the final response', async ({
+  page,
+}) => {
+  const input = detailItems[0]
+  const tool = detailItems[1]
+  const response = detailItems[3]
+  const completion = detailItems[4]
+  if (!input || !tool || response?.body.type !== 'model_call' || !completion)
+    throw new Error('Turn fixture missing')
+  const text = detailExcerpt('I will inspect the release status now.')
+  const intermediate = {
+    ...response,
+    address: { event_sequence: '2' },
+    projected_body_bytes: 128 + Number(text.total_bytes),
+    body: { ...response.body, model_call_id: detailCallId, response: text },
+  }
+  await turnApi(page, undefined, [
+    input,
+    intermediate,
+    { ...tool, address: { event_sequence: '3' } },
+    response,
+    completion,
+  ])
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.locator('.session-message-text')).toHaveText([
+    'Inspect the release status and retain the result.',
+    'I will inspect the release status now.',
+    'The release checks passed. Publishing remains unapproved.',
+  ])
+  await expect(transcript.locator('.session-message-text, .session-tool-chips')).toHaveText([
+    'Inspect the release status and retain the result.',
+    'I will inspect the release status now.',
+    'exec_command',
+    'The release checks passed. Publishing remains unapproved.',
+  ])
 })

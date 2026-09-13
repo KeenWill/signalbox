@@ -1,5 +1,6 @@
 import type {
   WebSessionTimelineDetail,
+  WebTimelineBodyContinuation,
   WebTimelineToolAttempt,
 } from '../generated/web-contract.mjs'
 
@@ -10,6 +11,7 @@ export interface TranscriptTurn {
   messages: WebSessionTimelineDetail[]
   result: WebSessionTimelineDetail | undefined
   tools: WebTimelineToolAttempt[]
+  warnings: WebSessionTimelineDetail[]
   outcome?: WebSessionTimelineDetail
 }
 
@@ -28,14 +30,34 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     const id = turnId ?? `event-${item.address.event_sequence}`
     let group = groups.get(id)
     if (!group) {
-      group = { id, turnId, events: [], messages: [], result: undefined, tools: [] }
+      group = {
+        id,
+        turnId,
+        events: [],
+        messages: [],
+        result: undefined,
+        tools: [],
+        warnings: [],
+      }
       groups.set(id, group)
     }
     group.events.push(item)
+    if (item.body.type === 'model_call' && item.body.provider_failure_cause && !item.body.response)
+      group.warnings.push(item)
+    if (item.body.type === 'tool_batch') {
+      for (const tool of item.body.tools) {
+        const index = group.tools.findIndex((known) => known.request_id === tool.request_id)
+        const previous = group.tools[index]
+        if (!previous) group.tools.push(tool)
+        else
+          group.tools[index] = {
+            ...tool,
+            arguments: tool.arguments ?? previous.arguments,
+            evidence: tool.evidence.type === 'request_only' ? previous.evidence : tool.evidence,
+          }
+      }
+    }
     if (
-      (item.body.type === 'model_call' &&
-        item.body.provider_failure_cause &&
-        !item.body.response) ||
       item.body.type === 'reconciliation' ||
       (item.body.type === 'event_fact' &&
         (item.body.kind === 'goal_turn_retired' ||
@@ -44,12 +66,7 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
         item.body.lifecycle === 'terminalized' &&
         item.body.cause_code !== 'completed')
     ) {
-      if (
-        item.body.type !== 'turn_lifecycle' ||
-        item.body.cause_code !== 'failed' ||
-        group.outcome?.body.type !== 'model_call'
-      )
-        group.outcome = item
+      group.outcome = item
     }
     if (item.body.type === 'user_input') group.messages.push(item)
     if (
@@ -61,6 +78,19 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
       group.result = item
   }
   for (const group of groups.values()) {
+    for (const event of group.events) {
+      const body = event.body
+      if (
+        body.type === 'model_call' &&
+        body.response &&
+        group.events.some(
+          (candidate) =>
+            candidate.body.type === 'tool_batch' &&
+            candidate.body.producing_model_call_id === body.model_call_id,
+        )
+      )
+        group.messages.push(event)
+    }
     if (
       !group.events.some(
         (event) =>
@@ -85,6 +115,7 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
     }
   }
   const segments: TranscriptTurn[] = []
+  const assignedTools = new Map<string, Set<string>>()
   for (const item of items) {
     const turnId = detailTurnId(item)
     const group = groups.get(turnId ?? `event-${item.address.event_sequence}`)
@@ -102,24 +133,26 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
         messages: [],
         result: undefined,
         tools: [],
+        warnings: [],
       }
       segments.push(segment)
     }
     segment.events.push(item)
     if (group.messages.includes(item)) segment.messages.push(item)
     if (group.result === item) segment.result = item
+    if (group.warnings.includes(item)) segment.warnings.push(item)
     if (group.outcome === item) segment.outcome = item
     if (item.body.type === 'tool_batch') {
-      for (const tool of item.body.tools) {
-        const index = segment.tools.findIndex((known) => known.request_id === tool.request_id)
-        const previous = segment.tools[index]
-        if (!previous) segment.tools.push(tool)
-        else
-          segment.tools[index] = {
-            ...tool,
-            arguments: tool.arguments ?? previous.arguments,
-            evidence: tool.evidence.type === 'request_only' ? previous.evidence : tool.evidence,
-          }
+      let assigned = assignedTools.get(group.id)
+      if (!assigned) {
+        assigned = new Set()
+        assignedTools.set(group.id, assigned)
+      }
+      for (const evidence of item.body.tools) {
+        if (assigned.has(evidence.request_id)) continue
+        assigned.add(evidence.request_id)
+        const tool = group.tools.find((known) => known.request_id === evidence.request_id)
+        if (tool) segment.tools.push(tool)
       }
     }
   }
@@ -134,7 +167,7 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
   const parts: TurnSummaryPart[] = []
   const seen = new Set<string>()
   for (const item of turn.events) {
-    if (item.body.type === 'user_input' || item === turn.result)
+    if (turn.messages.includes(item) || item === turn.result || turn.warnings.includes(item))
       parts.push({ kind: 'message', item })
     if (item.body.type !== 'tool_batch') continue
     for (const evidence of item.body.tools) {
@@ -150,22 +183,19 @@ export function turnSummaryParts(turn: TranscriptTurn): TurnSummaryPart[] {
   return parts
 }
 
-export function toolContinuationSequence(
-  turn: TranscriptTurn,
-  tool: WebTimelineToolAttempt,
-): string {
+export interface ToolContinuation {
+  field: 'arguments' | 'output' | 'failure'
+  continuation: WebTimelineBodyContinuation
+}
+
+export function toolContinuations(tool: WebTimelineToolAttempt): ToolContinuation[] {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
-  const cursor =
-    evidence?.result?.continuation ??
-    evidence?.failure?.continuation ??
-    tool.arguments?.continuation
-  return (
-    cursor?.address.event_sequence ??
-    turn.events.findLast(
-      (event) =>
-        event.body.type === 'tool_batch' &&
-        event.body.tools.some((entry) => entry.request_id === tool.request_id),
-    )?.address.event_sequence ??
-    ''
-  )
+  const continuations: ToolContinuation[] = []
+  if (tool.arguments?.continuation)
+    continuations.push({ field: 'arguments', continuation: tool.arguments.continuation })
+  if (evidence?.result?.continuation)
+    continuations.push({ field: 'output', continuation: evidence.result.continuation })
+  if (evidence?.failure?.continuation)
+    continuations.push({ field: 'failure', continuation: evidence.failure.continuation })
+  return continuations
 }
