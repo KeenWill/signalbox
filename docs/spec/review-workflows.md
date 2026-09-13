@@ -349,9 +349,9 @@ sixteen-request allowance and seventeen-round ceiling.
 `review-judgment-agentic-full-no-tools` exposes no tools and allows no requests.
 The list tool projects thread identities and locations from the attached PR/head
 context blob. The diff tool returns the containing or nearest head-side hunk for
-a literal path from the session's prepared head and base, bounded by the
-existing file-read byte ceiling with explicit truncation. These tools are absent
-from ordinary sessions.
+a literal path from the session's prepared patch through the pinned file reader,
+bounded by the existing file-read byte ceiling with explicit truncation. These
+tools are absent from ordinary sessions.
 
 `scripts/review_judge_eval.py --template review-judgment-agentic` supplies the
 candidate in full with 160-character, single-line synopses of the other findings

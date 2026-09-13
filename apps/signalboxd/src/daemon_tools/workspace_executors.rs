@@ -522,10 +522,13 @@ where
                 .await
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             let arguments = invocation.request().arguments().clone();
-            let evidence =
-                tokio::task::spawn_blocking(move || super::review_diff::read(&root, &arguments))
-                    .await
-                    .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            let filesystem = FileSystem::pin_further_root(&root)
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+            let evidence = tokio::task::spawn_blocking(move || {
+                super::review_diff::read(&filesystem, &root, &arguments)
+            })
+            .await
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             self.resolve_workspace_instruction_root(session)
                 .await
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;

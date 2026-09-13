@@ -83,10 +83,14 @@ def validate_result(result, finding_ids):
 
 
 def git(repository, *arguments):
+    return git_output(repository, *arguments).strip()
+
+
+def git_output(repository, *arguments):
     return subprocess.run(
         ["git", "-C", str(repository), *arguments], check=True,
         capture_output=True, text=True,
-    ).stdout.strip()
+    ).stdout
 
 
 def prepare_checkout(repository, workspace, head_sha):
@@ -162,7 +166,7 @@ class Trial:
                 full_text_bytes=args.sibling_full_text_bytes,
             )
         atomic_json(source / "input.json", context)
-        (source / "change.patch").write_text(git(
+        (source / "change.patch").write_text(git_output(
             tree, "diff", "--no-ext-diff", self.case["base_sha"], self.case["head_sha"], "--",
         ))
         output = source / "judgment.json"
@@ -194,8 +198,6 @@ class Trial:
             created = self.mutate("create", "create_session_from_template", template_name=args.template)
             tree = prepare_workspace(args.workspace, created["session_id"], tree,
                                      self.case["head_sha"], source / "change.patch", context["context"])
-            if full_context:
-                git(tree, "update-ref", "refs/review/base", self.case["base_sha"])
             minimal = {key: context[key] for key in ("head_sha", "base_sha", "pr_title", "pr_scope", "findings")}
             minimal["siblings"] = synopsis
             prompt = (

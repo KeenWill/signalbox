@@ -1,6 +1,9 @@
 //! Read-only diff hunks from a judgment session's prepared head and base.
 
-use std::path::{Component, Path};
+use std::{
+    io::Read,
+    path::{Component, Path},
+};
 
 use signalbox_application::{CompiledTool, CompiledToolCatalog, ToolExecutorEvidence};
 use signalbox_domain::{
@@ -8,6 +11,7 @@ use signalbox_domain::{
 };
 use signalbox_tool_contract::{ToolContract, compile_contract_definition};
 use signalbox_tool_schema_derive::ToolSchema;
+use signalbox_tools_workspace::{WorkspaceFileSystem, WorkspaceRoot};
 
 pub(super) const NAME: &str = "read_diff";
 
@@ -61,10 +65,25 @@ pub(super) fn catalog() -> Result<CompiledToolCatalog, super::DaemonToolsConstru
     .map_err(|_| super::DaemonToolsConstructionError::WorkspaceRead)
 }
 
-pub(super) fn read(root: &Path, arguments: &NormalizedToolArguments) -> ToolExecutorEvidence {
+pub(super) fn read<FileSystem: WorkspaceFileSystem>(
+    filesystem: &FileSystem,
+    root: &Path,
+    arguments: &NormalizedToolArguments,
+) -> ToolExecutorEvidence {
     let result = decode(arguments)
         .map_err(|error| error.to_string())
-        .and_then(|arguments| read_hunk(root, arguments).map_err(|error| error.to_string()));
+        .and_then(|arguments| {
+            let root =
+                WorkspaceRoot::try_new(filesystem, root).map_err(|error| error.to_string())?;
+            let mut reader = filesystem
+                .open_file_stream(&root, Path::new("change.patch"))
+                .map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            reader
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            read_hunk(&bytes, arguments).map_err(|error| error.to_string())
+        });
     match result {
         Ok(value) => ToolExecutorEvidence::CompletedText(value.to_string()),
         Err(error) => ToolExecutorEvidence::KnownFailed {
@@ -73,19 +92,18 @@ pub(super) fn read(root: &Path, arguments: &NormalizedToolArguments) -> ToolExec
     }
 }
 
-fn read_hunk(root: &Path, arguments: Arguments) -> Result<serde_json::Value, git2::Error> {
-    let repository = git2::Repository::open(root.join("head"))?;
-    let head = repository.head()?.peel_to_tree()?;
-    let base = repository
-        .find_reference("refs/review/base")?
-        .peel_to_tree()?;
-    let mut options = git2::DiffOptions::new();
-    options
-        .pathspec(&arguments.path)
-        .disable_pathspec_match(true);
-    let diff = repository.diff_tree_to_tree(Some(&base), Some(&head), Some(&mut options))?;
+fn read_hunk(bytes: &[u8], arguments: Arguments) -> Result<serde_json::Value, git2::Error> {
+    if bytes.is_empty() {
+        return Ok(serde_json::json!({"hunk": null}));
+    }
+    let diff = git2::Diff::from_buffer(bytes)?;
     let mut selected = None;
-    for index in 0..diff.deltas().len() {
+    for (index, delta) in diff.deltas().enumerate() {
+        if delta.new_file().path() != Some(Path::new(&arguments.path))
+            && delta.old_file().path() != Some(Path::new(&arguments.path))
+        {
+            continue;
+        }
         let Some(patch) = git2::Patch::from_diff(&diff, index)? else {
             continue;
         };
@@ -126,47 +144,28 @@ fn read_hunk(root: &Path, arguments: Arguments) -> Result<serde_json::Value, git
 mod tests {
     use super::*;
 
-    fn commit(repository: &git2::Repository, text: &str) -> git2::Oid {
-        std::fs::write(repository.workdir().unwrap().join("source.txt"), text).unwrap();
-        let mut index = repository.index().unwrap();
-        index.add_path(Path::new("source.txt")).unwrap();
-        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
-        let signature = git2::Signature::now("Fixture", "fixture@example.com").unwrap();
-        let parent = repository
-            .head()
-            .ok()
-            .map(|head| head.peel_to_commit().unwrap());
-        repository
-            .commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                "Fixture",
-                &tree,
-                &parent.iter().collect::<Vec<_>>(),
-            )
-            .unwrap()
-    }
+    const VALID_PATCH: &[u8] = b"diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-before\n+after\n";
 
     #[test]
     fn diff_read_selects_the_hunk_near_the_requested_head_line() {
-        let root = tempfile::tempdir().unwrap();
-        let repository = git2::Repository::init(root.path().join("head")).unwrap();
         let before = (1..=80)
             .map(|line| format!("line {line}\n"))
             .collect::<String>();
-        let base = commit(&repository, &before);
-        repository
-            .reference("refs/review/base", base, false, "Fixture base")
-            .unwrap();
-        commit(
-            &repository,
-            &before
-                .replace("line 6\n", "first change\n")
-                .replace("line 70\n", "second change\n"),
-        );
+        let after = before
+            .replace("line 6\n", "first change\n")
+            .replace("line 70\n", "second change\n");
+        let bytes = git2::Patch::from_buffers(
+            before.as_bytes(),
+            Some(Path::new("source.txt")),
+            after.as_bytes(),
+            Some(Path::new("source.txt")),
+            None,
+        )
+        .unwrap()
+        .to_buf()
+        .unwrap();
         let result = read_hunk(
-            root.path(),
+            &bytes,
             Arguments {
                 path: String::from("source.txt"),
                 line: 70,
@@ -177,5 +176,41 @@ mod tests {
         assert!(text.contains("+second change\n"));
         assert!(!text.contains("first change"));
         assert_eq!(result["hunk"]["truncated"], false);
+    }
+
+    #[test]
+    fn diff_read_rejects_a_patch_symlink_outside_the_session_root() {
+        use signalbox_tools_workspace::LocalWorkspaceFileSystem;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("session");
+        std::fs::create_dir(&root).unwrap();
+        let outside = directory.path().join("other.patch");
+        std::fs::write(&outside, VALID_PATCH).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("change.patch")).unwrap();
+        let arguments = NormalizedToolArguments::try_from_provider_text(String::from(
+            r#"{"path":"source.txt","line":1}"#,
+        ))
+        .unwrap();
+        assert!(matches!(
+            read(&LocalWorkspaceFileSystem, &root, &arguments),
+            ToolExecutorEvidence::KnownFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn diff_read_accepts_the_prepared_regular_patch() {
+        use signalbox_tools_workspace::LocalWorkspaceFileSystem;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("change.patch"), VALID_PATCH).unwrap();
+        let arguments = NormalizedToolArguments::try_from_provider_text(String::from(
+            r#"{"path":"source.txt","line":1}"#,
+        ))
+        .unwrap();
+        let ToolExecutorEvidence::CompletedText(text) =
+            read(&LocalWorkspaceFileSystem, root.path(), &arguments)
+        else {
+            panic!("regular prepared patch should be readable")
+        };
+        assert!(text.contains("+after"));
     }
 }
