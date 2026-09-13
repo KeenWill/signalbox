@@ -72,6 +72,23 @@ async fn completed_compactions(
     ))
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn title_context_excludes_prefixes_replaced_by_compaction() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, compaction) = completed_compactions(2).await?;
+    let session: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM context_compaction WHERE context_compaction_id = $1",
+    )
+    .bind(compaction.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let text = signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+        .conversation(SessionId::from_uuid(session), 4096)
+        .await?;
+    assert_eq!(text, "compacted fixture summary");
+    Ok(())
+}
+
 /// Runs the production evidence trigger independently of the already-committed
 /// record's immutability trigger, preserving its deferred commit boundary.
 async fn create_compaction_probe(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
