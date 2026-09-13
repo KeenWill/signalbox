@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { imageDescriptor } from '../src/features/artifacts/artifactScenario'
-import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
+import {
+  decodeWebBlobDescriptor,
+  decodeWebSessionTimelineDetailPage,
+  type WebSessionTimelineWindow,
+} from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
 import { openAttachmentConversation } from './attachment-api-fixture'
 import { expect, test } from './fontTest'
+import { detailExcerpt, detailPage, toolResultItem } from './session-detail-fixture'
 
 const image = decodeWebBlobDescriptor({
   ...imageDescriptor,
@@ -57,11 +63,14 @@ for (const view of ['preview', 'thumbnail'] as const) {
     await expect(media).toHaveCount(1)
     await media.scrollIntoViewIfNeeded()
     await expect(media.getByRole('img', { name: label })).toBeVisible()
+    const artifactRow = media.getByRole('article', { name: 'Artifact Image', exact: true })
+    await expect(artifactRow).not.toHaveAttribute('data-selected')
     await media.getByRole('img', { name: label }).click()
     const pane = page.getByRole('dialog', { name: 'Attachment details' })
     await expect(pane.getByRole('img', { name: label })).toBeVisible()
     await expect(pane).not.toContainText('sha256:')
     await page.keyboard.press('Escape')
+    await expect(artifactRow).toHaveAttribute('data-selected', 'true')
     await expect(
       media.getByRole('button', { name: 'Open Image details', exact: true }),
     ).toBeFocused()
@@ -132,7 +141,143 @@ for (const [mediaType, label, source] of [
     await expect(
       pane.getByRole('article', { name: `Artifact ${label}`, exact: true }),
     ).toBeVisible()
+    if (source === 'tool')
+      await expect(pane.locator('.artifact-document-placeholder')).toHaveText('PDF document')
     await expect(pane.getByRole('link', { name: 'Download' })).toBeVisible()
     await expect(pane).not.toContainText('sha256:')
+  })
+}
+
+for (const interleaved of [false, true]) {
+  test(`stops automatic summary scans at a media-returning tool window${interleaved ? ' split by another turn' : ''}`, async ({
+    page,
+  }) => {
+    const reads: string[] = []
+    const batch = toolResultItem()
+    if (batch.body.type !== 'tool_batch') throw new Error('Tool fixture required')
+    const body = batch.body
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      if (url.pathname.startsWith('/api/blobs/') && url.pathname.endsWith('/descriptor'))
+        return route.fulfill({ json: image })
+      if (url.pathname.includes('/content/'))
+        return route.fulfill({ body: preview, contentType: 'image/png' })
+      const payload = transcriptFixture(url)
+      if (url.pathname.endsWith('/timeline')) {
+        if (url.searchParams.get('max_items') === '8')
+          reads.push(url.searchParams.get('anchor') ?? '')
+        const window = payload as WebSessionTimelineWindow
+        const items = window.items.map((item) => {
+          const kind = Number(item.address.event_sequence) > 99992 ? batch.kind : item.kind
+          return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+        })
+        return route.fulfill({
+          json: {
+            ...window,
+            items,
+            projected_structured_bytes: items.reduce(
+              (sum, item) => sum + item.projected_structured_bytes,
+              0,
+            ),
+          },
+        })
+      }
+      if (
+        url.pathname.endsWith('/timeline-detail') &&
+        Number(url.searchParams.get('first')) > 99992
+      ) {
+        const item = {
+          ...batch,
+          projected_body_bytes: 130,
+          address: { event_sequence: url.searchParams.get('first') ?? '' },
+          body: {
+            ...body,
+            tools: body.tools.map((tool) => ({
+              ...tool,
+              arguments: detailExcerpt('{}'),
+              evidence:
+                tool.evidence.type === 'physical_attempt'
+                  ? {
+                      ...tool.evidence,
+                      result_present: true,
+                      result: null,
+                      result_media_reference: {
+                        digest: image.digest,
+                        length_bytes: image.byte_length,
+                        media_type: image.declared_media_type,
+                        presentation_kind: 'image' as const,
+                      },
+                    }
+                  : tool.evidence,
+            })),
+          },
+        }
+        if (interleaved) {
+          const sequence = Number(item.address.event_sequence)
+          if (sequence === 99996) {
+            return route.fulfill({
+              json: detailPage([
+                {
+                  ...item,
+                  projected_body_bytes: 128,
+                  body: {
+                    ...item.body,
+                    turn_id: '00000000-0000-0000-0000-000000000999',
+                    tools: [],
+                  },
+                },
+              ]),
+            })
+          }
+          if (sequence < 99996) {
+            return route.fulfill({
+              json: detailPage([
+                {
+                  ...item,
+                  body: {
+                    ...item.body,
+                    tools: item.body.tools.map((tool) => ({
+                      ...tool,
+                      evidence: { type: 'request_only' as const },
+                    })),
+                  },
+                },
+              ]),
+            })
+          }
+        }
+        return route.fulfill({
+          json: decodeWebSessionTimelineDetailPage({
+            ...detailPage([item], {
+              type: 'more_body',
+              body: {
+                address: item.address,
+                field: 'tool_result',
+                member_index: 0,
+                offset_bytes: '0',
+              },
+            }),
+            session_id: transcriptSessionId,
+          }),
+        })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    await expect(page.getByRole('list', { name: 'Attachments' })).toBeVisible()
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    )
+    expect(reads).toEqual(['latest'])
+    await expect(page.getByRole('list', { name: 'Attachments' })).toBeVisible()
   })
 }

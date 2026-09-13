@@ -1,0 +1,45 @@
+.dialog-content.new-session-dialog {
+  width: min(420px, calc(100vw - 24px));
+  font-size: 0.8rem;
+}
+.new-session-dialog > p {
+  margin: 0;
+  padding: 12px 16px 0;
+  color: var(--text-muted);
+}
+.new-session-form {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+.new-session-form select {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0.4rem 0.5rem;
+  color: var(--text);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+}
+.new-session-form p {
+  margin: 0;
+}
+.new-session-form button {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  font-size: 0.75rem;
+}
+.new-session-form button {
+  min-height: 32px;
+}
+
+.product-navigation .new-session-button {
+  width: 100%;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  text-align: left;
+}
+.product-navigation .new-session-button:hover {
+  background: var(--surface-2);
+}

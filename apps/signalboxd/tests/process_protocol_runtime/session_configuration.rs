@@ -31,6 +31,7 @@ pub(crate) async fn create_direct_session_with_settings(
         .request(
             1,
             ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id: command()?,
                 initial_model_selection: ModelSelection::Direct { selection_id },
                 model_settings,
@@ -63,6 +64,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
         .request(
             1,
             ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id: command()?,
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: unknown_selection,
@@ -255,6 +257,7 @@ async fn process_runtime_carries_the_session_system_prompt() -> Result<(), Box<d
             ProtocolVersion::One,
             1,
             ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id: command()?,
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: selection,
@@ -528,6 +531,7 @@ async fn create_session_replays_after_capability_removal() -> Result<(), Box<dyn
         .request(
             1,
             ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id,
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: primary_direct_selection_id(),
@@ -552,6 +556,7 @@ async fn create_session_replays_after_capability_removal() -> Result<(), Box<dyn
         .request(
             2,
             ClientRequest::CreateSession {
+                runner_placement: None,
                 command_id,
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: primary_direct_selection_id(),

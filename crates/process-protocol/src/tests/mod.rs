@@ -3,6 +3,7 @@
 mod blob;
 mod catalog_and_tools;
 mod conversation_import;
+mod creation_runner_placement;
 mod credential_exclusions;
 mod credential_pool;
 mod defaults_and_templates;

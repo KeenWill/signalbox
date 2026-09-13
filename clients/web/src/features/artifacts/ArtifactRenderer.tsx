@@ -1,3 +1,4 @@
+import * as Dialog from '@radix-ui/react-dialog'
 import {
   Ban,
   Braces,
@@ -666,30 +667,38 @@ export function ArtifactRenderer({
   onInspect?: (opener: HTMLButtonElement) => void
 }) {
   const selected = useAppSelector((state) => state.app.selectedArtifact === artifact.id)
+  const inspect = (control: HTMLButtonElement) => {
+    selectArtifact(commandContext, artifact.id)
+    onInspect?.(control)
+  }
+  const heading = (
+    <button
+      type="button"
+      className="artifact-heading"
+      aria-pressed={onInspect ? undefined : selected}
+      onClick={(event) => inspect(event.currentTarget)}
+    >
+      {artifactIcon(artifact)}
+      <div>
+        <strong>{artifact.displayName}</strong>
+        <small>
+          {enumLabel(artifact.kind === 'blocked' ? artifact.attemptedKind : artifact.kind)}
+        </small>
+      </div>
+    </button>
+  )
   return (
     <article
       className="artifact-row"
       aria-label={`Artifact ${artifact.displayName}`}
       data-selected={selected || undefined}
     >
-      <button
-        type="button"
-        className="artifact-heading"
-        aria-pressed={selected}
-        onClick={(event) => {
-          selectArtifact(commandContext, artifact.id)
-          onInspect?.(event.currentTarget)
-        }}
-      >
-        {artifactIcon(artifact)}
-        <div>
-          <strong>{artifact.displayName}</strong>
-          <small>
-            {enumLabel(artifact.kind === 'blocked' ? artifact.attemptedKind : artifact.kind)}
-          </small>
-        </div>
-      </button>
-      <RendererBoundary artifact={artifact} commandContext={commandContext} onInspect={onInspect} />
+      {onInspect ? <Dialog.Trigger asChild>{heading}</Dialog.Trigger> : heading}
+      <RendererBoundary
+        artifact={artifact}
+        commandContext={commandContext}
+        onInspect={onInspect ? inspect : undefined}
+      />
     </article>
   )
 }

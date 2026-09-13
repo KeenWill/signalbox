@@ -55,6 +55,7 @@ skip = []
 
 [[suite]]
 name = "signalboxd"
+# Includes runner_end_to_end, which launches both packaged binaries.
 package = "signalboxd"
 features = ["test-support"]
 # Two partitions ran under three and a half minutes each at sixteen test

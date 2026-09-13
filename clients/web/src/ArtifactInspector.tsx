@@ -1,12 +1,12 @@
 import { X } from 'lucide-react'
-import { type Dispatch, type RefObject, type SetStateAction, useMemo } from 'react'
+import { useMemo } from 'react'
 import type { CommandContext } from './commands'
 import { ArtifactRenderer, selectImageView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
-import { attachmentDescriptorMediaType } from './features/artifacts/attachmentMetadata'
 import { useArtifactDescriptor } from './features/artifacts/descriptorService'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
+import { attachmentTypeLabel } from './labels'
 import {
   type BlobDescriptorInput,
   ProductInputError,
@@ -24,20 +24,6 @@ export const artifactResolutionId = ({
 }: Pick<ArtifactRequest, 'digest' | 'sequence'>): string =>
   `product-artifact:${String(sequence)}:${digest}`
 
-export interface ArtifactInspectorState {
-  digest: string
-  mediaType: string
-  displayFilename: string
-  request: ArtifactRequest | null
-}
-
-export const emptyArtifactInspectorState: ArtifactInspectorState = {
-  digest: '',
-  mediaType: '',
-  displayFilename: '',
-  request: null,
-}
-
 // Resolution identities are allocated from a module-scoped counter rather than counted within the
 // inspector: the inspector's state unmounts with its route (an operator detour through Scenario
 // studio), while the original-load projection is mounted above the router and outlives it. A
@@ -50,24 +36,6 @@ let lastResolutionSequence = 0
 export const nextResolutionSequence = (): number => {
   lastResolutionSequence += 1
   return lastResolutionSequence
-}
-
-export const attachmentTypeLabel = (
-  mediaType?: string | null,
-  presentationKind?: 'image' | 'document',
-): string => {
-  const normalizedMediaType = attachmentDescriptorMediaType(mediaType)
-    .split(';', 1)[0]
-    ?.toLowerCase()
-  if (presentationKind === 'image') return 'Image'
-  if (presentationKind === 'document')
-    return normalizedMediaType === 'application/pdf' ? 'PDF' : 'Document'
-  if (normalizedMediaType?.startsWith('image/')) return 'Image'
-  if (normalizedMediaType?.startsWith('audio/')) return 'Audio'
-  if (normalizedMediaType?.startsWith('video/')) return 'Video'
-  if (normalizedMediaType === 'application/pdf') return 'PDF'
-  if (normalizedMediaType?.startsWith('text/')) return 'Text file'
-  return 'File'
 }
 
 // Project an operator-resolved descriptor into the typed artifact the shared renderer registry
@@ -84,10 +52,19 @@ export const inspectedArtifact = (
       descriptor.display_filename[0] ??
       attachmentTypeLabel(descriptor.declared_media_type, presentationKind),
   }
+  if (presentationKind === 'document')
+    return {
+      ...identity,
+      kind: 'document',
+      source: { kind: 'signalbox_blob', descriptor },
+      documentKind:
+        descriptor.declared_media_type.split(';', 1)[0]?.toLowerCase() === 'application/pdf'
+          ? 'pdf'
+          : 'document',
+    }
   return presentationKind === 'image' ||
-    (presentationKind !== 'document' &&
-      (selectImageView(descriptor) !== undefined ||
-        selectBoundedOriginalView(descriptor) !== undefined))
+    selectImageView(descriptor) !== undefined ||
+    selectBoundedOriginalView(descriptor) !== undefined
     ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
     : { ...identity, kind: 'blob', descriptor }
 }
@@ -105,7 +82,7 @@ export function ArtifactInspector({
   available,
   commandContext,
   onClose,
-  state,
+  request,
   presentationKind,
   expectedByteLength,
 }: {
@@ -113,12 +90,9 @@ export function ArtifactInspector({
   presentationKind?: 'image' | 'document'
   expectedByteLength?: string
   commandContext: CommandContext
-  digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
-  state: ArtifactInspectorState
-  onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
+  request: ArtifactRequest | null
 }) {
-  const { request } = state
   const descriptor = useArtifactDescriptor(available ? request : null, expectedByteLength)
 
   const resolved = descriptor.data

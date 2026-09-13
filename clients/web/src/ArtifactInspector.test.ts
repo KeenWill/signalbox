@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { attachmentTypeLabel, inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
+import { inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
 import {
   fallbackDescriptor,
   imageArtifact,
   jpegDescriptor,
 } from './features/artifacts/artifactScenario'
+import { attachmentTypeLabel } from './labels'
 
 describe('artifact inspector resolution identity', () => {
   it('keeps the retained presentation kind independent of declared MIME', () => {
@@ -20,8 +21,18 @@ describe('artifact inspector resolution identity', () => {
       nextResolutionSequence(),
       'document',
     )
-    expect(document.kind).toBe('blob')
+    expect(document.kind).toBe('document')
+    expect(document).toMatchObject({ documentKind: 'document', source: { kind: 'signalbox_blob' } })
     expect(document.displayName).toBe('Document')
+  })
+
+  it('projects PDF tool results into the document renderer', () => {
+    const descriptor = { ...fallbackDescriptor, declared_media_type: 'APPLICATION/PDF;x=y' }
+    expect(inspectedArtifact(descriptor, nextResolutionSequence(), 'document')).toMatchObject({
+      kind: 'document',
+      documentKind: 'pdf',
+      source: { kind: 'signalbox_blob', descriptor },
+    })
   })
 
   it('labels MIME types case-insensitively', () => {

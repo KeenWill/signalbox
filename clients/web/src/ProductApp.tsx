@@ -9,7 +9,6 @@ import {
   ChartNoAxesCombined,
   Command,
   Download,
-  FileSearch,
   GitPullRequest,
   Home,
   Menu,
@@ -17,6 +16,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Search,
   Settings,
   Sun,
@@ -35,17 +35,13 @@ import {
   useState,
 } from 'react'
 import { createPortal } from 'react-dom'
-import {
-  ArtifactInspector,
-  artifactResolutionId,
-  emptyArtifactInspectorState,
-} from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext } from './commands'
 import { Field } from './Field'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { loadRetainedCommand } from './imports/retainedCommand'
+import { NewSessionDialog } from './NewSessionDialog'
 import {
   ProductContractError,
   type ProductRouteId,
@@ -71,6 +67,7 @@ import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { UsageSurface } from './search-usage/UsageSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -116,12 +113,14 @@ export function ProductNavigation({
   active,
   context,
   onActivate,
+  onNewSession,
   collapsed,
 }: {
   collapsed?: boolean
   active: ProductRouteId
   context: ProductCommandContext
   onActivate?: () => void
+  onNewSession: (opener: HTMLButtonElement) => void
 }) {
   return (
     <div className={`product-navigation ${collapsed ? 'navigation-collapsed' : ''}`}>
@@ -167,6 +166,16 @@ export function ProductNavigation({
         )}
       </div>
       <nav aria-label="Product">
+        <button
+          type="button"
+          className="product-link new-session-button"
+          aria-label="New session"
+          title={collapsed ? 'New session' : undefined}
+          disabled={context.navigationLocked}
+          onClick={(event) => onNewSession(event.currentTarget)}
+        >
+          {collapsed ? <Plus aria-hidden="true" /> : <span>New session</span>}
+        </button>
         {productRoutes.map((route) => {
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
           const Icon = productNavigationIcons[route.id]
@@ -224,7 +233,6 @@ function CommandPalette({
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   const focusSearchAfterClose = useRef(false)
-  const openArtifactAfterClose = useRef(false)
   return (
     <Dialog.Root
       open={open}
@@ -239,12 +247,6 @@ function CommandPalette({
           aria-describedby="product-palette-description"
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
-            if (openArtifactAfterClose.current) {
-              event.preventDefault()
-              openArtifactAfterClose.current = false
-              invokeProductCommand('artifact.open', context)
-              return
-            }
             if (focusSearchAfterClose.current) {
               event.preventDefault()
               focusSearchAfterClose.current = false
@@ -292,14 +294,13 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
-                    openArtifactAfterClose.current = command.id === 'artifact.open'
                     focusSearchAfterClose.current = command.id === 'search.focus'
                     focusTimelineAfterClose.current =
                       command.id.startsWith('selection.') &&
                       productCommandAvailable(command.id, context)
                     if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
                     invokeProductCommand('surface.escape', context)
-                    if (!openArtifactAfterClose.current) invokeProductCommand(command.id, context)
+                    invokeProductCommand(command.id, context)
                   }}
                 >
                   <span>
@@ -493,13 +494,9 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
 }
 
 function ProductToolbar({
-  artifactAvailable,
-  artifactButtonRef,
   context,
   onOpenPalette,
 }: {
-  artifactAvailable: boolean
-  artifactButtonRef: RefObject<HTMLButtonElement | null>
   context: ProductCommandContext
   onOpenPalette: (opener: HTMLElement) => void
 }) {
@@ -513,16 +510,6 @@ function ProductToolbar({
         onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
-      </button>
-      <button
-        ref={artifactButtonRef}
-        className="icon-button"
-        type="button"
-        aria-label="Open artifact inspector"
-        disabled={!artifactAvailable}
-        onClick={() => invokeProductCommand('artifact.open', context)}
-      >
-        <FileSearch />
       </button>
       <button
         className="layout-button"
@@ -555,11 +542,6 @@ function ProductToolbar({
     </div>
   )
 }
-
-// Must stay identical to the `.product-inspector { display: none }` breakpoint in app.css:
-// a wider composition threshold than the visibility threshold would mount the side pane into a
-// hidden aside and focus a Digest input nobody can see.
-const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
 
 function useMediaQuery(media: string): boolean {
   const [narrow, setNarrow] = useState(() => window.matchMedia(media).matches)
@@ -595,8 +577,6 @@ export function ProductApp({
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
   const helpOpenerRef = useRef<HTMLElement | null>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
-  const artifactButtonRef = useRef<HTMLButtonElement>(null)
-  const artifactDigestRef = useRef<HTMLInputElement>(null)
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
   const catalogSessionOpenedHere = useLocation({
     select: (location) => location.state.catalogSessionOpenedHere === true,
@@ -607,8 +587,6 @@ export function ProductApp({
       currentCatalogSession.current = sessionState.session
     }
   }, [sessionState.session, surface])
-  const artifactSideWasOpen = useRef(false)
-  const inspectorWasInSheet = useRef(false)
   const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
   const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
     surfaceEscapeRef.current = handler
@@ -619,16 +597,6 @@ export function ProductApp({
       if (surfaceEscapeRef.current === handler) surfaceEscapeRef.current = null
     }
   }, [])
-  const [artifactOpen, setArtifactOpen] = useState(false)
-  const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
-  const artifactRequest = artifactInspectorState.request
-  useEffect(() => {
-    if (artifactRequest === null) return
-    return () => {
-      dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
-    }
-  }, [artifactRequest, dispatch])
-  const narrowInspector = useMediaQuery(INSPECTOR_SHEET_MEDIA)
   const narrowNavigation = useMediaQuery('(max-width: 760px)')
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
@@ -696,7 +664,6 @@ export function ProductApp({
     staleTime: Number.POSITIVE_INFINITY,
     enabled: surface !== 'settings',
   })
-  const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
   const bootstrapFailure = bootstrap.error
     ? bootstrap.error instanceof ProductTransportError
       ? 'Daemon unreachable'
@@ -704,7 +671,6 @@ export function ProductApp({
         ? 'Unexpected daemon response'
         : 'Daemon unavailable'
     : null
-  const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
   const revalidateBootstrap = bootstrap.refetch
   const productImportApi = useMemo(
@@ -756,7 +722,6 @@ export function ProductApp({
         }
         return false
       },
-      openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow:
         sessionState.workspace || sessionState.session
           ? (anchor) =>
@@ -798,7 +763,6 @@ export function ProductApp({
   }, [
     app.layout,
     narrowNavigation,
-    artifactAvailable,
     bootstrap.data,
     bootstrap.isSuccess,
     dispatch,
@@ -817,7 +781,6 @@ export function ProductApp({
     void sessionState.workspace
     if (document.activeElement === document.body) mainRef.current?.focus()
   }, [surface, sessionState.session, sessionState.workspace])
-  const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings
       .filter((binding) => productCommandAvailable(binding.commandId, context))
@@ -832,7 +795,6 @@ export function ProductApp({
         // field is editing.
         options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
         callback: (event) => {
-          if (artifactSheetOwnsFocus) return
           const searchFormOwnsTarget =
             surface === 'search' &&
             event.target instanceof HTMLElement &&
@@ -879,7 +841,6 @@ export function ProductApp({
       .map((binding) => ({
         sequence: binding.sequence,
         callback: (event) => {
-          if (artifactSheetOwnsFocus) return
           if (isEditableTarget(event.target)) return
           if (store.getState().app.overlay === null) {
             if (
@@ -902,45 +863,6 @@ export function ProductApp({
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
-
-  useEffect(() => {
-    const returnedToSidePane = artifactOpen && inspectorWasInSheet.current && !inspectorInSheet
-    if (artifactOpen && !inspectorInSheet && (!artifactSideWasOpen.current || returnedToSidePane)) {
-      artifactSideWasOpen.current = true
-      artifactDigestRef.current?.focus()
-    } else if (!artifactOpen) {
-      artifactSideWasOpen.current = false
-    }
-    inspectorWasInSheet.current = inspectorInSheet
-  }, [artifactOpen, inspectorInSheet])
-
-  const closeArtifactInspector = useCallback(() => {
-    artifactSideWasOpen.current = false
-    setArtifactOpen(false)
-    requestAnimationFrame(() => artifactButtonRef.current?.focus())
-  }, [])
-
-  useEffect(() => {
-    if (!artifactOpen || inspectorInSheet) return undefined
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || app.overlay !== null) return
-      const target = event.target
-      if (!(target instanceof Element) || !target.closest('.product-inspector')) return
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement ||
-        (target instanceof HTMLElement && target.isContentEditable)
-      ) {
-        return
-      }
-      event.preventDefault()
-      event.stopPropagation()
-      closeArtifactInspector()
-    }
-    window.addEventListener('keydown', closeOnEscape, true)
-    return () => window.removeEventListener('keydown', closeOnEscape, true)
-  }, [app.overlay, artifactOpen, closeArtifactInspector, inspectorInSheet])
 
   const title = productRoutes.find((route) => route.id === surface)?.label ?? surface
   const timelineCapability = bootstrap.isPending
@@ -975,6 +897,7 @@ export function ProductApp({
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
+        usageSource={productTransport}
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch(
@@ -1060,6 +983,14 @@ export function ProductApp({
           </div>
         </section>
       </div>
+    ) : surface === 'usage' && bootstrap.isSuccess ? (
+      <div className="surface-body">
+        <UsageSurface bootstrap={bootstrap.data} />
+      </div>
+    ) : surface === 'usage' ? (
+      <p role={bootstrap.isError ? 'alert' : 'status'}>
+        {bootstrap.isError ? 'Usage could not load.' : 'Loading usage…'}
+      </p>
     ) : surface === 'reviews' ? (
       <DeferredSurface surface="reviews" />
     ) : (
@@ -1070,16 +1001,20 @@ export function ProductApp({
     '--product-navigation-width': app.navigationCollapsed
       ? '56px'
       : `${app.paneSizes.navigation}px`,
-    '--product-inspector-width': `${app.paneSizes.inspector}px`,
   } as CSSProperties
 
   return (
-    <div
-      className={`product-shell layout-${app.layout} ${artifactOpen && !inspectorInSheet ? 'has-artifact-inspector' : ''}`}
-      style={shellStyle}
-    >
+    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} context={context} collapsed={app.navigationCollapsed} />
+        <ProductNavigation
+          active={surface}
+          context={context}
+          collapsed={app.navigationCollapsed}
+          onNewSession={(opener) => {
+            paletteOpenerRef.current = opener
+            invokeProductCommand('session.new', context)
+          }}
+        />
       </aside>
       <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">
@@ -1135,8 +1070,6 @@ export function ProductApp({
               </div>
             )}
             <ProductToolbar
-              artifactAvailable={artifactAvailable}
-              artifactButtonRef={artifactButtonRef}
               context={context}
               onOpenPalette={(opener) => {
                 paletteOpenerRef.current = opener
@@ -1146,18 +1079,7 @@ export function ProductApp({
         </header>
         <SurfaceHeaderTarget value={headerTarget}>{content}</SurfaceHeaderTarget>
       </main>
-      {artifactOpen && !inspectorInSheet && (
-        <aside className="product-inspector" aria-label="Inspector">
-          <ArtifactInspector
-            available={artifactAvailable}
-            commandContext={context}
-            digestInputRef={artifactDigestRef}
-            onClose={closeArtifactInspector}
-            state={artifactInspectorState}
-            onStateChange={setArtifactInspectorState}
-          />
-        </aside>
-      )}
+      <NewSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <OpenSessionDialog context={context} openerRef={paletteOpenerRef} fallbackRef={mainRef} />
       <CommandPalette
         context={context}
@@ -1180,6 +1102,10 @@ export function ProductApp({
             onCloseAutoFocus={(event) => {
               const opener = navigationOpenerRef.current
               navigationOpenerRef.current = null
+              if (app.overlay === 'new-session') {
+                event.preventDefault()
+                return
+              }
               if (opener?.isConnected && opener.getClientRects().length > 0) {
                 event.preventDefault()
                 opener.focus()
@@ -1203,41 +1129,10 @@ export function ProductApp({
               active={surface}
               context={context}
               onActivate={() => dispatch(actions.overlaySet(null))}
-            />
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-      <Dialog.Root
-        open={artifactOpen && inspectorInSheet && app.overlay === null}
-        onOpenChange={(open) => {
-          if (!open && app.overlay === null) closeArtifactInspector()
-        }}
-      >
-        <Dialog.Portal>
-          <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content
-            className="artifact-sheet"
-            aria-describedby="artifact-sheet-description"
-            onEscapeKeyDown={(event) => event.stopPropagation()}
-            onOpenAutoFocus={(event) => {
-              event.preventDefault()
-              artifactDigestRef.current?.focus()
-            }}
-            onCloseAutoFocus={(event) => {
-              event.preventDefault()
-            }}
-          >
-            <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
-            <Dialog.Description id="artifact-sheet-description" className="sr-only">
-              Look up a blob by digest.
-            </Dialog.Description>
-            <ArtifactInspector
-              available={artifactAvailable}
-              commandContext={context}
-              digestInputRef={artifactDigestRef}
-              onClose={closeArtifactInspector}
-              state={artifactInspectorState}
-              onStateChange={setArtifactInspectorState}
+              onNewSession={() => {
+                paletteOpenerRef.current = navigationOpenerRef.current
+                invokeProductCommand('session.new', context)
+              }}
             />
           </Dialog.Content>
         </Dialog.Portal>

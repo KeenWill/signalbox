@@ -408,6 +408,7 @@ test_suite(
         "//apps/signalboxd:process_protocol_runtime",
         "//apps/signalboxd:process_substrate",
         "//apps/signalboxd:repo_watch_v2_postgres",
+        "//apps/signalboxd:runner_end_to_end",
         "//apps/signalboxd:web_http",
         "//apps/signalboxd:web_session_input",
         "//crates/blob-store-filesystem:conformance",
@@ -837,6 +838,7 @@ DAEMON_TEST_BINARIES = {
     "//apps/signalboxd:process_protocol_runtime": "process_protocol_runtime",
     "//apps/signalboxd:process_substrate": "process_substrate",
     "//apps/signalboxd:repo_watch_v2_postgres": "repo_watch_v2_postgres",
+    "//apps/signalboxd:runner_end_to_end": "runner_end_to_end",
     "//apps/signalboxd:web_http": "web_http",
     "//apps/signalboxd:web_session_input": "web_session_input",
 }

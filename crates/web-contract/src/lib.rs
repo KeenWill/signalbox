@@ -180,6 +180,58 @@ pub struct WebSubmitInputRequest {
     pub message: String,
 }
 
+/// Stops the named turn by accepting a successor message with session defaults.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebCancelTurnRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+    /// Active turn observed when the action was chosen.
+    pub expected_active_turn_id: String,
+    /// User message for the immediate successor turn.
+    pub message: String,
+}
+
+/// A durable human decision for the request named by the route.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebApprovalRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+    /// Human approval or denial.
+    pub decision: WebApprovalDecision,
+    /// Optional denial explanation.
+    pub note: Option<String>,
+}
+
+/// Human decisions admitted by the ordinary tool decision command.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebApprovalDecision {
+    /// Permit this request.
+    Approve,
+    /// Refuse this request.
+    Deny,
+}
+
+/// Attaches a goal through the ordinary user goal command.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebGoalRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+    /// Immutable statement of work.
+    pub statement: String,
+}
+
+/// Identity of a durable session action with no additional payload.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionActionRequest {
+    /// Durable command identity, retained on retry.
+    pub command_id: String,
+}
+
 /// Creates an interactive session using the named template's defaults.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1045,6 +1097,12 @@ pub struct WebSessionSupervision {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    /// Current human title projected by the session catalog.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
+    pub title_summary: Option<String>,
+    /// Current catalog activity, including its timestamp and category.
+    pub last_activity: WebSessionCatalogActivity,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub supervision: Option<WebSessionSupervision>,
@@ -3078,6 +3136,26 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSubmitInputRequest",
             decoder: "decodeWebSubmitInputRequest",
             schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebCancelTurnRequest",
+            decoder: "decodeWebCancelTurnRequest",
+            schema: canonical_schema(schemars::schema_for!(WebCancelTurnRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebApprovalRequest",
+            decoder: "decodeWebApprovalRequest",
+            schema: canonical_schema(schemars::schema_for!(WebApprovalRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebGoalRequest",
+            decoder: "decodeWebGoalRequest",
+            schema: canonical_schema(schemars::schema_for!(WebGoalRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebSessionActionRequest",
+            decoder: "decodeWebSessionActionRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSessionActionRequest).to_value()),
         },
         ContractSchema {
             name: "WebCreateSessionRequest",
@@ -5655,6 +5733,40 @@ mod tests {
             .expect("summary object")
             .remove("repository_watch");
         assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(missing).is_err());
+    }
+
+    #[test]
+    fn descriptor_header_facts_require_nullable_title_and_non_null_activity() {
+        let descriptor = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "title_summary": null,
+            "last_activity": { "kind": "session", "unix_microseconds": "1" },
+            "supervision": null, "workspace_root_kind": null, "repository_watch": null,
+            "sizes": { "item_count": "1", "projected_text_bytes": "0",
+                "projected_structured_bytes": "96", "referenced_blob_count": "0",
+                "referenced_blob_bytes": "0" },
+            "first_address": { "event_sequence": "1" }, "latest_address": { "event_sequence": "1" },
+            "work": { "active_turn_count": "0", "queued_turn_count": "0" }, "observed_through": "1",
+        });
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(descriptor.clone())
+                .is_ok()
+        );
+        for field in ["title_summary", "last_activity"] {
+            let mut missing = descriptor.clone();
+            missing
+                .as_object_mut()
+                .expect("descriptor object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebSessionTimelineDescriptor>(missing).is_err()
+            );
+        }
+        let mut null_activity = descriptor;
+        null_activity["last_activity"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(null_activity).is_err()
+        );
     }
 
     #[test]

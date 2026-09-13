@@ -5,18 +5,21 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
-import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { WebSessionTimelineWindow, WebUsageSummary } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
+import './session-polish.css'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
+import type { SearchUsageSource } from './search-usage/model'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
@@ -114,7 +117,37 @@ export const pruneExpandedSessionItems = (
   return next.size === expanded.size ? expanded : next
 }
 
+const sessionCostLabel = (summary: WebUsageSummary): string => {
+  if (summary.truncated) return 'Cost incomplete'
+  const totals = { real: 0n, metered_equivalent: 0n }
+  const labels = new Set<string>()
+  let scale = 0
+  for (const group of summary.groups) {
+    if (group.cost.status === 'unavailable') return 'Cost unavailable'
+    const [whole, fraction = ''] = group.cost.amount_usd.split('.')
+    if (fraction.length > scale) {
+      totals.real *= 10n ** BigInt(fraction.length - scale)
+      totals.metered_equivalent *= 10n ** BigInt(fraction.length - scale)
+      scale = fraction.length
+    }
+    totals[group.cost.label] +=
+      BigInt(`${whole}${fraction}`) * 10n ** BigInt(scale - fraction.length)
+    labels.add(group.cost.label)
+  }
+  const divisor = 10n ** BigInt(Math.max(scale - 2, 0))
+  const dollars = (total: bigint): string => {
+    const cents = scale > 2 ? (total + divisor / 2n) / divisor : total * 10n ** BigInt(2 - scale)
+    return `$${new Intl.NumberFormat('en-US').format(cents / 100n)}.${(cents % 100n).toString().padStart(2, '0')}`
+  }
+  const parts = []
+  if (labels.has('real') || labels.size === 0) parts.push(dollars(totals.real))
+  if (labels.has('metered_equivalent'))
+    parts.push(`${dollars(totals.metered_equivalent)} equivalent`)
+  return parts.join(' + ')
+}
+
 export function SessionWorkspaceSurface({
+  usageSource,
   initialSessionId,
   initialAround,
   onAroundConsumed,
@@ -129,6 +162,7 @@ export function SessionWorkspaceSurface({
   timelineRef,
   windowRequest,
 }: {
+  usageSource: Pick<SearchUsageSource, 'usageSummary'>
   initialSessionId?: string
   initialAround?: string
   onAroundConsumed: () => void
@@ -161,6 +195,10 @@ export function SessionWorkspaceSurface({
   const workspaceRef = useRef<HTMLElement>(null)
   const detailsRef = useRef<HTMLDetailsElement>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const eventWindowPending = useRef(false)
+  const eventScrollOffset = useRef(0)
+  const restoredEventOffset = useRef<number | null>(null)
+  const eventTouchPosition = useRef<number | null>(null)
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(
     initialAround ? { kind: 'around', eventSequence: initialAround } : null,
   )
@@ -264,6 +302,40 @@ export function SessionWorkspaceSurface({
   }, [dispatch, sessionId, timelineCapability])
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
+  const timelineCostPosition = displayedSession?.descriptor.observed_through
+  const liveCostPosition = synchronization.sessionId === sessionId ? synchronization.cursor : null
+  const costPosition =
+    timelineCostPosition !== undefined &&
+    liveCostPosition !== null &&
+    BigInt(liveCostPosition) > BigInt(timelineCostPosition)
+      ? liveCostPosition
+      : timelineCostPosition
+  const observedCostPosition = useRef<string | undefined>(undefined)
+  const cost = useQuery({
+    queryKey: ['production', 'session-cost', sessionId],
+    queryFn: async ({ signal }) => {
+      observedCostPosition.current = costPosition
+      return usageSource.usageSummary({ sessionId: sessionId ?? '' }, signal)
+    },
+    enabled: displayedSession !== undefined,
+    gcTime: 0,
+  })
+  const costLabel = cost.isError
+    ? 'Cost unavailable'
+    : cost.data
+      ? sessionCostLabel(cost.data)
+      : 'Cost loading…'
+  const refetchCost = cost.refetch
+  useEffect(() => {
+    if (
+      costPosition !== undefined &&
+      !cost.isFetching &&
+      observedCostPosition.current !== costPosition
+    ) {
+      void refetchCost({ cancelRefetch: false })
+    }
+  }, [costPosition, cost.isFetching, refetchCost])
+  const origin = displayedSession?.descriptor.repository_watch
   const items = useMemo(
     () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail, initialAround),
     [app.detail, displayedSession?.window.items, initialAround],
@@ -288,6 +360,39 @@ export function SessionWorkspaceSurface({
     },
     [dispatch, onAroundConsumed, refetchSession, timelineRef],
   )
+  const loadEventNeighbor = async (direction: 'before' | 'after') => {
+    if (!showEvents || session.isFetching || eventWindowPending.current) return
+    const continuation =
+      direction === 'before'
+        ? displayedSession?.window.continuation_before
+        : displayedSession?.window.continuation_after
+    if (!continuation) return
+    eventWindowPending.current = true
+    ++boundaryRequest.current
+    manualAnchorRef.current = { kind: direction, eventSequence: continuation.event_sequence }
+    requestedSelection.current = undefined
+    onAroundConsumed()
+    try {
+      await refetchSession()
+    } finally {
+      eventWindowPending.current = false
+    }
+  }
+  const traverseEventEdge = (element: HTMLDivElement, direction: 'before' | 'after') => {
+    const remaining =
+      direction === 'before'
+        ? element.scrollTop
+        : element.scrollHeight - element.clientHeight - element.scrollTop
+    if (remaining <= 1) void loadEventNeighbor(direction)
+  }
+  useLayoutEffect(() => {
+    const element = timelineRef.current
+    if (!showEvents || !element) return
+    if (displayedSession?.anchor.kind === 'before') element.scrollTop = element.scrollHeight
+    if (displayedSession?.anchor.kind === 'after') element.scrollTop = 0
+    eventScrollOffset.current = element.scrollTop
+    restoredEventOffset.current = element.scrollTop
+  }, [displayedSession?.anchor, showEvents, timelineRef])
   const toggleSelectedExpansion = useCallback(() => {
     const eventSequence = store.getState().app.selectedTimeline
     if (eventSequence === null || !timelineIds.includes(eventSequence)) return
@@ -306,7 +411,11 @@ export function SessionWorkspaceSurface({
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
     const preferred =
-      displayedSession?.anchor.kind === 'around' ? displayedSession.anchor.eventSequence : null
+      displayedSession?.anchor.kind === 'around'
+        ? displayedSession.anchor.eventSequence
+        : displayedSession?.anchor.kind === 'before'
+          ? (timelineIds.at(-1) ?? null)
+          : null
     const requested = requestedSelection.current
     if (requested !== undefined && timelineIds.includes(requested)) {
       requestedSelection.current = undefined
@@ -373,8 +482,10 @@ export function SessionWorkspaceSurface({
   useEffect(() => {
     if (app.selectedTimeline !== null) {
       rowRefs.current.get(app.selectedTimeline)?.scrollIntoView({ block: 'nearest' })
+      eventScrollOffset.current = timelineRef.current?.scrollTop ?? 0
+      restoredEventOffset.current = eventScrollOffset.current
     }
-  }, [app.selectedTimeline])
+  }, [app.selectedTimeline, timelineRef])
 
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
@@ -474,7 +585,17 @@ export function SessionWorkspaceSurface({
         </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          Session failed to load.
+          <span>{session.isFetching ? 'Retrying session…' : 'Session failed to load.'}</span>{' '}
+          <button
+            type="button"
+            disabled={session.isFetching}
+            onClick={() => {
+              workspaceRef.current?.focus()
+              void refetchSession()
+            }}
+          >
+            Retry session
+          </button>
         </p>
       ) : displayedSession === undefined ? (
         <p className="session-load-state" role="status">
@@ -495,6 +616,9 @@ export function SessionWorkspaceSurface({
                     ? 'Active'
                     : 'Inactive'}
               </p>
+              <span className="session-header-cost" data-testid="session-cost" title={costLabel}>
+                {costLabel}
+              </span>
               <div
                 className="session-header-actions"
                 role="toolbar"
@@ -519,6 +643,25 @@ export function SessionWorkspaceSurface({
               </div>
             </div>
             <div className="session-header-line session-header-secondary">
+              {origin && (
+                <div className="session-header-context">
+                  <a
+                    href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}`}
+                  >
+                    {origin.repository}
+                  </a>
+                  {origin.pull_request !== null && (
+                    <a
+                      href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}/pull/${encodeURIComponent(origin.pull_request)}`}
+                    >
+                      #{origin.pull_request}
+                    </a>
+                  )}
+                  <span title={`Rule ${origin.rule_id} · ${enumLabel(origin.event_kind)}`}>
+                    Rule {origin.rule_id} · {enumLabel(origin.event_kind)}
+                  </span>
+                </div>
+              )}
               <span role="status">
                 {followFailed
                   ? 'Live updates unavailable.'
@@ -528,10 +671,19 @@ export function SessionWorkspaceSurface({
                       ? 'Live'
                       : 'Connecting…'}
               </span>
+              <label className="session-events-toggle">
+                <input
+                  type="checkbox"
+                  checked={showEvents}
+                  onChange={(event) => setShowEvents(event.target.checked)}
+                />
+                Events
+              </label>
               <details ref={detailsRef} className="session-header-details">
                 <summary>Session details</summary>
                 <div className="session-header-detail-content">
                   <p>Session {sessionId}</p>
+                  <p>Cost: {costLabel}</p>
                   <dl className="session-telemetry">
                     <div>
                       <dt>Items</dt>
@@ -585,42 +737,6 @@ export function SessionWorkspaceSurface({
                       </details>
                     </section>
                   )}
-                  <div className="session-window-controls" role="toolbar" aria-label="Timeline">
-                    <button
-                      type="button"
-                      disabled={!displayedSession.window.continuation_before}
-                      onClick={() => {
-                        const address = displayedSession.window.continuation_before?.event_sequence
-                        if (address) {
-                          manualAnchorRef.current = { kind: 'before', eventSequence: address }
-                          requestedSelection.current = undefined
-                          onAroundConsumed()
-                          void refetchSession()
-                        }
-                      }}
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      disabled={!displayedSession.window.continuation_after}
-                      onClick={() => {
-                        const address = displayedSession.window.continuation_after?.event_sequence
-                        if (address) {
-                          manualAnchorRef.current = { kind: 'after', eventSequence: address }
-                          requestedSelection.current = undefined
-                          onAroundConsumed()
-                          void refetchSession()
-                        }
-                      }}
-                    >
-                      Next
-                    </button>
-                    <span hidden={!showEvents}>
-                      {displayedSession.window.items.length} events ·{' '}
-                      {displayedSession.window.projected_structured_bytes} B
-                    </span>
-                  </div>
                   {followFailed && (
                     <button
                       type="button"
@@ -658,6 +774,7 @@ export function SessionWorkspaceSurface({
             ref={!showEvents && !transcriptAvailable ? timelineRef : undefined}
             tabIndex={!showEvents && !transcriptAvailable ? 0 : undefined}
             aria-label="Conversation"
+            className="session-conversation"
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
@@ -677,7 +794,7 @@ export function SessionWorkspaceSurface({
                 limits={transcriptLimits}
               />
             ) : (
-              <p>Transcript text unavailable</p>
+              <p>Conversation text is unavailable; use Events to view this session.</p>
             )}
           </section>
           {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
@@ -688,14 +805,6 @@ export function SessionWorkspaceSurface({
               ))}
             </section>
           )}
-          <label className="session-events-toggle">
-            <input
-              type="checkbox"
-              checked={showEvents}
-              onChange={(event) => setShowEvents(event.target.checked)}
-            />
-            Events
-          </label>
           {/* biome-ignore lint/a11y/useSemanticElements: The bounded timeline uses a scrollable ARIA grid. */}
           <div
             hidden={!showEvents}
@@ -709,7 +818,37 @@ export function SessionWorkspaceSurface({
             ref={showEvents ? timelineRef : undefined}
             role="grid"
             tabIndex={0}
-            onKeyDown={handleTimelineKeyDown}
+            aria-busy={session.isFetching}
+            onScroll={(event) => {
+              const element = event.currentTarget
+              const previous = eventScrollOffset.current
+              eventScrollOffset.current = element.scrollTop
+              if (element.scrollTop === restoredEventOffset.current) return
+              restoredEventOffset.current = null
+              if (element.scrollTop !== previous)
+                traverseEventEdge(element, element.scrollTop < previous ? 'before' : 'after')
+            }}
+            onWheel={(event) => {
+              if (event.deltaY !== 0)
+                traverseEventEdge(event.currentTarget, event.deltaY < 0 ? 'before' : 'after')
+            }}
+            onTouchStart={(event) => {
+              eventTouchPosition.current = event.touches[0]?.clientY ?? null
+            }}
+            onTouchMove={(event) => {
+              const position = event.touches[0]?.clientY
+              const previous = eventTouchPosition.current
+              eventTouchPosition.current = position ?? null
+              if (position !== undefined && previous !== null && position !== previous)
+                traverseEventEdge(event.currentTarget, position > previous ? 'before' : 'after')
+            }}
+            onKeyDown={(event) => {
+              if (event.target === event.currentTarget) {
+                if (event.key === 'PageUp') traverseEventEdge(event.currentTarget, 'before')
+                if (event.key === 'PageDown') traverseEventEdge(event.currentTarget, 'after')
+              }
+              handleTimelineKeyDown(event)
+            }}
           >
             {items.map((item) => {
               const id = item.address.event_sequence
