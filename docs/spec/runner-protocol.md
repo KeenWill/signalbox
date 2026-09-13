@@ -204,10 +204,10 @@ dispatch at a time, and one durable terminal attempt before the next dispatch. A
 runner holds one global execution permit, so tools of different sessions never
 execute concurrently on it. A combined-locus tool runs on the session's attached
 runner when that runner advertises it and otherwise runs on the daemon. An
-unpinned placement that the connected runner cannot satisfy retains daemon
-fallback. A lost lease releases the global dispatch permit; the tool loop
-accepts the recovery wait only after rereading the exact lost lease and its
-issuing turn attempt's durable yield.
+unpinned placement that the connected runner cannot satisfy, or a placement lost
+before its first pin, retains daemon fallback. A lost lease releases the global
+dispatch permit; the tool loop accepts the recovery wait only after rereading
+the exact lost lease and its issuing turn attempt's durable yield.
 
 The daemon sends `lease_offer` with the complete lease correlation and the
 immutable dispatch payload. The runner admits the exact tool, sandbox profile,

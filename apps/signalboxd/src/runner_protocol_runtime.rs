@@ -299,7 +299,9 @@ impl PostgresRunnerRegistrationService {
                     let disposition = self
                         .store
                         .propagate_connection_loss_session(loss, *session)
-                        .await?;
+                        .await;
+                    self.dispatch.changed();
+                    let disposition = disposition?;
                     if let Some(nudge) = &self.eligibility_nudge
                         && nudge.nudge(*session)
                             == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
@@ -684,7 +686,6 @@ impl PostgresRunnerRegistrationService {
                         error,
                     )
                 })?;
-            self.dispatch.changed();
             self.store
                 .resume_runner_replacements()
                 .await
@@ -2550,7 +2551,6 @@ mod tests {
     const ARBITRARY_PROVISION_PLACEMENT_REVISION: u64 = 1;
     const ARBITRARY_PROVISION_REGISTRATION_REVISION: u64 = 1;
     const ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED: u128 = 0x300;
-    const ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED: u128 = 0x301;
     const ARBITRARY_RUNNER_SESSION_MODEL_SELECTION_SEED: u128 = 0x302;
     const ARBITRARY_RUNNER_SESSION_ID_SEED: u128 = 0x303;
     const RUNNER_SESSION_WORKING_DIRECTORY: &str = "/workspace/session";
@@ -2683,9 +2683,7 @@ mod tests {
         )])
         .expect("the synthetic credential pin is valid");
         let creation = CreateSession::new(
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(
-                ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED,
-            )),
+            DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             SessionCreationProvenance::new(
                 SessionCreationCause::Interactive,
                 TranscriptAncestry::None,
@@ -3952,6 +3950,82 @@ mod tests {
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn terminal_connection_loss_nudges_placed_sessions_without_periodic_reconciliation() {
         assert_terminal_connection_loss_nudge(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn committed_loss_wakes_dispatch_even_when_a_later_session_fails() {
+        let (_container, database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let RunnerEnrollmentResponse::Active(enrolled) = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("active runner")
+        else {
+            panic!("first runner is active")
+        };
+        let pool = fresh_pool(&database_url).await;
+        let first = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
+        let second =
+            SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED + 1));
+        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        create_runner_placed_session(&pool, &store, first, runner).await;
+        create_runner_placed_session(&pool, &store, second, runner).await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE FUNCTION reject_second_loss() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.session_id = '{}'::uuid AND NEW.event_kind = 'runner_lost_before_pin' THEN
+                    RAISE EXCEPTION 'injected later-session failure';
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER reject_second_loss BEFORE INSERT ON runner_session_placement_record
+            FOR EACH ROW EXECUTE FUNCTION reject_second_loss();",
+            second.into_uuid()
+        )))
+        .execute(&pool)
+        .await
+        .expect("inject a failure after the first session commits");
+        let changes = service.lease_changes().expect("dispatch change source");
+        assert!(
+            service
+                .transition_connection(
+                    enrolled.enrollment_id,
+                    enrolled.connection_epoch,
+                    RunnerConnectionTransition::TransportClosed
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            changes
+                .has_changed()
+                .expect("notification source remains open")
+        );
+        assert!(matches!(
+            store
+                .load_placement(first)
+                .await
+                .expect("first placement loads")
+                .expect("first placement")
+                .placement()
+                .state(),
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        ));
+        assert_eq!(
+            store
+                .load_placement(second)
+                .await
+                .expect("second placement loads")
+                .expect("second placement")
+                .placement()
+                .state(),
+            &SessionRunnerPlacementState::Unpinned
+        );
     }
 
     #[tokio::test]

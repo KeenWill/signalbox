@@ -12,6 +12,138 @@ use signalboxd::runner_protocol_runtime::{
 use std::path::PathBuf;
 use tokio::process::{Child, Command};
 
+#[derive(Clone)]
+struct LoseBeforeRunnerAdmission<Executor> {
+    inner: Executor,
+    service: PostgresRunnerRegistrationService,
+    enrollment: signalbox_runner_wire::CanonicalUuid,
+    epoch: signalbox_runner_wire::PositiveU64,
+}
+
+impl<Executor: ToolExecutor + Send> ToolExecutor for LoseBeforeRunnerAdmission<Executor> {
+    type Error = Executor::Error;
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        self.inner.execute(invocation).await
+    }
+    async fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<signalbox_application::ToolExecutorDisposition, Self::Error> {
+        use signalboxd::runner_protocol_runtime::RunnerRegistrationService as _;
+        self.service
+            .transition_connection(
+                self.enrollment,
+                self.epoch,
+                signalbox_persistence::runner_protocol::RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("loss commits after attempt authorization and before runner admission");
+        self.inner.execute_with_scheduling(invocation).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and the packaged runner"]
+async fn pre_pin_loss_after_attempt_authorization_preserves_daemon_fallback()
+-> Result<(), Box<dyn Error>> {
+    let database = migrated_postgres().await?;
+    let mut host = RunnerHost::start(database.1.clone()).await?;
+    let current = host
+        .service
+        .recovery_store()
+        .load_nonterminal_connection_heads()
+        .await?;
+    let current = current[0];
+    let enrollment = host
+        .service
+        .recovery_store()
+        .load_enrollment(current.enrollment())
+        .await?
+        .expect("active enrollment");
+    let mut requested = placement(host.root.path().to_owned());
+    requested.selector = RunnerSelector::Identity(enrollment.runner());
+    let fixture = ToolLoopFixture::with_creation_placement(
+        DangerousToolAutoApproval::Disabled,
+        None,
+        database,
+        Some(requested),
+    )
+    .await?;
+    let dispatch = host.service.dispatch_service();
+    let (catalog, executor) = offline_daemon_tools(
+        OfflineWebTransport::unused(),
+        UnusedSessionStatusWriter,
+        UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
+    )?
+    .into_parts();
+    let executor = LoseBeforeRunnerAdmission {
+        inner: executor.with_runner_dispatch(dispatch.clone()),
+        service: host.service.clone(),
+        enrollment: signalbox_runner_wire::CanonicalUuid::from_uuid(
+            enrollment.enrollment().into_uuid(),
+        ),
+        epoch: signalbox_runner_wire::PositiveU64::try_new(current.epoch().get())?,
+    };
+    let arguments = serde_json::json!({"text": "fallback after pre-pin loss"}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[("echo", arguments.as_str())]),
+            completion_script("observed"),
+        ],
+        catalog,
+        executor,
+    );
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        execution
+            .with_runner_dispatch(dispatch)
+            .execute(Box::new(fixture.activated.clone())),
+    )
+    .await;
+    host.child.kill().await?;
+    host.shutdown.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(60), host.server).await???;
+    outcome??;
+    let request = fixture.wait_for_requests(1).await?[0];
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, "echo", &arguments),
+            expected_successful_tool_result(request, arguments)
+        ]
+    );
+    assert!(matches!(
+        host.service
+            .recovery_store()
+            .load_placement(fixture.session)
+            .await?
+            .expect("retained placement")
+            .placement()
+            .state(),
+        SessionRunnerPlacementState::RunnerLostBeforePin(_)
+    ));
+    host.service
+        .recovery_store()
+        .open_connection(enrollment.enrollment())
+        .await?;
+    assert_eq!(
+        host.service
+            .recovery_store()
+            .runner_tool_posture(
+                fixture.session,
+                &signalbox_domain::ToolName::try_new("echo".to_owned()).expect("compiled tool")
+            )
+            .await?,
+        None,
+        "reconnection cannot restore runner approval authority to a pre-pin loss"
+    );
+    Ok(())
+}
+
 struct RunnerHost {
     root: tempfile::TempDir,
     child: Child,

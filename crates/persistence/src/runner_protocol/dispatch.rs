@@ -16,6 +16,12 @@ impl RunnerProtocolStore {
         let Some(stored) = self.load_placement(session).await? else {
             return Ok(None);
         };
+        if matches!(
+            stored.placement().state(),
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        ) {
+            return Ok(None);
+        }
         let mut transaction = self.pool.begin().await?;
         let registration = connected_registration(&mut transaction, &self.catalog).await?;
         let posture = registration.as_ref().and_then(|(_, registration)| {
@@ -64,6 +70,12 @@ impl RunnerProtocolStore {
             .decode_stored_placement_in(&mut transaction, &row)
             .await?;
         let (_, placement, _, grant, interrupted) = stored.into_parts();
+        if matches!(
+            placement.state(),
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+        ) {
+            return Ok(None);
+        }
         let Some((enrollment, registration)) = registration else {
             return if placement.state() == &SessionRunnerPlacementState::Unpinned {
                 Ok(None)
