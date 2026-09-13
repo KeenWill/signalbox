@@ -541,18 +541,19 @@ calls and releases their initial claims and unregistered invocation
 reservations. Startup and successful reload delivery reconstruct deferred
 initial work from completed turns in untitled sessions without an initial claim
 regardless of current title runtime availability. Settlement retries once before
-abandoning the call. Failed title cleanup remains registered with periodic
-invocation recovery until it succeeds; a later completed turn can claim after
-abandonment. Title requests cap output at 256 tokens and half the context
-window, within the configured model limit. A window too small for the fixed
-prompt and conservative framing allowance is rejected before claiming a call.
-Generated titles are at most 256 UTF-8 bytes. Bootstrap advertises runtime
-availability through `capabilities.session_title_generation`, including startup
-availability of the selected effective adapter and sufficient prompt room.
-Unconfigured title generation clears deferred work. Title conversation SQL
-limits projected membership and nonempty payload rows to the input byte budget,
-newest first. Completed-turn dispatch retains identifiers; title preparation
-runs inside an admitted task.
+abandoning the call. Post-preparation database failures requeue initial work.
+Failed title cleanup remains registered with periodic invocation recovery until
+it succeeds; a later completed turn can claim after abandonment. Title requests
+cap output at 256 tokens and half the context window, within the configured
+model limit. A window too small for the fixed prompt and conservative framing
+allowance is rejected before claiming a call. Generated titles are at most 256
+UTF-8 bytes. Bootstrap advertises runtime availability through
+`capabilities.session_title_generation`, including startup availability of the
+selected effective adapter and sufficient prompt room. Unconfigured title
+generation clears deferred work. Title conversation SQL limits projected
+membership and nonempty payload rows to the input byte budget, newest first.
+Completed-turn dispatch retains identifiers; title preparation runs inside an
+admitted task.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete
