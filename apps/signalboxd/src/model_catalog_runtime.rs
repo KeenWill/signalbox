@@ -113,6 +113,10 @@ impl ModelRuntimeFactory {
         self
     }
 
+    pub(crate) fn adapter_available(&self, adapter: ModelAdapter) -> bool {
+        adapter != ModelAdapter::CodexCli || self.codex_cli_unavailable_cause.is_none()
+    }
+
     /// Constructs adapters without provider I/O using this snapshot's routes and capabilities.
     pub fn build(&self, models: &HubModelConfiguration) -> Result<Runtime, ModelRuntimeBuildError> {
         let credentials = |adapter| FileCredentialAccess::from_configuration(models, adapter);

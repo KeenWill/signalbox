@@ -314,11 +314,18 @@ impl ConfigurationReload {
         pool: sqlx::PgPool,
     ) -> Option<crate::session_titles::SessionTitles> {
         let models = self.catalogs().models;
-        models.session_title_selection()?;
+        let (_, target, _) = models.session_title_settings()?;
+        let catalog = models.runtime_model_catalog();
+        let definition = catalog.resolve(target)?;
+        let adapter = models.adapter_for_provider_model(definition.provider_model())?;
+        let factory = self.runtime_factory.as_ref()?;
+        if !factory.adapter_available(adapter) {
+            return None;
+        }
         Some(crate::session_titles::SessionTitles::new(
             pool,
             models,
-            self.runtime_factory.clone()?,
+            factory.clone(),
             self.title_invocation_processes.clone()?,
         ))
     }

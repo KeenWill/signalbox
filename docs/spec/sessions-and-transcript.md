@@ -508,7 +508,8 @@ Failed title cleanup remains registered with periodic invocation recovery until
 it succeeds; a later completed turn can claim after abandonment. Title requests
 cap output at 256 tokens, within the configured model limit. Generated titles
 are at most 256 UTF-8 bytes. Bootstrap advertises runtime availability through
-`capabilities.session_title_generation`.
+`capabilities.session_title_generation`, including startup availability of the
+selected effective adapter.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

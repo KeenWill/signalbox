@@ -2530,14 +2530,44 @@ async fn session_title_bootstrap_reports_configured_runtime_availability() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@localhost/unused")
         .expect("lazy fixture pool");
-    for configured in [false, true] {
-        let source = if configured {
-            format!(
-                "{}\n[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\n",
-                crate::configuration::tests::CONFIGURATION
-            )
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let source = crate::configuration::tests::configuration_with_codex_paths(
+        &std::env::current_exe().expect("fixture executable"),
+        directory.path(),
+    );
+    let source = format!(
+        r#"{source}
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#
+    );
+    for (configured, codex, disabled) in [
+        (false, false, false),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let selection = if codex {
+            "10000000-0000-4000-8000-000000000002"
         } else {
-            crate::configuration::tests::CONFIGURATION.to_owned()
+            "10000000-0000-4000-8000-000000000001"
+        };
+        let source = if configured {
+            format!("{source}\n[session_titles]\nselection_id = {selection:?}\n")
+        } else {
+            source.clone()
+        };
+        let factory = crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None);
+        let factory = if disabled {
+            factory.with_codex_cli_unavailable("codex_cli_pin_mismatch")
+        } else {
+            factory
         };
         let models = crate::HubModelConfiguration::parse(&source).expect("fixture models");
         let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
@@ -2552,9 +2582,7 @@ async fn session_title_bootstrap_reports_configured_runtime_availability() {
             None,
         )
         .expect("reload fixture")
-        .with_runtime_factory(crate::model_catalog_runtime::ModelRuntimeFactory::new(
-            None, None, None,
-        ))
+        .with_runtime_factory(factory)
         .with_title_invocation_processes(
             crate::credential_invocations::CredentialInvocationProcesses::new(pool.clone(), nudge),
         );
@@ -2571,7 +2599,10 @@ async fn session_title_bootstrap_reports_configured_runtime_availability() {
         assert_eq!(response.status(), StatusCode::OK);
         let bootstrap: WebContractBootstrap =
             serde_json::from_slice(&response_body(response).await).expect("bootstrap DTO");
-        assert_eq!(bootstrap.capabilities.session_title_generation, configured);
+        assert_eq!(
+            bootstrap.capabilities.session_title_generation,
+            configured && !(codex && disabled)
+        );
     }
     pool.close().await;
 }
