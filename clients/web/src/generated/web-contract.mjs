@@ -4577,14 +4577,7 @@ const schemas = {
         "$ref": "#/$defs/WebTimelineAddress"
       },
       "last_activity": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/WebSessionCatalogActivity"
-          },
-          {
-            "type": "null"
-          }
-        ],
+        "$ref": "#/$defs/WebSessionCatalogActivity",
         "description": "Current catalog activity, including its timestamp and category."
       },
       "latest_address": {
@@ -4708,7 +4701,6 @@ const schemas = {
         ]
       },
       "title_summary": {
-        "default": null,
         "description": "Current human title projected by the session catalog.",
         "maxLength": 128,
         "type": [
@@ -4737,6 +4729,8 @@ const schemas = {
       }
     },
     "required": [
+      "title_summary",
+      "last_activity",
       "supervision",
       "workspace_root_kind",
       "repository_watch",

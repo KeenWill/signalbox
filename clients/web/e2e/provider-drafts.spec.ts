@@ -115,6 +115,8 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: '1',
           projected_text_bytes: '0',

@@ -139,8 +139,9 @@ response returns the session ID and current catalog summary after both requested
 commands succeed. Retries retain both identities and payloads.
 
 The web timeline descriptor includes the current catalog title summary and last
-activity category and timestamp, including for archived sessions. These header
-facts are read separately from the timeline bounds.
+activity category and timestamp, including for archived sessions. Both members
+are required; the title may be null and activity is non-null. These header facts
+are read separately from the timeline bounds.
 
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command

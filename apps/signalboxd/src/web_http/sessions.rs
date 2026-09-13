@@ -405,7 +405,7 @@ mod tests {
             )
             .expect("descriptor");
         assert_eq!(descriptor.title_summary, expected.title_summary);
-        assert_eq!(descriptor.last_activity, Some(expected.last_activity));
+        assert_eq!(descriptor.last_activity, expected.last_activity);
         assert!(
             repository
                 .summary(SessionId::from_uuid(Uuid::now_v7()))

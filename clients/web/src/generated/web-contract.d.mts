@@ -1038,7 +1038,7 @@ export type WebBlobDescriptor = {
 
 export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
-  readonly last_activity?: WebSessionCatalogActivity | null;
+  readonly last_activity: WebSessionCatalogActivity;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
   readonly repository_watch: {
@@ -1060,7 +1060,7 @@ export type WebSessionTimelineDescriptor = {
   readonly class: WebSessionSupervisionClass;
   readonly pending: boolean;
 } | null;
-  readonly title_summary?: string | null;
+  readonly title_summary: string | null;
   readonly work: WebSessionWorkFacts;
   readonly workspace_root_kind: "derived" | "configured" | "provisioned" | null;
 };

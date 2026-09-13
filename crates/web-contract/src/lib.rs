@@ -1046,11 +1046,11 @@ pub struct WebSessionSupervision {
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
     /// Current human title projected by the session catalog.
-    #[serde(default)]
-    #[schemars(schema_with = "nullable_title_summary_schema")]
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
     pub title_summary: Option<String>,
     /// Current catalog activity, including its timestamp and category.
-    pub last_activity: Option<WebSessionCatalogActivity>,
+    pub last_activity: WebSessionCatalogActivity,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub supervision: Option<WebSessionSupervision>,
@@ -5619,6 +5619,40 @@ mod tests {
             .expect("summary object")
             .remove("repository_watch");
         assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(missing).is_err());
+    }
+
+    #[test]
+    fn descriptor_header_facts_require_nullable_title_and_non_null_activity() {
+        let descriptor = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "title_summary": null,
+            "last_activity": { "kind": "session", "unix_microseconds": "1" },
+            "supervision": null, "workspace_root_kind": null, "repository_watch": null,
+            "sizes": { "item_count": "1", "projected_text_bytes": "0",
+                "projected_structured_bytes": "96", "referenced_blob_count": "0",
+                "referenced_blob_bytes": "0" },
+            "first_address": { "event_sequence": "1" }, "latest_address": { "event_sequence": "1" },
+            "work": { "active_turn_count": "0", "queued_turn_count": "0" }, "observed_through": "1",
+        });
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(descriptor.clone())
+                .is_ok()
+        );
+        for field in ["title_summary", "last_activity"] {
+            let mut missing = descriptor.clone();
+            missing
+                .as_object_mut()
+                .expect("descriptor object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebSessionTimelineDescriptor>(missing).is_err()
+            );
+        }
+        let mut null_activity = descriptor;
+        null_activity["last_activity"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(null_activity).is_err()
+        );
     }
 
     #[test]

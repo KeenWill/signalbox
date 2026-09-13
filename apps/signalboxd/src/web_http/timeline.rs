@@ -155,46 +155,45 @@ pub(super) async fn session_descriptor(
         Err(error) => return error.into_response(),
     };
     match repository.read_descriptor(session).await {
-        Ok(Some(descriptor)) => match descriptor_dto(descriptor) {
-            Ok(mut descriptor) => {
-                let origin = match reload {
-                    Some(axum::Extension(reload)) => {
-                        match reload.repository_watch_origin(session).await {
-                            Ok(origin) => origin,
-                            Err(_) => {
-                                return application_error(
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    "session_projection_unavailable",
-                                    "repository-watch origin could not be read",
-                                );
+        Ok(Some(descriptor)) => {
+            let (Some(attention), Some(budget)) = (state.attention, state.snapshot_reader_budget)
+            else {
+                return session_projection_unavailable();
+            };
+            let Ok(_permit) = budget.acquire().await else {
+                return session_projection_unavailable();
+            };
+            let summary = match attention.summary(session).await {
+                Ok(Some(summary)) => summary,
+                _ => return session_projection_unavailable(),
+            };
+            let summary = match super::session_catalog::session_catalog_summary_dto(summary) {
+                Ok(summary) => summary,
+                Err(()) => return session_projection_unavailable(),
+            };
+            match descriptor_dto(descriptor, summary) {
+                Ok(mut descriptor) => {
+                    let origin = match reload {
+                        Some(axum::Extension(reload)) => {
+                            match reload.repository_watch_origin(session).await {
+                                Ok(origin) => origin,
+                                Err(_) => {
+                                    return application_error(
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        "session_projection_unavailable",
+                                        "repository-watch origin could not be read",
+                                    );
+                                }
                             }
                         }
-                    }
-                    None => None,
-                };
-                descriptor.repository_watch = origin.map(repository_watch_origin_dto);
-                let (Some(attention), Some(budget)) =
-                    (state.attention, state.snapshot_reader_budget)
-                else {
-                    return session_projection_unavailable();
-                };
-                let Ok(_permit) = budget.acquire().await else {
-                    return session_projection_unavailable();
-                };
-                let summary = match attention.summary(session).await {
-                    Ok(Some(summary)) => summary,
-                    _ => return session_projection_unavailable(),
-                };
-                let summary = match super::session_catalog::session_catalog_summary_dto(summary) {
-                    Ok(summary) => summary,
-                    Err(()) => return session_projection_unavailable(),
-                };
-                descriptor.title_summary = summary.title_summary;
-                descriptor.last_activity = Some(summary.last_activity);
-                Json(descriptor).into_response()
+                        None => None,
+                    };
+                    descriptor.repository_watch = origin.map(repository_watch_origin_dto);
+                    Json(descriptor).into_response()
+                }
+                Err(error) => error.into_response(),
             }
-            Err(error) => error.into_response(),
-        },
+        }
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -533,6 +532,7 @@ pub(super) fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
 
 fn descriptor_dto(
     descriptor: SessionTimelineDescriptor,
+    summary: signalbox_web_contract::WebSessionCatalogSummary,
 ) -> Result<WebSessionTimelineDescriptor, SessionTimelineRequestError> {
     let Some(first_address) = descriptor.bounds.first else {
         return Err(SessionTimelineRequestError::MissingBounds);
@@ -567,8 +567,8 @@ fn descriptor_dto(
         }),
         workspace_root_kind: descriptor.workspace_root_kind.map(workspace_root_kind_dto),
         repository_watch: None,
-        title_summary: None,
-        last_activity: None,
+        title_summary: summary.title_summary,
+        last_activity: summary.last_activity,
         session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),

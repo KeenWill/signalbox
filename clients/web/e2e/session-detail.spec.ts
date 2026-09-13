@@ -252,6 +252,8 @@ async function openDetails(
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: '5',
           projected_text_bytes: '256',

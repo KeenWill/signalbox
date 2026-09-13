@@ -165,6 +165,8 @@ async function sessionApi(
         supervision: state.supervision,
         repository_watch: origin,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: state.grown ? '3' : '2',
           projected_text_bytes: String(
@@ -571,6 +573,8 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: String(latest()),
           projected_text_bytes: String(latest() * 7),
