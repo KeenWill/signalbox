@@ -11,10 +11,7 @@ use signalbox_model_runtime::{
     ObservationSink, PreparationOutcome, ProviderCompactionMode, RequestedTarget, ResolvedTarget,
     TerminalEvidence, TokenUsage,
 };
-use signalbox_persistence::{
-    session_metadata::SessionMetadataRepository,
-    session_titles::{SessionTitleCall, SessionTitleRepository},
-};
+use signalbox_persistence::session_titles::{SessionTitleCall, SessionTitleRepository};
 use std::sync::Arc;
 
 use crate::{HubModelConfiguration, model_catalog_runtime::ModelRuntimeFactory};
@@ -312,20 +309,16 @@ impl SessionTitles {
             }
         }
         let title = valid.then(|| normalize_title(&text)).flatten();
-        repository
-            .finish(call.call, title.as_deref(), usage_axes(usage))
-            .await?;
-        let title = title.ok_or(TitleError::Generation)?;
-        if call.initial_for_turn.is_some() {
-            SessionMetadataRepository::new(self.pool.clone())
-                .install_generated_title(
-                    DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
-                    call.session,
-                    title.clone(),
-                )
-                .await
-                .map_err(|_| TitleError::Database)?;
-        }
+        let title = repository
+            .finish_generated(
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                call.call,
+                title,
+                usage_axes(usage),
+            )
+            .await
+            .map_err(|_| TitleError::Database)?
+            .ok_or(TitleError::Generation)?;
         Ok(title)
     }
 }

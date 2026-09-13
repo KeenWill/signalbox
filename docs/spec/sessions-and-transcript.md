@@ -493,7 +493,9 @@ When `session_titles.selection_id` names a configured model selection, a
 completed assistant turn claims one title call if the title is unset and no
 initial claim exists. The configured model receives recent conversation text and
 a short plain-language title request; completion installs the title only if it
-is still unset, preserving other metadata under the session lock.
+is still unset, preserving other metadata under the session lock. Generated
+titles must fit the complete preserved metadata snapshot before being accepted.
+Initial-title installation and terminal call evidence commit atomically.
 `POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
 `{ "title": "..." }` without saving; accepting a suggestion uses the metadata
 PATCH route. Title calls record their target, credentials, send boundary,
