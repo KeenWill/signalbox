@@ -254,17 +254,21 @@ for (const action of [
     await expect(page.getByRole('alert')).toContainText('action_refused: The action was refused.')
     await expect(field).toHaveValue(originalText)
     await expect(field).toBeEnabled()
-    if (action.button === 'Set goal') {
-      await field.press('Escape')
-      await expect(
-        page.getByRole('region', { name: 'Session workspace', exact: true }),
-      ).toBeFocused()
-      await page.getByRole('button', { name: 'Set goal', exact: true }).press('Enter')
-    }
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings$/)
+    await page.goBack()
+    await expect(field).toHaveValue(originalText)
     const revisedText = 'Revised after returning'
     await field.fill(revisedText)
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings$/)
+    await page.goBack()
+    await expect(field).toHaveValue(revisedText)
+    await expect(field).toBeEnabled()
+    await expect(page.getByRole('alert')).toContainText('action_refused: The action was refused.')
     await page.getByRole('button', { name: 'Confirm', exact: true }).click()
     await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Session workspace', exact: true })).toBeFocused()
     expect(requests).toHaveLength(2)
     expect(requests[1]).toEqual({
       ...action.payload,
@@ -272,6 +276,10 @@ for (const action of [
       command_id: expect.any(String),
     })
     expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings$/)
+    await page.goBack()
+    await expect(field).toHaveCount(0)
   })
 
   test(`a rejected ${action.button} retry restores the editable draft after navigation`, async ({
@@ -337,65 +345,112 @@ test('an idle session does not offer cancel', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Cancel turn', exact: true })).toHaveCount(0)
 })
 
-test('rejected drafts share the four-action capacity and are recovered without eviction', async ({
-  page,
-}) => {
-  // Four retained actions fill the existing capacity; the fifth session must wait.
-  const sessions = [
-    sessionId,
-    ...Array.from(
-      { length: 4 },
-      (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-    ),
-  ]
-  for (const id of sessions) await sessionApi(page, false, id)
-  await openSession(page)
-  for (const [index, id] of sessions.slice(0, 4).entries()) {
-    let release = () => {}
-    const held = new Promise<void>((resolve) => {
-      release = resolve
-    })
-    await page.route(`**/api/sessions/${id}/goal`, async (route) => {
-      await held
-      return route.fulfill({
-        status: 409,
-        json: {
-          error: {
-            kind: 'application',
-            code: 'action_refused',
-            message: 'The action was refused.',
-          },
-        },
+for (const resolution of ['Escape', 'Keep unchanged']) {
+  test(`recovered drafts retain capacity until ${resolution}`, async ({ page }) => {
+    // Four retained actions fill the existing capacity; the fifth session must wait.
+    const sessions = [
+      sessionId,
+      ...Array.from(
+        { length: 4 },
+        (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      ),
+    ]
+    for (const id of sessions) await sessionApi(page, false, id)
+    await openSession(page)
+    for (const [index, id] of sessions.slice(0, 4).entries()) {
+      let release = () => {}
+      const held = new Promise<void>((resolve) => {
+        release = resolve
       })
-    })
-    await page.getByRole('button', { name: 'Set goal', exact: true }).click()
-    await page.getByRole('textbox', { name: 'Goal', exact: true }).fill(goalStatement)
-    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Sending…', exact: true })).toBeDisabled()
-    await page.getByRole('link', { name: 'Settings', exact: true }).click()
-    await expect(page).toHaveURL(/\/settings$/)
-    const refused = page.waitForResponse(
-      (response) => response.url().endsWith(`${id}/goal`) && response.status() === 409,
+      await page.route(`**/api/sessions/${id}/goal`, async (route) => {
+        await held
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              kind: 'application',
+              code: 'action_refused',
+              message: 'The action was refused.',
+            },
+          },
+        })
+      })
+      await page.getByRole('button', { name: 'Set goal', exact: true }).click()
+      await page.getByRole('textbox', { name: 'Goal', exact: true }).fill(goalStatement)
+      await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'Sending…', exact: true })).toBeDisabled()
+      await page.getByRole('link', { name: 'Settings', exact: true }).click()
+      await expect(page).toHaveURL(/\/settings$/)
+      const refused = page.waitForResponse(
+        (response) => response.url().endsWith(`${id}/goal`) && response.status() === 409,
+      )
+      release()
+      await refused
+      const next = sessions[index + 1]
+      if (!next) throw new Error('Missing next session fixture')
+      await openSessionFromCatalog(page, next)
+    }
+    await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeDisabled()
+    await expect(
+      page.getByText('Return to an unfinished session action before starting another.'),
+    ).toBeVisible()
+    await openSessionFromCatalog(page, sessionId)
+    const goal = page.getByRole('textbox', { name: 'Goal', exact: true })
+    await expect(goal).toHaveValue(goalStatement)
+    await expect(goal).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeEnabled()
+    const editedGoal = 'Keep this edited draft'
+    await goal.fill(editedGoal)
+    const fifth = sessions[4]
+    if (!fifth) throw new Error('Missing fifth session fixture')
+    await openSessionFromCatalog(page, fifth)
+    await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeDisabled()
+    await openSessionFromCatalog(page, sessionId)
+    await expect(goal).toHaveValue(editedGoal)
+    if (resolution === 'Escape') await goal.press('Escape')
+    else await page.getByRole('button', { name: 'Keep unchanged', exact: true }).click()
+    await expect(page.getByRole('region', { name: 'Session workspace', exact: true })).toBeFocused()
+    await openSessionFromCatalog(page, fifth)
+    await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled()
+    await openSessionFromCatalog(page, sessionId)
+    await expect(goal).toHaveCount(0)
+  })
+}
+
+for (const action of [
+  { button: 'Approve', path: `approvals/${requestId}`, field: null },
+  { button: 'Deny', path: `approvals/${requestId}`, field: 'Note (optional)' },
+  { button: 'Cancel turn', path: 'cancel', field: 'Message to continue with' },
+  { button: 'Set goal', path: 'goal', field: 'Goal' },
+  { button: 'Clear goal', path: 'goal', field: null },
+]) {
+  test(`successful ${action.button} confirmation restores visible keyboard focus`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page, true)
+    if (action.button === 'Approve' || action.button === 'Deny') {
+      api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    }
+    await page.route(`**/api/sessions/${sessionId}/${action.path}`, (route) =>
+      route.fulfill({ status: 204 }),
     )
-    release()
-    await refused
-    const next = sessions[index + 1]
-    if (!next) throw new Error('Missing next session fixture')
-    await openSessionFromCatalog(page, next)
-  }
-  await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeDisabled()
-  await expect(
-    page.getByText('Return to an unfinished session action before starting another.'),
-  ).toBeVisible()
-  await openSessionFromCatalog(page, sessionId)
-  await expect(page.getByRole('textbox', { name: 'Goal', exact: true })).toHaveValue(goalStatement)
-  await page.getByRole('button', { name: 'Keep unchanged', exact: true }).click()
-  await expect(page.getByRole('region', { name: 'Session workspace', exact: true })).toBeFocused()
-  const fifth = sessions[4]
-  if (!fifth) throw new Error('Missing fifth session fixture')
-  await openSessionFromCatalog(page, fifth)
-  await expect(page.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled()
-})
+    await openSession(page)
+    const opener = page.getByRole('button', { name: action.button, exact: true })
+    await opener.press('Enter')
+    if (action.field)
+      await page.getByRole('textbox', { name: action.field, exact: true }).fill('Requested action')
+    await page.getByRole('button', { name: 'Confirm', exact: true }).press('Enter')
+    await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    const workspace = page.getByRole('region', { name: 'Session workspace', exact: true })
+    await expect
+      .poll(
+        async () =>
+          (await opener.evaluate((element) => element === document.activeElement)) ||
+          (await workspace.evaluate((element) => element === document.activeElement)),
+      )
+      .toBe(true)
+  })
+}
 
 for (const transition of ['changes', 'ends']) {
   test(`a fresh cancellation stops submitting when its turn ${transition}`, async ({ page }) => {

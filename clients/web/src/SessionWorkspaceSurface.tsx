@@ -86,6 +86,7 @@ function SessionActions({
   const [chosenTurn, setChosenTurn] = useState<string | null>(null)
   const inFlight = useRef(false)
   const actionOpener = useRef<HTMLElement>(null)
+  const actionRoot = useRef<HTMLElement>(null)
   const queryClient = useQueryClient()
   const { data: rejectedDrafts = {} } = useQuery({
     queryKey: SESSION_ACTION_DRAFTS_KEY,
@@ -112,12 +113,41 @@ function SessionActions({
     setChosenTurn(action.kind === 'cancel' ? action.input.expected_active_turn_id : null)
     setDraftError(error)
     if (!actionOpener.current?.isConnected) actionOpener.current = returnFocusRef.current
+  }, [rejectedDraft, returnFocusRef])
+  const clearRejectedDraft = () => {
     queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => {
+      if (!drafts?.[sessionId]) return drafts
       const remaining = { ...drafts }
       delete remaining[sessionId]
       return remaining
     })
-  }, [queryClient, rejectedDraft, returnFocusRef, sessionId])
+  }
+  const editText = (value: string) => {
+    setText(value)
+    queryClient.setQueryData<SessionActionDrafts>(SESSION_ACTION_DRAFTS_KEY, (drafts) => {
+      const draft = drafts?.[sessionId]
+      if (!draft) return drafts
+      const action = draft.action
+      const updated =
+        action.kind === 'cancel'
+          ? { ...action, input: { ...action.input, message: value } }
+          : action.kind === 'set-goal'
+            ? { ...action, input: { ...action.input, statement: value } }
+            : action.kind === 'approval'
+              ? { ...action, input: { ...action.input, note: value } }
+              : action
+      return { ...drafts, [sessionId]: { ...draft, action: updated } }
+    })
+  }
+  const restoreActionFocus = () => {
+    if (!actionRoot.current) return
+    const opener = actionOpener.current
+    const target =
+      opener?.isConnected && !(opener instanceof HTMLButtonElement && opener.disabled)
+        ? opener
+        : returnFocusRef.current
+    target?.focus()
+  }
   const pendingActions = useMutationState({
     filters: { mutationKey: ['session-action'] },
     select: (mutation) => ({
@@ -145,6 +175,7 @@ function SessionActions({
   const sending = pending?.status === 'pending'
   const capacityReached =
     retained === null &&
+    !rejectedDraft &&
     new Set([...pendingActions.map((action) => action.sessionId), ...Object.keys(rejectedDrafts)])
       .size >= MAX_PENDING_SESSION_INPUTS
   const freshActionUnavailable =
@@ -159,6 +190,11 @@ function SessionActions({
     gcTime: Number.POSITIVE_INFINITY,
     mutationFn: (action: SessionAction) => submitSessionAction(sessionId, action),
     onSuccess: () => {
+      if (
+        actionRoot.current?.contains(document.activeElement) ||
+        document.activeElement === document.body
+      )
+        restoreActionFocus()
       setChoice(null)
       setText('')
       setNotice('Action accepted')
@@ -192,6 +228,7 @@ function SessionActions({
   })
   const error = pending?.error ?? mutation.error ?? draftError
   const choose = (next: typeof choice, opener?: HTMLButtonElement) => {
+    clearRejectedDraft()
     if (opener) actionOpener.current = opener
     setChoice(next)
     setChosenRequest(pendingRequest)
@@ -203,8 +240,7 @@ function SessionActions({
   }
   const dismiss = () => {
     choose(null)
-    const target = actionOpener.current?.isConnected ? actionOpener.current : returnFocusRef.current
-    target?.focus()
+    restoreActionFocus()
   }
   const handleConfirmationKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'Escape' || !choice || retained || inFlight.current) return
@@ -242,6 +278,7 @@ function SessionActions({
     }
     if (!action) return
     inFlight.current = true
+    clearRejectedDraft()
     setDraftError(null)
     for (const previous of queryClient
       .getMutationCache()
@@ -252,6 +289,7 @@ function SessionActions({
   }
   return (
     <section
+      ref={actionRoot}
       className="session-actions"
       aria-label="Session actions"
       onKeyDown={(event) => {
@@ -328,7 +366,7 @@ function SessionActions({
                 }
                 rows={3}
                 value={retained ? retainedText : text}
-                onChange={(event) => setText(event.target.value)}
+                onChange={(event) => editText(event.target.value)}
                 disabled={retained !== null || capacityReached}
                 required={choice === 'set-goal' || choice === 'cancel'}
               />
