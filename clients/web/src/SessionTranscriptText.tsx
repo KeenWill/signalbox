@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type { CommandContext } from './commands'
 import type {
@@ -93,6 +93,7 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
 }
 
 export interface SessionTranscriptTextProps {
+  scrollRef?: RefObject<HTMLDivElement | null>
   sessionId: string
   first: string
   through: string
@@ -115,6 +116,7 @@ export function SessionTranscriptText(props: SessionTranscriptTextProps) {
 }
 
 function TranscriptWindow({
+  scrollRef,
   sessionId,
   observed,
   limits,
@@ -268,6 +270,7 @@ function TranscriptWindow({
         <p>No messages in this part of the conversation. Scroll up to keep looking.</p>
       )}
       <VirtualTranscript
+        scrollRef={scrollRef}
         ids={ids}
         initialEnd={initialAnchor.kind === 'latest'}
         onEndChange={(atEnd) => {

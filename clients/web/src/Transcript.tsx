@@ -1,6 +1,14 @@
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Bot, CheckCircle2, CircleDot, TerminalSquare } from 'lucide-react'
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import {
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from 'react'
 import './session-transcript.css'
 import { type CommandContext, invokeCommand } from './commands'
 import type { TimelineItem, TimelineKind } from './platform'
@@ -191,6 +199,7 @@ export function Transcript({
 }
 
 export function VirtualTranscript({
+  scrollRef,
   ids,
   renderRow,
   selectedId,
@@ -206,6 +215,7 @@ export function VirtualTranscript({
   role = 'region',
   'aria-label': label = 'Session transcript',
 }: {
+  scrollRef?: RefObject<HTMLDivElement | null>
   ids: readonly string[]
   renderRow: (
     index: number,
@@ -226,7 +236,8 @@ export function VirtualTranscript({
   'aria-label'?: string
 }) {
   'use no memo'
-  const parent = useRef<HTMLDivElement>(null)
+  const localParent = useRef<HTMLDivElement>(null)
+  const parent = scrollRef ?? localParent
   const selected = selectedId ? ids.indexOf(selectedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
@@ -258,7 +269,7 @@ export function VirtualTranscript({
   }, [start, end, ids.length, onRange])
   useEffect(() => {
     if (autoFocus) parent.current?.focus()
-  }, [autoFocus])
+  }, [autoFocus, parent])
   useEffect(() => {
     if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })
   }, [selected, virtualizer])
