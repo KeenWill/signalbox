@@ -1,6 +1,6 @@
 //! Connects invocation capacity to supervised process lifetimes.
 use signalbox_application::{EligibilityNudge, InProcessEligibilityNudge};
-use signalbox_domain::{ModelCallId, SessionId};
+use signalbox_domain::{ModelCallId, SessionId, TurnId};
 use signalbox_model_provider_runtime::InvocationProcessObserver;
 use signalbox_persistence::{credential_invocations, model_execution::ModelCallRepositoryError};
 use std::{
@@ -24,7 +24,7 @@ pub struct CredentialInvocationProcesses {
     pool: sqlx::PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
     observed: Arc<Mutex<BTreeMap<ModelCallId, ObservedInvocation>>>,
-    pending_titles: Arc<Mutex<BTreeMap<SessionId, crate::session_titles::PendingInitialTitle>>>,
+    pending_titles: Arc<Mutex<BTreeMap<SessionId, TurnId>>>,
 }
 
 enum ObservedInvocation {
@@ -42,7 +42,11 @@ impl CredentialInvocationProcesses {
         }
     }
 
-    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+        configuration: crate::configuration_reload::ConfigurationReload,
+    ) {
         if *shutdown.borrow() {
             return;
         }
@@ -57,6 +61,17 @@ impl CredentialInvocationProcesses {
                 () = tokio::time::sleep(PROCESS_GROUP_RECHECK_INTERVAL) => {
                     if let Err(error) = self.recover().await {
                         tracing::error!(%error, "invocation reservation reconciliation failed");
+                        continue;
+                    }
+                    if let Some(titles) = configuration.session_titles(self.pool.clone()) {
+                        for prepared in self.prepare_pending_titles(&titles).await {
+                            let titles = titles.clone();
+                            tokio::spawn(async move {
+                                if let Err(error) = titles.generate_prepared(prepared).await {
+                                    tracing::warn!(?error, "recovered initial session title generation failed");
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -85,41 +100,31 @@ impl CredentialInvocationProcesses {
             }
         }
         self.nudge_eligible_waits().await?;
-        for (titles, prepared) in self.prepare_pending_titles().await {
-            tokio::spawn(async move {
-                if let Err(error) = titles.generate_prepared(prepared).await {
-                    tracing::warn!(?error, "recovered initial session title generation failed");
-                }
-            });
-        }
         Ok(())
     }
 
-    pub(crate) fn retain_initial_title(&self, title: crate::session_titles::PendingInitialTitle) {
+    pub(crate) fn retain_initial_title(&self, session: SessionId, turn: TurnId) {
         self.pending_titles
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry(title.session)
-            .or_insert(title);
+            .entry(session)
+            .or_insert(turn);
     }
 
     async fn prepare_pending_titles(
         &self,
-    ) -> Vec<(
-        crate::session_titles::SessionTitles,
-        crate::session_titles::PreparedTitle,
-    )> {
+        titles: &crate::session_titles::SessionTitles,
+    ) -> Vec<crate::session_titles::PreparedTitle> {
         let pending = self
             .pending_titles
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .cloned()
+            .iter()
+            .map(|(session, turn)| (*session, *turn))
             .collect::<Vec<_>>();
         let mut ready = Vec::new();
-        for title in pending {
-            let session = title.session;
-            match title.prepare(self.pool.clone(), self.clone()).await {
+        for (session, turn) in pending {
+            match titles.prepare(session, Some(turn)).await {
                 Ok(prepared) => {
                     self.pending_titles
                         .lock()
@@ -408,7 +413,7 @@ mod tests {
         ));
         titles.defer_initial(session, turn);
         titles.defer_initial(session, turn);
-        assert!(processes.prepare_pending_titles().await.is_empty());
+        assert!(processes.prepare_pending_titles(&titles).await.is_empty());
         assert_eq!(
             processes
                 .pending_titles
@@ -422,11 +427,11 @@ mod tests {
         let processes = CredentialInvocationProcesses::new(pool.clone(), nudge);
         let titles = crate::session_titles::SessionTitles::new(
             pool.clone(),
-            models,
+            models.clone(),
             crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
             processes.clone(),
         );
-        assert!(processes.prepare_pending_titles().await.is_empty());
+        assert!(processes.prepare_pending_titles(&titles).await.is_empty());
         titles.restore_pending().await?;
         titles.restore_pending().await?;
         assert_eq!(
@@ -437,15 +442,32 @@ mod tests {
                 .len(),
             1
         );
-        assert!(processes.prepare_pending_titles().await.is_empty());
+        assert!(processes.prepare_pending_titles(&titles).await.is_empty());
+        let replacement_target = uuid::uuid!("20000000-0000-4000-8000-000000000003");
+        let replacement = Arc::new(crate::HubModelConfiguration::parse(
+            &models.source().replace(
+                &route.target().identity().into_uuid().to_string(),
+                &replacement_target.to_string(),
+            ),
+        )?);
+        let titles = crate::session_titles::SessionTitles::new(
+            pool.clone(),
+            replacement,
+            crate::model_catalog_runtime::ModelRuntimeFactory::new(None, None, None),
+            processes.clone(),
+        );
         repository.abandon(occupying.call).await?;
-        let ready = processes.prepare_pending_titles().await;
+        let ready = processes.prepare_pending_titles(&titles).await;
         assert_eq!(ready.len(), 1);
         titles.restore_pending().await?;
-        assert!(processes.prepare_pending_titles().await.is_empty());
+        assert!(processes.prepare_pending_titles(&titles).await.is_empty());
         assert!(repository.unclaimed_initial_turns().await?.is_empty());
         let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2")
             .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
+        let recovered_target: uuid::Uuid = sqlx::query_scalar(
+            "SELECT resolved_provider_model_identity_id FROM session_title_model_call WHERE model_call_id = $1",
+        ).bind(recovered).fetch_one(&pool).await?;
+        assert_eq!(recovered_target, replacement_target);
         assert_eq!(
             repository
                 .finish_generated(

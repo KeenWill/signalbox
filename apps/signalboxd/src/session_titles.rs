@@ -41,26 +41,6 @@ pub(crate) struct PreparedTitle {
     max_output_tokens: u32,
 }
 
-#[derive(Clone)]
-pub(crate) struct PendingInitialTitle {
-    pub(crate) session: SessionId,
-    turn: TurnId,
-    models: Arc<HubModelConfiguration>,
-    factory: ModelRuntimeFactory,
-}
-
-impl PendingInitialTitle {
-    pub(crate) async fn prepare(
-        self,
-        pool: sqlx::PgPool,
-        processes: crate::credential_invocations::CredentialInvocationProcesses,
-    ) -> Result<Option<(SessionTitles, PreparedTitle)>, TitleError> {
-        let titles = SessionTitles::new(pool, self.models, self.factory, processes);
-        let prepared = titles.prepare(self.session, Some(self.turn)).await?;
-        Ok(prepared.map(|prepared| (titles, prepared)))
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum TitleError {
     Configuration,
@@ -94,12 +74,7 @@ impl SessionTitles {
     }
 
     pub(crate) fn defer_initial(&self, session: SessionId, turn: TurnId) {
-        self.processes.retain_initial_title(PendingInitialTitle {
-            session,
-            turn,
-            models: self.models.clone(),
-            factory: self.factory.clone(),
-        });
+        self.processes.retain_initial_title(session, turn);
     }
 
     pub(crate) fn new(
