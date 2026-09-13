@@ -1571,6 +1571,8 @@ test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
+  await expect(page.getByRole('region', { name: '0 sessions', exact: true })).toBeVisible()
+  await page.getByRole('main').focus()
 
   await page.keyboard.press('g')
   await page.keyboard.press('s')
