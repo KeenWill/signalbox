@@ -186,7 +186,7 @@ const ToolAttemptDetail = ({
       {includeText && physical?.failure && (
         <TextDetail label="Tool failure" excerpt={physical.failure} />
       )}
-      <ToolResultMedia media={physical?.result_media_reference} />
+      {includeText && <ToolResultMedia media={physical?.result_media_reference} />}
     </article>
   )
 }
