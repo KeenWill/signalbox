@@ -79,6 +79,10 @@ impl SessionTitles {
             .ok_or(TitleError::Configuration)?;
         let catalog = self.models.runtime_model_catalog();
         let definition = catalog.resolve(target).ok_or(TitleError::Configuration)?;
+        let route = self
+            .models
+            .resolve_direct_model(selection)
+            .ok_or(TitleError::Configuration)?;
         let families = self.models.credential_family_catalog();
         let family = families.family(target).ok_or(TitleError::Configuration)?;
         let exists: bool =
@@ -90,7 +94,7 @@ impl SessionTitles {
             return Err(TitleError::NotFound);
         }
         let credential = signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
-            &self.pool, session, family, None,
+            &self.pool, session, family, route.migration_credential_family(),
         ).await.map_err(|error| match error { sqlx::Error::RowNotFound => TitleError::Configuration, _ => TitleError::Database })?;
         let call = SessionTitleCall {
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
@@ -106,12 +110,11 @@ impl SessionTitles {
             return Ok(None);
         }
         let resolved = ResolvedTarget::new(definition.provider_model().to_owned());
-        let max_chars = definition
+        let input_budget = definition
             .context_window_tokens()
-            .saturating_sub(definition.max_output_tokens())
-            .saturating_sub(u32::try_from(TITLE_PROMPT.len()).unwrap_or(u32::MAX));
+            .saturating_sub(definition.max_output_tokens());
         let conversation = match repository
-            .conversation(session, i32::try_from(max_chars).unwrap_or(i32::MAX))
+            .conversation(session, i32::try_from(input_budget).unwrap_or(i32::MAX))
             .await
         {
             Ok(text) if !text.is_empty() => text,
@@ -127,12 +130,23 @@ impl SessionTitles {
             CredentialReference::new(call.credential_reference.clone()),
             RequestedTarget::new(format!("direct:{}", selection.into_uuid())),
             resolved.clone(),
-            vec![ConversationMessage::user_text(conversation)],
+            Vec::new(),
             settings,
         );
         operation.system = Some(TITLE_PROMPT.to_owned());
         operation.delivery = DeliveryMode::Buffered;
         operation.provider_compaction = ProviderCompactionMode::Suppressed;
+        if !fit_title_context(
+            &mut operation,
+            &conversation,
+            route.adapter(),
+            input_budget as usize,
+        ) {
+            repository
+                .finish(call.call, None, usage_axes(TokenUsage::unreported()))
+                .await?;
+            return Err(TitleError::Generation);
+        }
         let prepared = match runtime
             .prepare(operation, CancellationSignal::never())
             .await
@@ -229,6 +243,50 @@ impl SessionTitles {
     }
 }
 
+fn fit_title_context(
+    operation: &mut ModelOperation<ModelCallId>,
+    source: &str,
+    adapter: crate::configuration::ModelAdapter,
+    byte_budget: usize,
+) -> bool {
+    let measure = |operation: &ModelOperation<ModelCallId>| match adapter {
+        crate::configuration::ModelAdapter::Anthropic => {
+            signalbox_model_runtime_anthropic::serialized_request_bytes(operation)
+        }
+        crate::configuration::ModelAdapter::OpenAi => {
+            signalbox_model_runtime_openai::serialized_request_bytes(operation)
+        }
+        crate::configuration::ModelAdapter::CodexCli => {
+            signalbox_model_runtime_codex_cli::serialized_request_bytes(operation)
+        }
+        crate::configuration::ModelAdapter::ClaudeCli => {
+            signalbox_model_runtime_claude_cli::serialized_request_bytes(operation)
+        }
+    };
+    operation.messages = vec![ConversationMessage::user_text(source)];
+    if measure(operation).is_some_and(|bytes| bytes <= byte_budget) {
+        return !source.is_empty();
+    }
+    let mut lower = 0;
+    let mut upper = source.len();
+    let mut retained = 0;
+    while lower <= upper {
+        let candidate = lower + (upper - lower) / 2;
+        let end = source.floor_char_boundary(candidate);
+        operation.messages = vec![ConversationMessage::user_text(&source[..end])];
+        if measure(operation).is_some_and(|bytes| bytes <= byte_budget) {
+            retained = end;
+            lower = candidate + 1;
+        } else if candidate == 0 {
+            break;
+        } else {
+            upper = candidate - 1;
+        }
+    }
+    operation.messages = vec![ConversationMessage::user_text(&source[..retained])];
+    retained > 0
+}
+
 fn usage_axes(usage: TokenUsage) -> UsageTokenAxes {
     UsageTokenAxes {
         input: usage.input_tokens,
@@ -252,8 +310,45 @@ fn normalize_title(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "fixtures require valid Codex request encoding"
+)]
 mod tests {
-    use super::normalize_title;
+    use super::*;
+
+    #[test]
+    fn title_context_budget_includes_multibyte_text_escaping_and_request_framing() {
+        let mut operation = ModelOperation::new(
+            ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            CredentialReference::new("fixture"),
+            RequestedTarget::new("fixture"),
+            ResolvedTarget::new("gpt-example"),
+            vec![ConversationMessage::user_text("x")],
+            signalbox_model_runtime::ModelSettings::new(256),
+        );
+        operation.system = Some(TITLE_PROMPT.to_owned());
+        // One CJK scalar and three escaped characters occupy nine request bytes.
+        let budget = signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
+            .expect("fixture request")
+            + 8;
+        let source = "界\"\\\n".repeat(20);
+        assert!(fit_title_context(
+            &mut operation,
+            &source,
+            crate::configuration::ModelAdapter::CodexCli,
+            budget
+        ));
+        assert_eq!(
+            operation.messages,
+            vec![ConversationMessage::user_text("界\"\\\n")]
+        );
+        assert!(
+            signalbox_model_runtime_codex_cli::serialized_request_bytes(&operation)
+                .expect("bounded request")
+                <= budget
+        );
+    }
 
     #[test]
     fn suggested_titles_are_short_unquoted_and_nonempty() {
