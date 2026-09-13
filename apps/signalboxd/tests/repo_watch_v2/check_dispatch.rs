@@ -25,6 +25,7 @@ fn observation(
         mergeable_state: MergeableState::Mergeable,
         completed_check_suites: vec![],
         completed_check_runs: vec![],
+        required_check_conclusions: None,
         reviews: vec![],
         threads: vec![],
         reactions: vec![],

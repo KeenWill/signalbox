@@ -216,6 +216,7 @@ async fn pending_evaluation_coalesces_completed_checks_before_session_submission
                             ChecksOutcome::Success,
                         )],
                         completed_check_runs: vec![],
+                        required_check_conclusions: None,
                         reviews: vec![],
                         threads: vec![],
                         reactions: vec![],
