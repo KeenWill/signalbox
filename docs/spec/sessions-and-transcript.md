@@ -169,9 +169,17 @@ service. It loads and preserves tags, attributes, and the archive flag under the
 session lock in the replacement transaction. A title that exceeds the complete
 metadata size limit after merging returns 400 without changing metadata. A 204
 response acknowledges the committed replacement; equal replay returns the
-recorded result without reinstalling it. Title-only intent is retained with the
-receipt; reusing a full-replacement command ID for a title request, or the
-reverse, is conflicting reuse.
+recorded result without reinstalling it. The Sessions page offers a title
+editor, closes it on acknowledgment before refreshing the catalog, and retains a
+derived title when no saved title exists. Unresolved rename intents survive
+editor closure and catalog navigation until acknowledgment or definitive
+rejection. After a rename is acknowledged, its identity remains retained until a
+catalog read started after acknowledgment returns the current title; reopening
+the editor before that read permits only the same retry. Catalog readback
+supplies the displayed title and reconciles any open retry editor. Catalog pull
+request and trigger chips link to the source pull request or repository.
+Title-only intent is retained with the receipt; reusing a full-replacement
+command ID for a title request, or the reverse, is conflicting reuse.
 
 ## Design decisions
 
