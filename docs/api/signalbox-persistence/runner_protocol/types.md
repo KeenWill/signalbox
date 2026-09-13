@@ -695,6 +695,19 @@ impl runner_protocol::RunnerProtocolStore {
         runner_protocol::RunnerRecoveryError,
     >;
 }
+impl runner_protocol::RunnerProtocolStore {
+    pub async fn reconcile_tool_resume(
+        &self,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
+        observed: runner_protocol::IssuedRunnerEnrollmentIdentities,
+        prior_revision: runner_protocol::RunnerRegistrationRevision,
+        advertisement: &signalbox_domain::RunnerAdvertisement,
+        evidence: option::Option<runner_protocol::RunnerLeaseResumeEvidence>,
+    ) -> result::Result<
+        runner_protocol::RunnerLeaseResumeOutcome,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+}
 ```
 
 ## RunnerEnrollmentRequestFailure

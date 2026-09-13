@@ -12,10 +12,11 @@ use std::{
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Digest,
-    EffectClass, Enroll, Frame, FrameError, Heartbeat, HeartbeatAck, LeaseClaim, LeaseCorrelation,
-    LeaseOffer, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64, Registered,
-    Rejected, RejectionCode, ResultFrame, Resume, RetainedResult, SandboxProfile, Shutdown,
-    ShutdownReason, TerminalResult, ValueError, advertisement_digest, decode_line, encode_line,
+    DirectiveAction, EffectClass, Enroll, Frame, FrameError, Heartbeat, HeartbeatAck, LeaseClaim,
+    LeaseCorrelation, LeaseOffer, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
+    PositiveU64, Registered, Rejected, RejectionCode, ResultFrame, Resume, RetainedResult,
+    SandboxProfile, Shutdown, ShutdownReason, TerminalResult, ValueError, advertisement_digest,
+    decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -522,6 +523,7 @@ pub struct RunnerConnection<S> {
     io: BufReader<S>,
     receive_buffer: Vec<u8>,
     pending_offer: Option<LeaseOffer>,
+    resumed_lease: Option<LeaseCorrelation>,
     execution: Option<RunnerExecution>,
     last_recorded: Option<LeaseCorrelation>,
     receipt: EnrollmentReceipt,
@@ -584,6 +586,7 @@ where
         let digest = advertisement_digest(advertisement)
             .map_err(RunnerConnectionError::InvalidLocalFrame)?;
         let mut io = BufReader::new(stream);
+        let mut resumed_lease = None;
         let (receipt, outcome, connection_epoch) = match state.state().clone() {
             RunnerState::Pristine { request_id } => {
                 send_message(
@@ -648,7 +651,51 @@ where
                         },
                     ));
                 }
+                if let Some(directive) = &resumed.directives.lease {
+                    match directive.action {
+                        DirectiveAction::Await
+                            if inventory.result.is_none()
+                                && inventory.lease.as_ref().is_some_and(|lease| {
+                                    matches!(
+                                        lease.phase,
+                                        LeasePhaseKind::WaitingDispatch
+                                            | LeasePhaseKind::DispatchReceived
+                                    )
+                                }) =>
+                        {
+                            resumed_lease = Some(directive.correlation.clone());
+                        }
+                        DirectiveAction::DiscardAsRecorded
+                            if resumed.directives.result.as_ref().is_some_and(|result| {
+                                result.action == DirectiveAction::DiscardAsRecorded
+                            }) =>
+                        {
+                            state.acknowledge_terminal_result(&directive.correlation)?;
+                        }
+                        DirectiveAction::FailStale
+                            if resumed.directives.result.as_ref().is_none_or(|result| {
+                                result.action == DirectiveAction::FailStale
+                            }) =>
+                        {
+                            state.discard_reconciled_lease(&directive.correlation)?;
+                        }
+                        _ => {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::ResumeDirectives,
+                            ));
+                        }
+                    }
+                }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
+                if let Some(correlation) = &resumed_lease {
+                    send_message(
+                        &mut io,
+                        Message::LeaseClaim(LeaseClaim {
+                            correlation: correlation.clone(),
+                        }),
+                    )
+                    .await?;
+                }
                 (
                     receipt,
                     EnrollmentOutcome::Resumed,
@@ -660,6 +707,7 @@ where
             io,
             receive_buffer: Vec::new(),
             pending_offer: None,
+            resumed_lease,
             execution: None,
             last_recorded: None,
             receipt,
@@ -934,6 +982,9 @@ where
                 Ok(None)
             }
             Message::LeaseClaimed(claimed) => {
+                if self.resumed_lease.as_ref() == Some(&claimed.correlation) {
+                    return Ok(None);
+                }
                 if !self
                     .pending_offer
                     .as_ref()
@@ -949,14 +1000,17 @@ where
             }
             Message::Dispatch(dispatch) => {
                 let inventory = state.reconnect_inventory();
+                let resumed = self.resumed_lease.as_ref() == Some(&dispatch.correlation);
                 if self.execution.is_some()
-                    || !self.pending_offer.as_ref().is_some_and(|offer| {
-                        offer.correlation == dispatch.correlation
-                            && offer.normalized_arguments == dispatch.normalized_arguments
-                    })
+                    || !(resumed
+                        || self.pending_offer.as_ref().is_some_and(|offer| {
+                            offer.correlation == dispatch.correlation
+                                && offer.normalized_arguments == dispatch.normalized_arguments
+                        }))
                     || !inventory.lease.as_ref().is_some_and(|lease| {
                         lease.correlation == dispatch.correlation
-                            && lease.phase == LeasePhaseKind::WaitingDispatch
+                            && (lease.phase == LeasePhaseKind::WaitingDispatch
+                                || (resumed && lease.phase == LeasePhaseKind::DispatchReceived))
                     })
                     || inventory.result.is_some()
                 {
@@ -974,6 +1028,7 @@ where
                     correlation: dispatch.correlation.clone(),
                     task: tokio::spawn(crate::executor::execute(dispatch)),
                 });
+                self.resumed_lease = None;
                 Ok(None)
             }
             Message::ResultRecorded(recorded) => {

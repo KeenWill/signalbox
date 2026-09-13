@@ -4,8 +4,87 @@ use super::*;
 use signalbox_runner_wire::{
     Dispatch, LeaseClaimed, ResultBounds, ResultRecorded, WireToolName, WorkingDirectory,
 };
+use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::DuplexStream;
+
+const CRASH_ROOT: &str = "SIGNALBOX_TEST_RUNNER_CRASH_ROOT";
+const CRASH_EVIDENCE: &str = "SIGNALBOX_TEST_RUNNER_CRASH_EVIDENCE";
+const CRASH_READY: &str = "runner journal phase durably published";
+
+#[test]
+#[ignore = "subprocess fixture for journal crash boundaries"]
+fn journal_phase_crash_child() {
+    let Some(root) = std::env::var_os(CRASH_ROOT) else {
+        return;
+    };
+    let (target, result): (LeasePhase, Option<RetainedResult>) =
+        serde_json::from_str(&std::env::var(CRASH_EVIDENCE).expect("crash fixture evidence"))
+            .expect("typed fixture evidence");
+    let mut state = RunnerStateRoot::open(Path::new(&root)).expect("child owns journal");
+    for phase in [
+        LeasePhaseKind::WaitingDispatch,
+        LeasePhaseKind::DispatchReceived,
+        LeasePhaseKind::ExecutionMayHaveStarted,
+    ] {
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: target.correlation.clone(),
+                phase,
+            })
+            .expect("phase fsynced by its production producer");
+        if phase == target.phase {
+            break;
+        }
+    }
+    if let Some(result) = result {
+        state
+            .record_terminal_result(result)
+            .expect("result durably retained");
+    }
+    println!("{CRASH_READY}");
+    std::io::Write::flush(&mut std::io::stdout()).expect("parent observes crash boundary");
+    loop {
+        std::thread::park();
+    }
+}
+
+async fn crash_at_journal_phase(
+    parent: &TempDir,
+    phase: LeasePhase,
+    result: Option<RetainedResult>,
+) -> RunnerStateRoot {
+    let mut child = tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "protocol::lease_tests::journal_phase_crash_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(CRASH_ROOT, parent.path().join("state"))
+        .env(
+            CRASH_EVIDENCE,
+            serde_json::to_string(&(phase, result)).expect("fixture serialization"),
+        )
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("journal producer subprocess");
+    let mut output = BufReader::new(child.stdout.take().expect("child output")).lines();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(line) = output.next_line().await.expect("child output readable") {
+            if line.ends_with(CRASH_READY) {
+                return;
+            }
+        }
+        panic!("child exited before the durable boundary");
+    })
+    .await
+    .expect("child reaches durable boundary");
+    child.kill().await.expect("SIGKILL without journal cleanup");
+    assert!(!child.wait().await.expect("child reaped").success());
+    RunnerStateRoot::open(&parent.path().join("state")).expect("restart replays killed producer")
+}
 
 fn fixture(
     parent: &TempDir,
@@ -64,6 +143,7 @@ fn fixture(
         io: BufReader::new(runner),
         receive_buffer: Vec::new(),
         pending_offer: None,
+        resumed_lease: None,
         execution: None,
         last_recorded: None,
         receipt,
@@ -81,6 +161,229 @@ fn fixture(
         result_bounds: ResultBounds::version_one(),
     };
     (state, connection, BufReader::new(hub), offer)
+}
+
+#[tokio::test]
+async fn reconnect_replays_only_the_two_pre_execution_phases() {
+    for phase in [
+        LeasePhaseKind::WaitingDispatch,
+        LeasePhaseKind::DispatchReceived,
+    ] {
+        let parent = TempDir::new().expect("fixture parent");
+        let (state, connection, _, offer) = fixture(&parent);
+        let advertisement = connection.advertisement.clone();
+        drop(connection);
+        drop(state);
+        let mut state = crash_at_journal_phase(
+            &parent,
+            LeasePhase {
+                correlation: offer.correlation.clone(),
+                phase,
+            },
+            None,
+        )
+        .await;
+        let (runner, hub) = tokio::io::duplex(64 * 1024);
+        let mut hub = BufReader::new(hub);
+        let exchange = async {
+            let Message::Resume(request) = receive_message(&mut hub).await.expect("resume") else {
+                panic!("resume required")
+            };
+            assert_eq!(
+                request.inventory.lease.as_ref().expect("lease").phase,
+                phase
+            );
+            send_message(
+                &mut hub,
+                Message::Resumed(Box::new(signalbox_runner_wire::Resumed {
+                    registration_revision: request.prior_registration_revision,
+                    connection_epoch: PositiveU64::try_new(2).expect("next epoch"),
+                    directives: signalbox_runner_wire::ReconnectDirectives {
+                        lease: Some(signalbox_runner_wire::Directive {
+                            correlation: offer.correlation.clone(),
+                            action: DirectiveAction::Await,
+                        }),
+                        ..Default::default()
+                    },
+                })),
+            )
+            .await
+            .expect("canonical resume");
+            assert_eq!(
+                receive_message(&mut hub).await.expect("replayed claim"),
+                Message::LeaseClaim(LeaseClaim {
+                    correlation: offer.correlation.clone()
+                })
+            );
+        };
+        let (connection, ()) = tokio::join!(
+            RunnerConnection::establish(runner, &mut state, &advertisement),
+            exchange
+        );
+        let mut connection = connection.expect("authenticated resumed connection");
+        assert!(connection.execution.is_none());
+        connection
+            .serve_message(
+                &mut state,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: offer.correlation.clone(),
+                }),
+            )
+            .await
+            .expect("claim acknowledgement");
+        assert_eq!(
+            state
+                .reconnect_inventory()
+                .lease
+                .expect("retained phase")
+                .phase,
+            phase
+        );
+        let dispatch = Message::Dispatch(Dispatch {
+            correlation: offer.correlation.clone(),
+            normalized_arguments: offer.normalized_arguments.clone(),
+        });
+        connection
+            .serve_message(&mut state, dispatch.clone())
+            .await
+            .expect("first execution capability");
+        assert_eq!(
+            state
+                .reconnect_inventory()
+                .lease
+                .expect("execution boundary")
+                .phase,
+            LeasePhaseKind::ExecutionMayHaveStarted
+        );
+        assert!(
+            connection
+                .serve_message(&mut state, dispatch)
+                .await
+                .is_err(),
+            "duplicate dispatch cannot execute twice"
+        );
+    }
+}
+
+#[test]
+fn registration_advance_preserves_only_the_retained_older_lease() {
+    let parent = TempDir::new().expect("fixture parent");
+    let (mut state, connection, _, offer) = fixture(&parent);
+    state
+        .record_lease_phase(LeasePhase {
+            correlation: offer.correlation.clone(),
+            phase: LeasePhaseKind::WaitingDispatch,
+        })
+        .expect("durable claim");
+    state
+        .record_registration(
+            PositiveU64::try_new(2).expect("successor registration"),
+            advertisement_digest(&connection.advertisement).expect("checked advertisement"),
+        )
+        .expect("durable receipt advance");
+    drop(connection);
+    drop(state);
+    let mut state = RunnerStateRoot::open(&parent.path().join("state"))
+        .expect("old lease survives receipt advance");
+    for phase in [
+        LeasePhaseKind::DispatchReceived,
+        LeasePhaseKind::ExecutionMayHaveStarted,
+    ] {
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: offer.correlation.clone(),
+                phase,
+            })
+            .expect("exact retained authority advances");
+    }
+    state
+        .record_terminal_result(RetainedResult {
+            correlation: offer.correlation.clone(),
+            result: TerminalResult::Success {
+                text: "retained result".to_owned(),
+            },
+        })
+        .expect("retained result");
+    state
+        .acknowledge_terminal_result(&offer.correlation)
+        .expect("canonical acknowledgement");
+    assert!(
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: offer.correlation,
+                phase: LeasePhaseKind::WaitingDispatch
+            })
+            .is_err(),
+        "an old receipt cannot authorize a fresh lease"
+    );
+}
+
+#[tokio::test]
+async fn reconnect_discards_only_exact_canonical_terminal_directives() {
+    for recorded in [false, true] {
+        let parent = TempDir::new().expect("fixture parent");
+        let (state, connection, _, offer) = fixture(&parent);
+        let advertisement = connection.advertisement.clone();
+        drop(connection);
+        drop(state);
+        let mut state = crash_at_journal_phase(
+            &parent,
+            LeasePhase {
+                correlation: offer.correlation.clone(),
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            },
+            recorded.then(|| RetainedResult {
+                correlation: offer.correlation.clone(),
+                result: TerminalResult::Success {
+                    text: "recorded echo".to_owned(),
+                },
+            }),
+        )
+        .await;
+        let (runner, hub) = tokio::io::duplex(64 * 1024);
+        let mut hub = BufReader::new(hub);
+        let exchange = async {
+            let Message::Resume(request) = receive_message(&mut hub).await.expect("resume") else {
+                panic!("resume required")
+            };
+            assert_eq!(request.inventory.result.is_some(), recorded);
+            let directive = signalbox_runner_wire::Directive {
+                correlation: offer.correlation.clone(),
+                action: if recorded {
+                    DirectiveAction::DiscardAsRecorded
+                } else {
+                    DirectiveAction::FailStale
+                },
+            };
+            send_message(
+                &mut hub,
+                Message::Resumed(Box::new(signalbox_runner_wire::Resumed {
+                    registration_revision: request.prior_registration_revision,
+                    connection_epoch: PositiveU64::try_new(2).expect("next epoch"),
+                    directives: signalbox_runner_wire::ReconnectDirectives {
+                        lease: Some(directive.clone()),
+                        result: recorded.then_some(directive),
+                        ..Default::default()
+                    },
+                })),
+            )
+            .await
+            .expect("canonical disposition");
+        };
+        let (connection, ()) = tokio::join!(
+            RunnerConnection::establish(runner, &mut state, &advertisement),
+            exchange
+        );
+        assert!(connection.expect("resumed").execution.is_none());
+        assert_eq!(state.reconnect_inventory(), Default::default());
+        drop(state);
+        assert_eq!(
+            RunnerStateRoot::open(&parent.path().join("state"))
+                .expect("acknowledgement survives restart")
+                .reconnect_inventory(),
+            Default::default()
+        );
+    }
 }
 
 #[tokio::test]

@@ -10,6 +10,8 @@ mod ambient_credentials;
 mod runner_execution;
 #[path = "offline_tool_loop/runner_fallback.rs"]
 mod runner_fallback;
+#[path = "offline_tool_loop/runner_reconnect.rs"]
+mod runner_reconnect;
 mod support;
 #[path = "offline_tool_loop/workflows.rs"]
 mod workflow_tools;

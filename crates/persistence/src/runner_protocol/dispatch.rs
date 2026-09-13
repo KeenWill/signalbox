@@ -283,14 +283,27 @@ impl RunnerProtocolStore {
             .await
             .map_err(tool_error)?;
         validate_connection(&mut transaction, enrollment, epoch, &correlation).await?;
+        let completed = self
+            .record_tool_lease_result_in(&mut transaction, correlation, observation)
+            .await?;
+        commit_mutation(transaction).await?;
+        Ok(completed)
+    }
+
+    pub(super) async fn record_tool_lease_result_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        correlation: RunnerLeaseCorrelation,
+        observation: ToolAttemptObservation,
+    ) -> Result<RunnerLease, RunnerProtocolStoreError> {
         sqlx::query(RUNNER_LEASE_HEAD)
             .bind(correlation.lease.into_uuid())
             .bind(Decimal::from(correlation.generation.get()))
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?
             .ok_or_else(invalid)?;
         let lease = self
-            .load_lease_in(&mut transaction, correlation.lease, correlation.generation)
+            .load_lease_in(transaction, correlation.lease, correlation.generation)
             .await?
             .ok_or_else(invalid)?;
         if lease.correlation() != correlation {
@@ -323,7 +336,6 @@ impl RunnerProtocolStore {
             if !matches {
                 return Err(invalid());
             }
-            transaction.rollback().await?;
             return Ok(lease);
         }
         let batch = crate::tool_loop::load_active_batch_from_connection(
@@ -351,8 +363,7 @@ impl RunnerProtocolStore {
         crate::tool_loop::persist_ended_attempt(transaction.as_mut(), &ended)
             .await
             .map_err(tool_error)?;
-        append_lease_event_in(&mut transaction, &completed).await?;
-        commit_mutation(transaction).await?;
+        append_lease_event_in(transaction, &completed).await?;
         Ok(completed)
     }
 }
@@ -446,22 +457,33 @@ async fn validate_connection(
     {
         return Err(invalid());
     }
-    let row = sqlx::query("SELECT registration_enrollment_id, offer_connection_epoch FROM runner_lease_generation WHERE lease_id = $1 AND generation = $2")
+    let row = sqlx::query("SELECT generation.registration_enrollment_id, generation.offer_connection_epoch,
+            event.state_kind, generation.offer_loss_epoch IS NOT DISTINCT FROM loss.loss_epoch AS loss_intact
+        FROM runner_lease_generation AS generation
+        JOIN runner_current_lease_event AS head USING (lease_id, generation)
+        JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+        LEFT JOIN runner_current_connection_loss AS loss ON loss.enrollment_id = generation.registration_enrollment_id
+        WHERE generation.lease_id = $1 AND generation.generation = $2")
         .bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get())).fetch_optional(&mut **transaction).await?.ok_or_else(invalid)?;
     if row.decode_column::<Uuid>("registration_enrollment_id")? != enrollment.into_uuid()
-        || row.decode_column::<Option<Decimal>>("offer_connection_epoch")?
-            != Some(Decimal::from(epoch.get()))
+        || !(row.decode_column::<String>("state_kind")? == "completed"
+            || (row.decode_column::<bool>("loss_intact")?
+                && (row.decode_column::<String>("state_kind")? == "claimed"
+                    || row.decode_column::<Option<Decimal>>("offer_connection_epoch")?
+                        == Some(Decimal::from(epoch.get())))))
     {
         return Err(invalid());
     }
     Ok(())
 }
 
-fn invalid() -> RunnerProtocolStoreError {
+pub(super) fn invalid() -> RunnerProtocolStoreError {
     RunnerProtocolStoreError::Domain(RunnerDomainError::CorrelationMismatch)
 }
 
-fn tool_error(error: crate::tool_loop::ToolLoopRepositoryError) -> RunnerProtocolStoreError {
+pub(super) fn tool_error(
+    error: crate::tool_loop::ToolLoopRepositoryError,
+) -> RunnerProtocolStoreError {
     match error {
         crate::tool_loop::ToolLoopRepositoryError::Database {
             source,

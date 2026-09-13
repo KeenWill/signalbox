@@ -277,7 +277,7 @@ impl RunnerHost {
     }
 }
 
-fn placement(directory: PathBuf) -> SessionRunnerPlacementRequest {
+pub(super) fn placement(directory: PathBuf) -> SessionRunnerPlacementRequest {
     SessionRunnerPlacementRequest {
         selector: RunnerSelector::CapabilityClass(
             RunnerCapabilityClass::try_new("echo".to_owned()).expect("compiled class"),
