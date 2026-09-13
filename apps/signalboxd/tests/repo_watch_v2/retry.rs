@@ -473,7 +473,7 @@ async fn an_ended_dispatch_retries_only_when_the_failed_check_is_required()
 #[ignore = "requires disposable PostgreSQL"]
 async fn required_check_migration_preserves_the_baseline_with_unknown_check_status()
 -> Result<(), Box<dyn Error>> {
-    const MIGRATION_VERSION: i64 = 202609120531;
+    const MIGRATION_VERSION: i64 = 202609120591;
     let previous = sqlx::migrate::Migrator {
         migrations: signalbox_persistence::MIGRATOR
             .iter()

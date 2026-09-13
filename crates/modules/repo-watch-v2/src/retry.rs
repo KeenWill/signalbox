@@ -3,8 +3,8 @@ use crate::{DispatchAdmission, PlannedCommand, RepoWatchStore, StoreError};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_session_ownership::{
-    ChecksOutcome, LifecycleEventSource, MergeableState, OffsetDateTime, RepoWatchEvent,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchPullRequestLifecycle,
+    CheckConclusion, ChecksOutcome, LifecycleEventSource, MergeableState, OffsetDateTime,
+    RepoWatchEvent, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchRule, RepoWatchThreadState, RepositorySlug, SessionId,
 };
 use sqlx::{Postgres, Transaction};
@@ -316,7 +316,8 @@ pub(crate) fn reevaluation_event(
                         .completed_check_runs()
                         .iter()
                         .map(|check| check.conclusion()),
-                ),
+                )
+                .chain(failing.then_some(CheckConclusion::Failure)),
         )
     } else {
         rule.matcher().matches(&event)
@@ -328,9 +329,9 @@ pub(crate) fn reevaluation_event(
 mod tests {
     use super::*;
     use signalbox_session_ownership::{
-        BranchName, CheckConclusion, CommitSha, LabelName, PullRequestBody,
-        PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-        RepoWatchAuthorLogin, RepoWatchEventId, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+        BranchName, CommitSha, LabelName, PullRequestBody, PullRequestEventContext,
+        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
+        RepoWatchEventId, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
         RepoWatchPullRequestStateInput, RepoWatchRuleActionV1, RepoWatchRuleId,
         RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchThreadObservation, ReviewThreadId,
         SessionTemplateName,
@@ -650,6 +651,33 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    #[test]
+    fn required_status_failure_matches_activation_failure_predicates() {
+        let (original, event) = origin(RepoWatchEventKindV1::ChecksCompleted {
+            outcome: ChecksOutcome::Failure,
+        });
+        let rule = RepoWatchRule::try_new(
+            original.id().clone(),
+            original.version(),
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                event_kinds: vec![event.kind().name()],
+                conclusion: vec![CheckConclusion::Failure],
+                ..Default::default()
+            }),
+            original.actions().to_vec(),
+            original.singleton_per(),
+            original.cooldown(),
+        )
+        .expect("failure matcher");
+        let mut current = input();
+        // A failed required StatusContext has no REST check-run or check-suite entry.
+        current.required_check_failure = Some(true);
+        current.completed_check_suites = vec![];
+        current.completed_check_runs = vec![];
+        let observed = RepoWatchPullRequestState::try_new(current).expect("status-only failure");
+        assert!(reevaluation_event(&rule, &event, &[observed], MatchSource::Activation).is_some());
     }
 
     #[test]
