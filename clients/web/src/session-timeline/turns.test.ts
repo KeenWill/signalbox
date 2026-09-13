@@ -9,6 +9,7 @@ import {
   groupTranscriptTurns,
   isVisibleTurnEvent,
   toolContinuations,
+  toolDisclosureKeys,
   toolEvidenceKey,
   turnSummaryParts,
 } from './turns'
@@ -371,4 +372,34 @@ it('does not treat goal-only batch members as visible tools in a visible turn', 
   expect(turn.messages).toHaveLength(1)
   expect(turnSummaryParts(turn).map((part) => part.kind)).toEqual(['message'])
   expect(isVisibleTurnEvent(turn, goal)).toBe(false)
+})
+
+it('retains an open request identity for its first physical attempt and keeps retries distinct', () => {
+  const items = retriedToolItems()
+  const proposal = items[1]
+  if (proposal?.body.type !== 'tool_batch') throw new Error('Proposal missing')
+  const pending = toolDisclosureKeys(proposal.body.tools, new Map())
+  const tools = groupTranscriptTurns(items).flatMap((turn) => turn.tools)
+  const first = tools[0]
+  const retry = tools[1]
+  if (!first || !retry) throw new Error('Attempts missing')
+  const physical = toolDisclosureKeys(tools, pending)
+  expect(physical.get(toolEvidenceKey(first))).toBe(first.request_id)
+  expect(physical.get(toolEvidenceKey(retry))).toBe(toolEvidenceKey(retry))
+  expect(toolDisclosureKeys(tools, physical)).toEqual(physical)
+  const evicted = toolDisclosureKeys([retry], physical)
+  expect(evicted).toEqual(new Map([[toolEvidenceKey(retry), toolEvidenceKey(retry)]]))
+  expect(toolDisclosureKeys(tools, evicted).get(toolEvidenceKey(retry))).toBe(
+    toolEvidenceKey(retry),
+  )
+})
+
+it('preserves an existing physical disclosure when earlier evidence is prepended', () => {
+  const tools = groupTranscriptTurns(retriedToolItems()).flatMap((turn) => turn.tools)
+  const retained = tools[1]
+  if (!retained) throw new Error('Retry missing')
+  const before = toolDisclosureKeys([retained], new Map())
+  const after = toolDisclosureKeys(tools, before)
+  expect(after.get(toolEvidenceKey(retained))).toBe(before.get(toolEvidenceKey(retained)))
+  expect(new Set(after.values()).size).toBe(2)
 })

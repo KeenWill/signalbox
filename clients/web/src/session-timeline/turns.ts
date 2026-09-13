@@ -29,6 +29,21 @@ export function toolEvidenceKey(tool: WebTimelineToolAttempt): string {
     : tool.request_id
 }
 
+export function toolDisclosureKeys(
+  tools: readonly WebTimelineToolAttempt[],
+  previous: ReadonlyMap<string, string>,
+): ReadonlyMap<string, string> {
+  const keys = new Map<string, string>()
+  const claimedRequests = new Set<string>()
+  for (const tool of tools) {
+    const evidence = toolEvidenceKey(tool)
+    const pending = claimedRequests.has(tool.request_id) ? undefined : previous.get(tool.request_id)
+    keys.set(evidence, previous.get(evidence) ?? pending ?? evidence)
+    claimedRequests.add(tool.request_id)
+  }
+  return keys
+}
+
 function projectedTool(tools: WebTimelineToolAttempt[], evidence: WebTimelineToolAttempt) {
   return tools.find((tool) =>
     evidence.evidence.type === 'request_only'

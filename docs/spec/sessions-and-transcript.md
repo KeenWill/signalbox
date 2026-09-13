@@ -582,8 +582,10 @@ unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. Turn segments retain window boundaries so prepending
 history preserves existing rows and their disclosures. Retained tool chips stay
 in their assigned window segment when earlier proposal evidence is loaded;
-evicted assignments are discarded. Turn-wide classification uses all loaded
-events.
+evicted assignments are discarded. An open request-only tool keeps its
+disclosure and continued text when its first physical attempt arrives. Later
+physical attempts retain separate disclosure identities. Turn-wide
+classification uses all loaded events.
 
 The transcript groups contiguous events by turn while preserving interleaved
 chronology. Summary shows user messages, assistant text accompanying tool calls,

@@ -46,6 +46,7 @@ import {
   isVisibleTurnEvent,
   type TranscriptTurn,
   toolContinuations,
+  toolDisclosureKeys,
   toolEvidenceKey,
   turnSummaryParts,
 } from './session-timeline/turns'
@@ -901,6 +902,16 @@ function TurnContent({
   onEventContinuation: (sequence: string, state: EventContinuationState) => void
   onExpand: (mode: DetailMode) => void
 }) {
+  const previousKeys = useRef<ReadonlyMap<string, string>>(new Map())
+  const disclosureKeys = useMemo(
+    () => toolDisclosureKeys(turn.tools, previousKeys.current),
+    [turn.tools],
+  )
+  useEffect(() => {
+    previousKeys.current = disclosureKeys
+  }, [disclosureKeys])
+  const disclosureKey = (entry: WebTimelineToolAttempt) =>
+    disclosureKeys.get(toolEvidenceKey(entry)) ?? toolEvidenceKey(entry)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
     return page?.continuation ? renderContinuation(page) : null
@@ -914,7 +925,7 @@ function TurnContent({
           cursor?.type === 'more_body' &&
           !advancesToolMember(candidate) &&
           ((item?.body.type === 'tool_batch' &&
-            item.body.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool))) ||
+            item.body.tools.some((entry) => disclosureKey(entry) === disclosureKey(tool))) ||
             toolContinuations(tool).some(
               ({ continuation }) =>
                 cursor.body.address.event_sequence === continuation.address.event_sequence &&
@@ -981,12 +992,12 @@ function TurnContent({
             <section
               className="session-tool-chips"
               aria-label="Tools used"
-              key={part.tools[0] ? toolEvidenceKey(part.tools[0]) : undefined}
+              key={part.tools[0] ? disclosureKey(part.tools[0]) : undefined}
             >
               {part.tools.map((entry) => (
                 <button
                   type="button"
-                  key={toolEvidenceKey(entry)}
+                  key={disclosureKey(entry)}
                   aria-label={`Open turn details for ${entry.tool_name}`}
                   onClick={() => onExpand('full')}
                 >
@@ -994,7 +1005,7 @@ function TurnContent({
                 </button>
               ))}
               {part.tools.map((entry) => (
-                <div className="session-tool-slot" key={toolEvidenceKey(entry)}>
+                <div className="session-tool-slot" key={disclosureKey(entry)}>
                   <ToolSummary
                     tool={entry}
                     detailPages={detailPages}
@@ -1015,7 +1026,7 @@ function TurnContent({
                         event.body.type === 'tool_batch' &&
                         event.body.tools.some((entry) =>
                           part.tools.some(
-                            (tool) => toolEvidenceKey(tool) === toolEvidenceKey(entry),
+                            (tool) => disclosureKey(tool) === disclosureKey(entry),
                           ),
                         ),
                     ),
