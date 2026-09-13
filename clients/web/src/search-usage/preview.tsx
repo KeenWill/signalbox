@@ -11,8 +11,11 @@ import {
 } from '@tanstack/react-router'
 import { createRoot } from 'react-dom/client'
 import '../app.css'
+import '../catalog.css'
+import { useState } from 'react'
 import { readProductRouteState } from '../product'
 import { defaultSearchUsageRouteState, SearchUsageWorkbench } from '../SearchUsage'
+import { AttentionCost } from './AttentionCost'
 import { SEARCH_USAGE_SCENARIO_SESSION_ID, SearchUsageScenarioSource } from './scenario'
 import {
   CostChip,
@@ -24,10 +27,42 @@ import {
 import { UsageContent, UsageSurface } from './UsageSurface'
 
 function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string }) {
+  const [previewOpen, setPreviewOpen] = useState(false)
   const turns = useTurnCosts(sessionId)
   const session = useSessionCost(sessionId)
   return (
     <>
+      <section aria-label="Attention row" className="attention-list" style={{ maxWidth: 520 }}>
+        <ol>
+          <li className="attention-cost-row">
+            <a
+              className="attention-session-link"
+              aria-label="Example session"
+              href={`/sessions?session=${sessionId}&workspace=true`}
+            >
+              <span className="attention-rail" aria-hidden="true" />
+              <span className="attention-identity">
+                <strong>Example session</strong>
+                <code>{sessionId}</code>
+              </span>
+              <span className="attention-obligation">Needs approval</span>
+              <time>Today, 12:30</time>
+              <span aria-hidden="true">→</span>
+            </a>
+            <button
+              className="attention-preview"
+              type="button"
+              aria-label="Preview example session"
+              aria-pressed={previewOpen}
+              onClick={() => setPreviewOpen(!previewOpen)}
+            >
+              Preview
+            </button>
+            <AttentionCost sessionId={sessionId} />
+          </li>
+        </ol>
+      </section>
+
       <button type="button" onClick={() => void session.refetch()}>
         Refresh costs
       </button>
@@ -51,6 +86,18 @@ function Preview() {
   const search = useLocation({ select: (location) => location.searchStr })
   const navigate = useNavigate()
   const query = new URLSearchParams(search)
+  if (query.get('preview') === 'attention-costs')
+    return (
+      <ol aria-label="Attention cost rows">
+        {[SEARCH_USAGE_SCENARIO_SESSION_ID, '00000000-0000-0000-0000-000000000995'].map(
+          (sessionId) => (
+            <li key={sessionId}>
+              <AttentionCost sessionId={sessionId} />
+            </li>
+          ),
+        )}
+      </ol>
+    )
   if (query.get('preview') === 'cost')
     return <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
   if (query.has('http')) return <UsageSurface />
