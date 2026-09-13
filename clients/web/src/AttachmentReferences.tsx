@@ -12,6 +12,7 @@ import {
 import { type CommandContext, invokeCommand } from './commands'
 import { ArtifactRenderer, selectBlobView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
+import { attachmentDescriptorMediaType } from './features/artifacts/attachmentMetadata'
 import { useArtifactDescriptor, useBlobCapability } from './features/artifacts/descriptorService'
 import type {
   WebSessionTimelineDetailBody,
@@ -33,6 +34,7 @@ function AttachmentReference({
 }) {
   const container = useRef<HTMLDivElement>(null)
   const chip = useRef<HTMLButtonElement>(null)
+  const opener = useRef<HTMLButtonElement | null>(null)
   const [visible, setVisible] = useState(false)
   const [reservedHeight, setReservedHeight] = useState(0)
   useEffect(() => {
@@ -52,7 +54,7 @@ function AttachmentReference({
   const input = useMemo(
     () => ({
       digest: attachment.blob_id,
-      mediaType: attachment.media_type ?? 'application/octet-stream',
+      mediaType: attachmentDescriptorMediaType(attachment.media_type),
     }),
     [attachment.blob_id, attachment.media_type],
   )
@@ -116,7 +118,10 @@ function AttachmentReference({
               type="button"
               ref={chip}
               disabled={!available}
-              onClick={() => invokeCommand('artifact.open', context)}
+              onClick={(event) => {
+                opener.current = event.currentTarget
+                invokeCommand('artifact.open', context)
+              }}
             >
               {name} · {attachment.media_type ?? 'Unknown file type'} ·{' '}
               {BigInt(attachment.length_bytes).toLocaleString()} bytes
@@ -132,7 +137,10 @@ function AttachmentReference({
           <ArtifactRenderer
             artifact={artifact}
             commandContext={context}
-            onInspect={() => invokeCommand('artifact.open', context)}
+            onInspect={(control) => {
+              opener.current = control
+              invokeCommand('artifact.open', context)
+            }}
           />
         )}
         {available && visible && descriptor.isPending && (
@@ -168,6 +176,12 @@ function AttachmentReference({
         <Dialog.Content
           className="attachment-detail-pane"
           aria-describedby={undefined}
+          onCloseAutoFocus={(event) => {
+            if (opener.current?.isConnected) {
+              event.preventDefault()
+              opener.current.focus()
+            }
+          }}
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onKeyDown={(event) => event.stopPropagation()}
         >

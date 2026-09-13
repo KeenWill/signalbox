@@ -250,3 +250,50 @@ test('releases the phone height reservation after reloading at desktop width', a
   if (!desktop) throw new Error('Reloaded attachment required')
   expect(desktop.height).toBeLessThan(phone.height)
 })
+
+test('downloads attachments carrying non-MIME timeline labels', async ({ page }) => {
+  const mediaTypes: string[] = []
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) => {
+    mediaTypes.push(new URL(route.request().url()).searchParams.get('media_type') ?? '')
+    return route.fulfill({ json: fileAttachment })
+  })
+  await page.goto('/src/features/artifacts/scenario.html?label')
+  const chip = page.getByRole('button', { name: 'File · garbage · 4,096 bytes', exact: true })
+  await expect(page.getByRole('link', { name: 'Download' })).toBeVisible()
+  await chip.click()
+  await expect(
+    page
+      .getByRole('dialog', { name: 'Attachment details' })
+      .getByRole('link', { name: 'Download' }),
+  ).toHaveAttribute('href', fileAttachment.available_views[0]?.content_url ?? '')
+  expect(mediaTypes.length).toBeGreaterThan(0)
+  expect(mediaTypes.every((type) => type === 'application/octet-stream')).toBe(true)
+})
+
+test('restores focus to the image preview control after closing details', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) =>
+    route.fulfill({
+      json: decodeURIComponent(route.request().url()).includes(imageDescriptor.digest)
+        ? imageAttachment
+        : fileAttachment,
+    }),
+  )
+  await page.route('**/api/blobs/**/content/image-png', (route) =>
+    route.fulfill({ body: preview, contentType: 'image/png' }),
+  )
+  await page.goto('/src/features/artifacts/scenario.html')
+  const control = page
+    .getByRole('article', { name: 'Artifact Image', exact: true })
+    .getByRole('button', { name: 'Image Image', exact: true })
+  await control.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('dialog', { name: 'Attachment details' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(control).toBeFocused()
+})

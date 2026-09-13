@@ -31,13 +31,15 @@ if (root)
             <AttachmentReferences
               attachments={(location.search.includes('original')
                 ? [jpegDescriptor]
-                : location.search.includes('offscreen')
+                : location.search.includes('offscreen') || location.search.includes('label')
                   ? [fallbackDescriptor]
                   : [imageDescriptor, fallbackDescriptor]
               ).map((descriptor) => ({
                 blob_id: descriptor.digest,
                 length_bytes: descriptor.byte_length,
-                media_type: descriptor.declared_media_type,
+                media_type: location.search.includes('label')
+                  ? 'garbage'
+                  : descriptor.declared_media_type,
               }))}
             />
           </div>
