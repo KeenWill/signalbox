@@ -325,7 +325,11 @@ pub struct ReplaceSessionMetadata {
 }
 
 impl ReplaceSessionMetadata {
-    /// Constructs metadata installed by daemon title generation.
+    /// Constructs complete result evidence for a daemon title installation.
+    ///
+    /// Public metadata replacement handling rejects Core commands. Only the
+    /// title settlement path persists this shape after preserving the current
+    /// metadata and checking that its title is unset under the session lock.
     pub const fn for_title_generation(
         command_id: DurableCommandId,
         session: SessionId,

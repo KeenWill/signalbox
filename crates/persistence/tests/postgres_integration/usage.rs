@@ -372,6 +372,42 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             .actor(),
         Actor::Core
     );
+    for boundary in [
+        SessionMetadataRepository::new(pool.clone()),
+        SessionMetadataRepository::for_title_update(pool.clone()),
+    ] {
+        let replacement_id = DurableCommandId::from_uuid(Uuid::now_v7());
+        let arbitrary_core = ReplaceSessionMetadata::for_title_generation(
+            replacement_id,
+            fixture.session,
+            SessionMetadataContent::try_new(
+                Some("Overwrite existing name".to_owned()),
+                vec!["other".to_owned()],
+                vec![("source".to_owned(), "replacement".to_owned())],
+                false,
+            )
+            .expect("valid but unauthorized Core replacement"),
+        );
+        assert!(matches!(
+            boundary.handle(arbitrary_core).await,
+            Err(
+                signalbox_persistence::session_metadata::SessionMetadataRepositoryError::Corruption(
+                    _
+                )
+            )
+        ));
+        assert!(boundary.load_command(replacement_id).await?.is_none());
+        let recorded = SessionMetadataRepository::for_title_update(pool.clone())
+            .load_command(command)
+            .await?
+            .expect("title installation receipt");
+        assert!(boundary.handle(recorded.command().clone()).await.is_err());
+        assert_eq!(
+            metadata.load_session_metadata(fixture.session).await?,
+            Some(snapshot.clone()),
+            "public Core handling cannot replace any field or last-writer evidence"
+        );
+    }
     let manual = SessionMetadataContent::try_new(
         Some("My chosen name".to_owned()),
         Vec::new(),
