@@ -20,8 +20,12 @@ describe('attachment descriptor media types', () => {
   })
   it.each([
     'image/png',
+    String.raw`image/png;x="a\z"`,
+    String.raw`image/png;x="a\"b"`,
+    String.raw`image/png;x="a\\z"`,
     'application/vnd.example+json',
     'text/plain; charset=utf-8',
+    'text/plain; charset=utf-8   ',
     'text/plain; charset="utf-8"',
   ])('preserves MIME label %s', (label) => {
     expect(attachmentDescriptorMediaType(label)).toBe(label)

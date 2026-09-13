@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { AttachmentReferences } from '../../AttachmentReferences'
@@ -8,7 +9,23 @@ import '../../app.css'
 
 function OriginalCount() {
   const count = useAppSelector((state) => Object.keys(state.app.originalArtifacts).length)
-  return <output aria-label="Original image states">{count}</output>
+  const bytes = useSyncExternalStore(
+    (notify) => queryClient.getQueryCache().subscribe(notify),
+    () =>
+      queryClient
+        .getQueryCache()
+        .findAll({ queryKey: ['artifact-original'] })
+        .reduce(
+          (sum, query) => sum + (query.state.data instanceof Blob ? query.state.data.size : 0),
+          0,
+        ),
+  )
+  return (
+    <>
+      <output aria-label="Original image states">{count}</output>
+      <output aria-label="Cached original bytes">{bytes}</output>
+    </>
+  )
 }
 
 const queryClient = new QueryClient()
