@@ -6387,6 +6387,14 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebTimelineMediaPresentationKind": {
+        "description": "Presentation supported by retained tool-result media evidence.",
+        "enum": [
+          "image",
+          "document"
+        ],
+        "type": "string"
+      },
       "WebTimelineModelCallDisposition": {
         "description": "Closed terminal model-call disposition.",
         "enum": [
@@ -7245,6 +7253,17 @@ const schemas = {
                   }
                 ]
               },
+              "result_media_reference": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineToolMediaReference"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Present only for completed media results in the frozen transition."
+              },
               "result_present": {
                 "description": "Whether the frozen transition snapshot recorded a result payload,\nindependent of which single field this page projected.",
                 "type": "boolean"
@@ -7377,6 +7396,33 @@ const schemas = {
             "type": "string"
           }
         ]
+      },
+      "WebTimelineToolMediaReference": {
+        "additionalProperties": false,
+        "description": "Immutable presented bytes. Images use the blob content route; documents use\nthe download view in the blob descriptor.",
+        "properties": {
+          "digest": {
+            "$ref": "#/$defs/WebBlobId"
+          },
+          "length_bytes": {
+            "$ref": "#/$defs/WebPositiveU64"
+          },
+          "media_type": {
+            "description": "Canonical media types use the domain media identity's 255-byte bound.",
+            "maxLength": 255,
+            "type": "string"
+          },
+          "presentation_kind": {
+            "$ref": "#/$defs/WebTimelineMediaPresentationKind"
+          }
+        },
+        "required": [
+          "digest",
+          "media_type",
+          "presentation_kind",
+          "length_bytes"
+        ],
+        "type": "object"
       },
       "WebTimelineToolSandboxPosture": {
         "enum": [
@@ -9182,6 +9228,18 @@ function assertTimelineDetailPage(value) {
             );
           }
           if (physical !== null) {
+            if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {
+              const media = physical.result_media_reference;
+              const mediaPath = `${path}.body.tools[0].evidence.result_media_reference`;
+              assertCanonicalMediaType(
+                media.media_type,
+                `${mediaPath}.media_type`,
+              );
+              assertCanonicalU64(media.length_bytes, `${mediaPath}.length_bytes`);
+              if (media.presentation_kind === "document" && media.media_type !== "application/pdf") {
+                fail(`${mediaPath}.media_type`, "application/pdf for document presentation");
+              }
+            }
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {
               fail(
@@ -9196,8 +9254,8 @@ function assertTimelineDetailPage(value) {
               );
             }
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               !physical.result_present
             ) {
               fail(
@@ -9222,8 +9280,8 @@ function assertTimelineDetailPage(value) {
               );
             }
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               physical.state !== "completed"
             ) {
               fail(
@@ -10098,6 +10156,13 @@ function assertMediaType(value, path) {
     !isMimeValue(value)
   ) {
     fail(path, "a MIME value of at most 255 UTF-8 bytes");
+  }
+}
+
+function assertCanonicalMediaType(value, path) {
+  assertMediaType(value, path);
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(value)) {
+    fail(path, "a canonical lowercase MIME type without parameters");
   }
 }
 

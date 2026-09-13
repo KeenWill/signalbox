@@ -667,6 +667,7 @@ impl PreparedModelOperation {
     pub fn system_prompt(&self) -> option::Option<&str>;
     pub fn messages(&self) -> &[ModelConversationMessage];
     pub fn tools(&self) -> &[ToolDefinition];
+    pub const fn tool_request_limit(&self) -> option::Option<u64>;
     pub fn attachment_digests(
         &self,
     ) -> impl iterator::Iterator<Item = signalbox_domain::BlobDigest> + '_;
@@ -1032,5 +1033,30 @@ where
             <Observation as CommitModelCallObservationTransaction>::Error,
         >,
     >;
+    pub async fn execute_with_tool_request_allowance<Allowance, AllowanceFuture>(
+        &mut self,
+        session: signalbox_domain::SessionId,
+        allowance: Allowance,
+    ) -> result::Result<
+        ModelCallExecutionOutcome,
+        ModelCallExecutionError<
+            <Prepare as PrepareModelCallTransaction>::Error,
+            <Failure as FailPreparedModelCallTransaction>::Error,
+            <Authorization as AuthorizeModelCallTransaction>::Error,
+            <Provider as ModelCallProvider>::Error,
+            <Observation as CommitModelCallObservationTransaction>::Error,
+        >,
+    >
+    where
+        Allowance: function::FnOnce(
+            signalbox_domain::SessionId,
+            signalbox_domain::TurnId,
+        ) -> AllowanceFuture,
+        AllowanceFuture: future::Future<
+            Output = result::Result<
+                option::Option<u64>,
+                <Prepare as PrepareModelCallTransaction>::Error,
+            >,
+        >;
 }
 ```

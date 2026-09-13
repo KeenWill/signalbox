@@ -1347,6 +1347,27 @@ pub enum WebTimelineToolFailureCause {
     CrashLost,
 }
 
+/// Presentation supported by retained tool-result media evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+    Document,
+}
+
+/// Immutable presented bytes. Images use the blob content route; documents use
+/// the download view in the blob descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    /// Canonical media types use the domain media identity's 255-byte bound.
+    #[schemars(length(max = 255))]
+    pub media_type: String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 #[allow(
@@ -1357,6 +1378,8 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        /// Present only for completed media results in the frozen transition.
+        result_media_reference: Option<WebTimelineToolMediaReference>,
         result: Option<WebTimelineTextExcerpt>,
         failure: Option<WebTimelineTextExcerpt>,
         /// Whether the frozen transition snapshot recorded a result payload,
@@ -3875,6 +3898,18 @@ function assertTimelineDetailPage(value) {{
             );
           }}
           if (physical !== null) {{
+            if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {{
+              const media = physical.result_media_reference;
+              const mediaPath = `${{path}}.body.tools[0].evidence.result_media_reference`;
+              assertCanonicalMediaType(
+                media.media_type,
+                `${{mediaPath}}.media_type`,
+              );
+              assertCanonicalU64(media.length_bytes, `${{mediaPath}}.length_bytes`);
+              if (media.presentation_kind === "document" && media.media_type !== "application/pdf") {{
+                fail(`${{mediaPath}}.media_type`, "application/pdf for document presentation");
+              }}
+            }}
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {{
               fail(
@@ -3889,8 +3924,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               !physical.result_present
             ) {{
               fail(
@@ -3915,8 +3950,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               physical.state !== "completed"
             ) {{
               fail(
@@ -4791,6 +4826,13 @@ function assertMediaType(value, path) {{
     !isMimeValue(value)
   ) {{
     fail(path, "a MIME value of at most 255 UTF-8 bytes");
+  }}
+}}
+
+function assertCanonicalMediaType(value, path) {{
+  assertMediaType(value, path);
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(value)) {{
+    fail(path, "a canonical lowercase MIME type without parameters");
   }}
 }}
 

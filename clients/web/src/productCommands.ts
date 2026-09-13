@@ -123,15 +123,6 @@ const productNavigationCommands = [
     available: (context: ProductCommandContext) => !context.navigationLocked,
     run: (context: ProductCommandContext) => context.navigate('/settings'),
   },
-  {
-    id: 'navigate.scenario',
-    title: 'Go to Scenario studio',
-    description: 'Open Scenario studio.',
-    category: 'Navigate',
-    bindings: [],
-    available: (context: ProductCommandContext) => !context.navigationLocked,
-    run: (context: ProductCommandContext) => context.navigate('/scenario/streaming'),
-  },
 ] as const
 
 export const productCommandRegistry = [

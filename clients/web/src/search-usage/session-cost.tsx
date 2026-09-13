@@ -61,9 +61,11 @@ export function useTurnCosts(sessionId: string) {
 export function CostChip({
   cost,
   status,
+  label,
 }: {
   cost?: CostTotal
   status: 'pending' | 'error' | 'success'
+  label?: string
 }) {
   const [expanded, setExpanded] = useState(false)
   const detailsId = useId()
@@ -88,6 +90,7 @@ export function CostChip({
       <button
         type="button"
         className="cost-chip-toggle"
+        aria-label={label ? `${label}: ${text}` : undefined}
         aria-expanded={expanded}
         aria-controls={detailsId}
         onClick={() => setExpanded(!expanded)}
@@ -104,7 +107,7 @@ export function CostChip({
 export function SessionCostChip({ sessionId }: { sessionId: string }) {
   const cost = useSessionCost(sessionId)
   if (!sessionId) return <CostChip status="success" />
-  return <CostChip cost={cost.data} status={cost.status} />
+  return <CostChip cost={cost.data} status={cost.status} label={`Cost for session ${sessionId}`} />
 }
 
 export function TurnCostChip({ sessionId, turnId }: { sessionId: string; turnId: string }) {

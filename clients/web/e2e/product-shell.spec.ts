@@ -3,6 +3,7 @@ import { ScenarioImportApi } from '../src/imports/scenario'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
+import { openSessionFromCatalog } from './session-fixture'
 
 const importsProductFixture = {
   path: '/imports',
@@ -279,11 +280,11 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('focuses Scenario studio after cross-route navigation', async ({ page }) => {
+test('focuses Scenario studio when opened by URL', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page.locator('main.workspace')).toBeFocused()
@@ -295,7 +296,7 @@ test('restores the scenario title after leaving product routes', async ({ page }
   await page.goto('/attention')
   await expect(page).toHaveTitle('Attention · Signalbox')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
@@ -315,7 +316,7 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Session timeline unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -332,7 +333,7 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
   await page.goto('/sessions?workspace=true')
 
   await expect(page.getByText('Session timeline unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -358,7 +359,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
-  await expect(page.getByText('Session ID required')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Choose a session' })).toBeVisible()
   await expect(page.locator('.product-connection')).toHaveCount(0)
   expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
@@ -493,7 +494,7 @@ test('uses the main pane for sessions and expands it in Focus', async ({ page })
   await useDeterministicSession(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
-  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Inspector' })).toHaveCount(0)
   const main = page.getByRole('main')
   const workbench = await main.boundingBox()
@@ -509,14 +510,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
-  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
+  await page.getByText('Session details', { exact: true }).click()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
@@ -528,13 +526,9 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const latest = page.getByRole('button', { name: /Latest/ })
   const reconnect = page.getByRole('button', { name: 'Reconnect live updates' })
   await expect(reconnect).toBeVisible()
-  await latest.focus()
-  await page.keyboard.press('Tab')
-  await expect(reconnect).toBeFocused()
-  await page.keyboard.press('Tab')
-  await expect(page.getByRole('checkbox', { name: 'Events', exact: true })).toBeFocused()
-  await page.keyboard.press('Tab')
-  await expect(timeline).toBeFocused()
+  await reconnect.focus()
+  await page.keyboard.press('Escape')
+  await expect(page.getByText('Session details', { exact: true })).toBeFocused()
   await latest.focus()
   await page.keyboard.press('j')
   await expect(timeline).toBeFocused()
@@ -579,22 +573,14 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
-  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.locator('.session-item-summary small').first()).toBeHidden()
 
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
-  await page.getByRole('link', { name: /Sessions/ }).click()
-  await page.goto('/sessions?workspace=true')
-  const reopenedSessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await reopenedSessionId.fill(sessionWorkspaceFixture.id)
-  await reopenedSessionId.press('Enter')
+  await openSessionFromCatalog(page, sessionWorkspaceFixture.id)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
 
   await expect(page.locator('.session-item-summary small').first()).toBeVisible()
@@ -605,11 +591,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
@@ -630,16 +612,12 @@ test('preserves the saved row when reopening the current Session fails', async (
   let failTimeline = false
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page, () => failTimeline)
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await page.getByRole('row', { name: /43 Turn completed/ }).click()
 
   failTimeline = true
-  await sessionId.press('Enter')
+  await page.getByRole('button', { name: 'Latest', exact: true }).click()
   await expect(page.getByRole('alert')).toBeVisible()
 
   const savedPosition = await page.evaluate(
@@ -671,21 +649,15 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
     page,
     (sessionId) => failRevisitedSession && sessionId === sessionWorkspaceFixture.id,
   )
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await page.getByRole('row', { name: /43 Turn completed/ }).click()
 
-  await sessionId.fill(otherSessionId)
-  await sessionId.press('Enter')
-  await expect(page.getByRole('heading', { name: otherSessionId })).toBeVisible()
+  await openSessionFromCatalog(page, otherSessionId)
+  await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
 
   failRevisitedSession = true
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await openSessionFromCatalog(page, sessionWorkspaceFixture.id)
   await expect(page.getByRole('alert')).toBeVisible()
 
   const savedPosition = await page.evaluate(
@@ -713,11 +685,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   let failTimeline = false
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page, () => failTimeline)
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeVisible()
 
@@ -751,11 +719,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
     (_sessionId, address) =>
       contradictRetainedEvent && address === '43' ? 'turn_cancelled' : undefined,
   )
-  await page.goto('/sessions?workspace=true')
-
-  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('row', { name: /43 Turn completed/ })).toBeVisible()
 
@@ -831,7 +795,7 @@ test('clears scenario-only help when browser history returns to the product shel
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
@@ -1033,9 +997,10 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   const paneSliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await paneSliders.nth(0).fill('300')
   await paneSliders.nth(1).fill('400')
+  await paneSliders.nth(1).blur()
   await page.setViewportSize({ width: 1000, height: 800 })
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '300px')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
@@ -1070,8 +1035,13 @@ test('compacts the scenario toolbar at its pane width', async ({ page }, testInf
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 780, height: 720 })
   await page.goto('/settings')
-  await page.getByRole('group', { name: 'Pane widths' }).getByRole('slider').nth(0).fill('360')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  const navigationWidth = page
+    .getByRole('group', { name: 'Pane widths' })
+    .getByRole('slider')
+    .nth(0)
+  await navigationWidth.fill('360')
+  await navigationWidth.blur()
+  await page.goto('/scenario/streaming')
 
   const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
   await expect(toolbar).toBeVisible()
@@ -1102,14 +1072,18 @@ test('keeps Settings available without consulting daemon bootstrap', async ({ pa
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('offers Scenario Studio through the product command palette', async ({ page }) => {
+test('keeps Scenario Studio out of product navigation while preserving its URL', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
-  await page.getByRole('button', { name: /Go to Scenario studio/ }).click()
+  await expect(page.getByRole('button', { name: /Go to Scenario studio/ })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /Scenario studio/ })).toHaveCount(0)
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1573,6 +1547,8 @@ test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
+  await expect(page.getByRole('region', { name: '0 sessions', exact: true })).toBeVisible()
+  await page.getByRole('main').focus()
 
   await page.keyboard.press('g')
   await page.keyboard.press('s')
@@ -1668,7 +1644,7 @@ test('unwinds the phone navigation sheet with Escape', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('closes the phone navigation sheet before entering Scenario studio', async ({ page }) => {
+test('omits Scenario Studio from the phone navigation sheet', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1676,8 +1652,9 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
 
   await page.getByRole('button', { name: 'Open navigation' }).click()
   const navigation = page.getByRole('dialog', { name: 'Product navigation' })
-  await navigation.getByRole('link', { name: /Scenario studio/ }).click()
-  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(navigation.getByRole('link', { name: /Scenario studio/ })).toHaveCount(0)
+  await navigation.getByRole('link', { name: 'Sessions', exact: true }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1739,9 +1716,7 @@ test('retains window control focus while loading and after the new window arrive
 }) => {
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionWorkspaceFixture.id)
-  await page.getByRole('button', { name: 'Open', exact: true }).click()
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   let releaseWindow = () => {}
   const windowReady = new Promise<void>((resolve) => {
@@ -1765,17 +1740,6 @@ test('retains window control focus while loading and after the new window arrive
   await latest.click()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(latest).toBeFocused()
-})
-
-test('trims the session identity before native form validation', async ({ page }) => {
-  await useDeterministicBootstrap(page)
-  await useDeterministicSession(page)
-  await page.goto('/sessions?workspace=true')
-  const input = page.getByRole('textbox', { name: 'Session ID' })
-  await input.fill(`  ${sessionWorkspaceFixture.id}  `)
-  await expect(input).toHaveValue(sessionWorkspaceFixture.id)
-  await input.press('Enter')
-  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
 })
 
 test('starts the settled exact import filter without the previous page cursor', async ({

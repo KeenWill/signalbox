@@ -284,7 +284,12 @@ pub(super) async fn session_timeline_item_detail(
         .await
     {
         Ok(Some(page)) => match detail_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(mut page) => {
+                if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
+                    return tool_media_projection_error(error);
+                }
+                Json(page).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => timeline_detail_not_found(),
@@ -327,7 +332,12 @@ pub(super) async fn session_timeline_turn_detail(
         .await
     {
         Ok(Some(page)) => match detail_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(mut page) => {
+                if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
+                    return tool_media_projection_error(error);
+                }
+                Json(page).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => timeline_detail_not_found(),
@@ -378,7 +388,12 @@ pub(super) async fn session_timeline_region_detail(
         .await
     {
         Ok(Some(page)) => match detail_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(mut page) => {
+                if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
+                    return tool_media_projection_error(error);
+                }
+                Json(page).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => timeline_detail_not_found(),
@@ -483,6 +498,48 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
         cause = %error,
         "session timeline projection read failed"
     );
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_projection_failed",
+        "the durable session projection could not be read",
+    )
+}
+
+#[derive(Debug)]
+enum ToolMediaPopulationError {
+    Unavailable,
+    Repository(signalbox_persistence::tool_loop::ToolLoopRepositoryError),
+    Corruption(&'static str),
+}
+
+fn tool_media_projection_error(error: ToolMediaPopulationError) -> Response {
+    let failure_class = match &error {
+        ToolMediaPopulationError::Unavailable => return session_projection_unavailable(),
+        ToolMediaPopulationError::Repository(
+            signalbox_persistence::tool_loop::ToolLoopRepositoryError::Database { .. },
+        ) => "infrastructure",
+        ToolMediaPopulationError::Repository(
+            signalbox_persistence::tool_loop::ToolLoopRepositoryError::Corruption(_),
+        )
+        | ToolMediaPopulationError::Corruption(_) => "fail_closed_corruption",
+        ToolMediaPopulationError::Repository(
+            signalbox_persistence::tool_loop::ToolLoopRepositoryError::IdentityCollision,
+        ) => "identity_collision",
+        ToolMediaPopulationError::Repository(_) => "bug",
+    };
+    match error {
+        ToolMediaPopulationError::Repository(error) => tracing::error!(
+            failure_class,
+            cause = %error,
+            "session timeline media projection read failed"
+        ),
+        ToolMediaPopulationError::Corruption(cause) => tracing::error!(
+            failure_class,
+            cause,
+            "session timeline media projection read failed"
+        ),
+        ToolMediaPopulationError::Unavailable => unreachable!(),
+    }
     application_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "session_projection_failed",
@@ -614,6 +671,77 @@ fn window_dto(
         projected_structured_bytes: window.projected_structured_bytes,
         continuation_before,
         continuation_after,
+    })
+}
+
+async fn populate_tool_media(
+    page: &mut WebSessionTimelineDetailPage,
+    pool: Option<&sqlx::PgPool>,
+) -> Result<(), ToolMediaPopulationError> {
+    let mut targets = Vec::new();
+    for item in &mut page.items {
+        let WebSessionTimelineDetailBody::ToolBatch { tools, .. } = &mut item.body else {
+            continue;
+        };
+        for tool in tools {
+            let WebTimelineToolAttemptEvidence::PhysicalAttempt {
+                state: WebTimelineToolState::Completed,
+                result_media_reference,
+                ..
+            } = &mut tool.evidence
+            else {
+                continue;
+            };
+            let request = signalbox_domain::ToolRequestId::from_uuid(
+                tool.request_id.as_str().parse().map_err(|_| {
+                    ToolMediaPopulationError::Corruption("invalid projected tool request identity")
+                })?,
+            );
+            targets.push((request, result_media_reference));
+        }
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let repository = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(
+        pool.ok_or(ToolMediaPopulationError::Unavailable)?.clone(),
+    );
+    let requests = targets
+        .iter()
+        .map(|(request, _)| *request)
+        .collect::<Vec<_>>();
+    let references = repository
+        .load_media_references(&requests)
+        .await
+        .map_err(ToolMediaPopulationError::Repository)?;
+    for (request, target) in targets {
+        *target = references
+            .get(&request)
+            .cloned()
+            .map(tool_media_reference_dto)
+            .transpose()
+            .map_err(|_| {
+                ToolMediaPopulationError::Corruption("invalid retained media reference")
+            })?;
+    }
+    Ok(())
+}
+
+fn tool_media_reference_dto(
+    reference: signalbox_domain::ToolMediaReference,
+) -> Result<signalbox_web_contract::WebTimelineToolMediaReference, ()> {
+    Ok(signalbox_web_contract::WebTimelineToolMediaReference {
+        digest: WebBlobId::from_canonical(reference.presented().digest().to_string()).ok_or(())?,
+        media_type: reference.presented().media_type().to_owned(),
+        presentation_kind: match reference.kind() {
+            signalbox_domain::ToolMediaKind::Image => {
+                signalbox_web_contract::WebTimelineMediaPresentationKind::Image
+            }
+            signalbox_domain::ToolMediaKind::Document => {
+                signalbox_web_contract::WebTimelineMediaPresentationKind::Document
+            }
+        },
+        length_bytes: signalbox_web_contract::WebPositiveU64::from_nonzero(reference.byte_length()),
     })
 }
 
@@ -1475,6 +1603,7 @@ fn tool_attempt_dto(
         (None, None, None, None) => WebTimelineToolAttemptEvidence::RequestOnly {},
         (Some(attempt_id), Some(effect_posture), Some(state), cause) => {
             WebTimelineToolAttemptEvidence::PhysicalAttempt {
+                result_media_reference: None,
                 attempt_id: web_uuid(attempt_id.into_uuid()),
                 result: attempt.result.map(text_excerpt_dto),
                 failure: attempt.failure.map(text_excerpt_dto),
@@ -1812,6 +1941,214 @@ mod tests {
     use super::*;
     use signalbox_domain::{ToolAttemptId, ToolName, ToolRequestId};
     use uuid::Uuid;
+
+    #[test]
+    fn tool_media_uses_presented_identity_and_exact_length() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+        };
+        let identity = |seed, media: &str| {
+            MediaValidationIdentity::try_new(
+                BlobDigest::from_bytes([seed; 32]),
+                media.into(),
+                "fixture".into(),
+                "reader".into(),
+                "v1".into(),
+                MediaValidationEvidence::StrongSignature,
+            )
+            .expect("validated identity")
+        };
+        let presented = identity(1, "image/png");
+        let source = identity(2, "image/jpeg");
+        let reference = ToolMediaReference::image(
+            presented.clone(),
+            source,
+            std::num::NonZeroU64::new(64).expect("positive length"),
+        )
+        .expect("image reference");
+        let dto = tool_media_reference_dto(reference).expect("media DTO");
+        let json = serde_json::to_value(dto).expect("serialized reference");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "digest": presented.digest().to_string(), "media_type": "image/png", "presentation_kind": "image", "length_bytes": "64"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_media_preserves_document_presentation() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+        };
+        let identity = MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([1; 32]),
+            "application/pdf".into(),
+            "fixture".into(),
+            "reader".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .expect("validated document");
+        let reference = ToolMediaReference::direct_document(
+            identity.clone(),
+            std::num::NonZeroU64::new(64).expect("positive length"),
+        )
+        .expect("document reference");
+        let dto = tool_media_reference_dto(reference).expect("media DTO");
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialized reference"),
+            serde_json::json!({
+                "digest": identity.digest().to_string(), "media_type": "application/pdf",
+                "presentation_kind": "document", "length_bytes": "64"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn media_reads_only_completed_snapshots_and_preserves_read_failure_responses() {
+        for state in [
+            TimelineToolState::Prepared,
+            TimelineToolState::InFlight,
+            TimelineToolState::Completed,
+        ] {
+            let completed = matches!(state, TimelineToolState::Completed);
+            let tool = tool_attempt_dto(TimelineToolAttempt {
+                request_id: ToolRequestId::from_uuid(Uuid::now_v7()),
+                attempt_id: Some(ToolAttemptId::from_uuid(Uuid::now_v7())),
+                tool_name: ToolName::try_new("file_read".into()).expect("tool name"),
+                arguments: None,
+                result: None,
+                failure: None,
+                has_result: completed,
+                has_failure: false,
+                approval_posture: TimelineToolApprovalPosture::Auto,
+                approval_judge_escalated: false,
+                effect_posture: Some(TimelineToolEffectPosture::EffectFree),
+                sandbox_posture: None,
+                state: Some(state),
+                cause_code: None,
+            })
+            .expect("attempt DTO");
+            let session = web_uuid(Uuid::now_v7());
+            let mut page = WebSessionTimelineDetailPage {
+                session_id: session.clone(),
+                items: vec![WebSessionTimelineDetail {
+                    address: WebTimelineAddress {
+                        event_sequence:
+                            signalbox_web_contract::WebTimelineEventSequence::from_nonzero(
+                                std::num::NonZeroU64::new(1).expect("event sequence"),
+                            ),
+                    },
+                    kind: WebSessionTimelineEventKind::ToolBatchTransition,
+                    body: WebSessionTimelineDetailBody::ToolBatch {
+                        turn_id: session.clone(),
+                        producing_model_call_id: session.clone(),
+                        state: WebTimelineToolBatchState::ResultsProjected {
+                            frontier_id: session,
+                        },
+                        projected_member_index: Some(0),
+                        tools: vec![tool],
+                        goal_events: vec![],
+                    },
+                    projected_body_bytes: signalbox_application::timeline_detail_envelope_bytes(),
+                }],
+                projected_body_bytes: signalbox_application::timeline_detail_envelope_bytes(),
+                continuation: None,
+            };
+            let missing_pool = populate_tool_media(&mut page, None).await;
+            if completed {
+                assert_eq!(
+                    tool_media_projection_error(
+                        missing_pool.expect_err("completed media needs a pool")
+                    )
+                    .status(),
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            } else {
+                assert!(missing_pool.is_ok());
+            }
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+            pool.close().await;
+            let read = populate_tool_media(&mut page, Some(&pool)).await;
+            if completed {
+                let error = read.expect_err("closed pool is a read failure");
+                assert!(matches!(
+                    &error,
+                    ToolMediaPopulationError::Repository(
+                        signalbox_persistence::tool_loop::ToolLoopRepositoryError::Database {
+                            source: sqlx::Error::PoolClosed,
+                            ..
+                        }
+                    )
+                ));
+                let response = tool_media_projection_error(error);
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                let body = axum::body::to_bytes(
+                    response.into_body(),
+                    signalbox_web_contract::MAX_JSON_BODY_BYTES,
+                )
+                .await
+                .expect("projection error body");
+                let error: signalbox_web_contract::WebApiErrorResponse =
+                    serde_json::from_slice(&body).expect("projection error");
+                assert_eq!(error.error.code, "session_projection_failed");
+            } else {
+                assert!(read.is_ok(), "earlier snapshots make no media query");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn media_read_failures_log_their_class_and_return_projection_failed() {
+        use signalbox_persistence::tool_loop::{ToolLoopCorruption, ToolLoopRepositoryError};
+
+        const CORRUPTION_DETAIL: &str = "retained media fixture corruption";
+        for (error, expected_class) in [
+            (
+                ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Inconsistent(
+                    CORRUPTION_DETAIL,
+                )),
+                "fail_closed_corruption",
+            ),
+            (
+                ToolLoopRepositoryError::from(sqlx::Error::PoolClosed),
+                "infrastructure",
+            ),
+        ] {
+            let expected_cause = error.to_string();
+            let output = tempfile::NamedTempFile::new().expect("capture media read failure");
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::ERROR)
+                .with_writer(output.reopen().expect("capture writer"))
+                .finish();
+            let response = tracing::subscriber::with_default(subscriber, || {
+                tool_media_projection_error(ToolMediaPopulationError::Repository(error))
+            });
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(
+                response.into_body(),
+                signalbox_web_contract::MAX_JSON_BODY_BYTES,
+            )
+            .await
+            .expect("projection error body");
+            let error: signalbox_web_contract::WebApiErrorResponse =
+                serde_json::from_slice(&body).expect("projection error");
+            assert_eq!(error.error.code, "session_projection_failed");
+            let log = std::fs::read_to_string(output.path()).expect("captured diagnostic");
+            assert!(
+                log.contains(expected_class),
+                "diagnostic retains failure class: {log}"
+            );
+            assert!(
+                log.contains(&expected_cause),
+                "diagnostic retains failure cause: {log}"
+            );
+        }
+    }
 
     #[test]
     fn detail_preserves_creation_cause_and_originating_identity() {
