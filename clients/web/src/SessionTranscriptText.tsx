@@ -248,6 +248,7 @@ function TranscriptWindow({
     Record<string, EventContinuationState>
   >({})
   const [continuedEvents, setContinuedEvents] = useState<Record<string, ContinuedEventState>>({})
+  const [focusedRow, setFocusedRow] = useState<string | null>(null)
   const surface = useRef<HTMLElement>(null)
   const commandContext: CommandContext = {
     dispatch,
@@ -556,6 +557,12 @@ function TranscriptWindow({
         sessionId={sessionId}
         page={page}
         limits={limits}
+        headerKind={
+          pages?.flatMap((window) => window.window.items).find(
+            (item) => item.address.event_sequence ===
+              (page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)),
+          )?.kind
+        }
         state={continuedEvents[key]}
         onChange={(state) =>
           setContinuedEvents((current) => {
@@ -781,12 +788,16 @@ function TranscriptWindow({
       {transcript.isError && (
         <p role="alert">
           Transcript failed to load.{' '}
-          <button type="button" onClick={() => void transcript.refetch()}>
+          <button type="button" onClick={() => {
+            if (transcript.isFetchPreviousPageError) readPage('before')
+            else if (transcript.isFetchNextPageError) readPage('after')
+            else void transcript.refetch()
+          }}>
             Retry transcript
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
+      {!transcript.isPending && !transcript.isFetching && !transcript.isError && rows.length === 0 && (
         <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
       )}
       {associations.retries.length > 0 && (
@@ -841,6 +852,7 @@ function TranscriptWindow({
           )
         }
         selectedId={selectedId}
+        pinnedId={focusedRow}
         onEdge={(direction) => {
           if (pageRead.current || transcript.isFetching || transcript.isError) return
           if (!(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage))
@@ -862,6 +874,10 @@ function TranscriptWindow({
                 style={style}
                 className="session-message-entry"
                 data-event-sequence={row.sequence}
+                onFocusCapture={() => setFocusedRow(row.id)}
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
+                }}
               >
                 {renderContinuation(row.pending)}
               </div>
@@ -876,6 +892,10 @@ function TranscriptWindow({
               className="session-message-entry session-turn"
               data-turn-id={turn.turnId}
               data-transcript-turn={turn.id}
+              onFocusCapture={() => setFocusedRow(row.id)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
+              }}
             >
               <TurnContent
                 turn={turn}
@@ -1393,6 +1413,7 @@ function ContinuedEvent({
   sessionId,
   page,
   limits,
+  headerKind,
   state,
   onChange,
 }: {
@@ -1400,6 +1421,7 @@ function ContinuedEvent({
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
+  headerKind: string | undefined
   state?: ContinuedEventState
   onChange: (state?: ContinuedEventState) => void
 }) {
@@ -1431,6 +1453,7 @@ function ContinuedEvent({
       sessionId={sessionId}
       page={page}
       limits={limits}
+      headerKind={headerKind}
       state={state}
       onChange={onChange}
       onClose={close}
@@ -1443,6 +1466,7 @@ function ContinuedEventReader({
   sessionId,
   page,
   limits,
+  headerKind,
   state,
   onChange,
   onClose,
@@ -1451,6 +1475,7 @@ function ContinuedEventReader({
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
+  headerKind: string | undefined
   state: ContinuedEventState
   onChange: (state?: ContinuedEventState) => void
   onClose: () => void
@@ -1460,16 +1485,22 @@ function ContinuedEventReader({
   const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
     queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
-    queryFn: ({ signal }) =>
-      readSessionTranscript(
+    queryFn: async ({ signal }) => {
+      if (!headerKind) throw new TypeError('Transcript detail has no retained timeline header')
+      const detail = await readSessionTranscript(
         sessionId,
         sequence,
         sequence,
         cursor,
         limits,
+  headerKind,
         signal,
         state?.previous ?? page,
-      ),
+      )
+      if (detail.items.some((item) => item.kind !== headerKind))
+        throw new TypeError('Transcript detail kind contradicts its timeline header')
+      return detail
+    },
     gcTime: 0,
     initialData: state?.current,
     staleTime: state?.current ? Number.POSITIVE_INFINITY : 0,

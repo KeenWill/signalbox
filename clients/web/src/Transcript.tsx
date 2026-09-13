@@ -206,6 +206,7 @@ export function VirtualTranscript({
   selectedId,
   revealId,
   onReveal,
+  pinnedId,
   estimateSize = 100,
   className = 'session-transcript-scroll',
   autoFocus = false,
@@ -229,6 +230,7 @@ export function VirtualTranscript({
   selectedId?: string | null
   revealId?: string | null
   onReveal?: () => void
+  pinnedId?: string | null
   estimateSize?: number
   className?: string
   autoFocus?: boolean
@@ -247,6 +249,7 @@ export function VirtualTranscript({
   const parent = scrollRef ?? localParent
   const selected = selectedId ? ids.indexOf(selectedId) : -1
   const revealed = revealId ? ids.indexOf(revealId) : -1
+  const pinned = pinnedId ? ids.indexOf(pinnedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
   const atEnd = useRef(initialEnd)
@@ -266,7 +269,7 @@ export function VirtualTranscript({
     getItemKey: (index) => ids[index] ?? index,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range)
-      for (const index of [selected, revealed])
+      for (const index of [selected, revealed, pinned])
         if (index >= 0 && !indexes.includes(index)) indexes.push(index)
       return indexes.sort((a, b) => a - b)
     },

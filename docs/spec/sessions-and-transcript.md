@@ -581,7 +581,8 @@ Refreshes continue retaining current text through a failed reread. The
 session-scoped reader rejects detail kinds that contradict their timeline
 headers and compares immutable detail facts, including identities, attachment
 references and excerpt byte totals and overlapping excerpt content, across
-initial reads and expanded event rereads. It retains facts for at most 24
+initial reads and expanded event rereads. Continuation reads reject detail kinds that contradict
+the retained timeline header. It retains facts for at most 24
 recently read event addresses; changed excerpt lengths under different read
 budgets preserve compatible prefixes and retain the longest checked excerpt.
 
@@ -597,7 +598,12 @@ adjustments do not start page reads. Prepending rows does not trigger selection
 scrolling when the selected row identity stays unchanged; a changed selection
 scrolls into view once its row is available. An empty detail page preserves its
 unreturned-item continuation. Hidden non-tool details with a body continuation
-retain an addressable reading row; opening it shows the requested excerpt.
+retain an addressable reading row; opening it shows the requested excerpt. Open
+readers retain their cursor, current page and validation predecessor above
+virtual rows until closed or evicted from the retained windows. A row containing
+the focused control stays mounted. Failed loads show the failure without an
+empty-conversation message. Retrying a failed edge read repeats that earlier or
+later request; other failures retry the retained read.
 Scrolling again starts a fresh bounded scan using the timeline continuation.
 Turn segments retain window boundaries so prepending history preserves existing
 rows and their disclosures. Retained tool chips stay in their assigned window
