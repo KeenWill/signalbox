@@ -163,26 +163,33 @@ if (
     }
   }
 }
-const toolsResult = spawnSync(
-  node,
-  [
-    fileURLToPath(import.meta.resolve('@playwright/test/cli')),
-    'test',
-    '--config',
-    'src/features/tools/playwright.config.ts',
-    '--workers=2',
-    '--output',
-    join(evidence, 'tool-test-results'),
-    ...process.argv.slice(2),
-  ],
-  {
-    cwd: project,
-    env: { ...environment, PLAYWRIGHT_HTML_OUTPUT_DIR: join(evidence, 'tool-playwright-report') },
-    stdio: 'inherit',
-  },
-)
-if (toolsResult.error) throw toolsResult.error
-if (toolsResult.signal) throw new Error(`Tool Playwright exited on ${toolsResult.signal}`)
+let status = result.status ?? 1
 if (result.error) throw result.error
 if (result.signal) throw new Error(`Playwright exited on ${result.signal}`)
-process.exit(result.status !== 0 ? (result.status ?? 1) : (toolsResult.status ?? 1))
+for (const suite of ['tools', 'artifacts']) {
+  const suiteResult = spawnSync(
+    node,
+    [
+      fileURLToPath(import.meta.resolve('@playwright/test/cli')),
+      'test',
+      '--config',
+      `src/features/${suite}/playwright.config.ts`,
+      '--workers=2',
+      '--output',
+      join(evidence, `${suite}-test-results`),
+      ...process.argv.slice(2),
+    ],
+    {
+      cwd: project,
+      env: {
+        ...environment,
+        PLAYWRIGHT_HTML_OUTPUT_DIR: join(evidence, `${suite}-playwright-report`),
+      },
+      stdio: 'inherit',
+    },
+  )
+  if (suiteResult.error) throw suiteResult.error
+  if (suiteResult.signal) throw new Error(`${suite} Playwright exited on ${suiteResult.signal}`)
+  if (status === 0) status = suiteResult.status ?? 1
+}
+process.exit(status)

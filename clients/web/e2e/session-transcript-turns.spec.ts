@@ -2817,9 +2817,7 @@ test('All details retains every response chunk with one set of model facts', asy
 })
 
 for (const level of ['Summary', 'Tools', 'All details']) {
-  test(`Escape collapses the focused ${level} turn while the desktop inspector stays open`, async ({
-    page,
-  }) => {
+  test(`Escape collapses the focused ${level} turn`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 })
     await turnApi(page)
     await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
@@ -2827,21 +2825,11 @@ for (const level of ['Summary', 'Tools', 'All details']) {
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     if (level !== 'All details')
       await transcript.getByRole('button', { name: 'Open turn details', exact: true }).click()
-    const opener = page.getByRole('button', { name: 'Open artifact inspector', exact: true })
-    await opener.click()
-    const inspector = page.getByRole('complementary', { name: 'Inspector', exact: true })
-    await expect(inspector).toBeVisible()
     await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).press('Escape')
     await expect(
       transcript.getByRole('button', { name: 'Open turn details', exact: true }),
     ).toBeFocused()
-    await expect(inspector).toBeVisible()
     await expect(page.getByRole('radio', { name: level, exact: true })).toBeChecked()
-    await inspector
-      .getByRole('button', { name: 'Close artifact inspector', exact: true })
-      .press('Escape')
-    await expect(inspector).toHaveCount(0)
-    await expect(opener).toBeFocused()
     await expect(transcript).toBeVisible()
   })
 }
