@@ -7,6 +7,51 @@ import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/
 import { expect, test } from './fontTest'
 import { detailItems, detailPage, resultCursor, toolResultItem } from './session-detail-fixture'
 
+test('rejects contradictory detail kinds and recovers after a corrected retry', async ({
+  page,
+}) => {
+  let conflict = true
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (conflict && url.pathname.endsWith('/timeline-detail'))
+      return route.fulfill({
+        json: {
+          session_id: transcriptSessionId,
+          projected_body_bytes: 128,
+          continuation: null,
+          items: [
+            {
+              address: { event_sequence: '1' },
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            },
+          ],
+        },
+      })
+    return route.fulfill({ json: transcriptFixture(url, 1) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+  await expect(surface.getByText('Message 1', { exact: true })).toHaveCount(0)
+  conflict = false
+  await surface.getByRole('button', { name: 'Retry transcript' }).click()
+  await expect(surface.getByText('Message 1', { exact: true })).toBeVisible()
+  await expect(surface.getByRole('alert')).toHaveCount(0)
+})
+
 test('scrolls a hundred thousand messages in both directions with bounded rows', async ({
   page,
 }, testInfo) => {
@@ -678,6 +723,22 @@ for (const [itemLimit, byteLimit, expectedReads] of [
               max_timeline_detail_items: itemLimit,
               max_timeline_detail_bytes: byteLimit,
             },
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline')) {
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        const kind = 'turn_completed'
+        return route.fulfill({
+          json: {
+            ...window,
+            items: window.items.map((item) => ({
+              ...item,
+              kind,
+              projected_structured_bytes: 64 + kind.length,
+            })),
+            projected_structured_bytes: window.items.length * (64 + kind.length),
           },
         })
       }
