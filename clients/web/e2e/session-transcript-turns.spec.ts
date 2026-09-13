@@ -1,4 +1,6 @@
-import { toolGoalApi, turnApi } from '../src/session-timeline/turns.fixture'
+import type { WebSessionTimelineWindow } from '../src/generated/web-contract.mjs'
+import { transcriptFixture } from '../src/session-timeline/transcript.fixture'
+import { retriedToolItems, toolGoalApi, turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
 import {
   detailCallId,
@@ -410,115 +412,149 @@ test('All details retains earlier message chunks through continuation failures a
   await expect(input.getByRole('button', { name: 'Continue reading' })).toHaveCount(0)
 })
 
-test('retains continued event text while its virtualized row is unmounted', async ({ page }) => {
-  const source = detailItems[0]
-  if (source?.body.type !== 'user_input') throw new Error('Input fixture missing')
-  const entries = Array.from({ length: 24 }, (_, index) => {
-    const sequence = String(index + 1)
-    const text = detailExcerpt(index === 0 ? 'first chunk' : `Message ${sequence}`)
-    return {
-      ...source,
-      address: { event_sequence: sequence },
-      projected_body_bytes: 128 + Number(text.total_bytes),
-      body: {
-        ...source.body,
-        turn_id: `00000000-0000-0000-0000-${sequence.padStart(12, '0')}`,
-        text,
-        attachments: [],
-      },
-    }
-  })
-  await turnApi(page, undefined, entries)
-  await page.route('**/timeline?**', (route) => {
-    const url = new URL(route.request().url())
-    const anchor = url.searchParams.get('anchor')
-    const address = Number(url.searchParams.get('address') ?? '0')
-    const maxItems = Number(url.searchParams.get('max_items') ?? '8')
-    const end = anchor === 'latest' ? entries.length : Math.max(0, address - 1)
-    const start = Math.max(0, end - maxItems)
-    const items = entries.slice(start, end).map(({ address, kind }) => ({
-      address,
-      kind,
-      projected_structured_bytes: 64 + kind.length,
-    }))
-    return route.fulfill({
-      json: {
-        session_id: detailSessionId,
-        items,
-        projected_structured_bytes: items.reduce(
-          (sum, item) => sum + item.projected_structured_bytes,
-          0,
-        ),
-        continuation_before: start > 0 ? (items[0]?.address ?? null) : null,
-        continuation_after: end < entries.length ? (items.at(-1)?.address ?? null) : null,
-      },
+for (const level of ['All details', 'Summary', 'Tools']) {
+  test(`retains continued event text while its virtualized row is unmounted in ${level}`, async ({
+    page,
+  }, testInfo) => {
+    const source = detailItems[0]
+    if (source?.body.type !== 'user_input') throw new Error('Input fixture missing')
+    const entries = Array.from({ length: 24 }, (_, index) => {
+      const sequence = String(index + 1)
+      const text = detailExcerpt(index === 0 ? 'first chunk' : `Message ${sequence}`)
+      return {
+        ...source,
+        address: { event_sequence: sequence },
+        projected_body_bytes: 128 + Number(text.total_bytes),
+        body: {
+          ...source.body,
+          turn_id: `00000000-0000-0000-0000-${sequence.padStart(12, '0')}`,
+          text,
+          attachments: [],
+        },
+      }
     })
-  })
-  await page.route('**/turns/*/timeline-detail?**', (route) => {
-    const url = new URL(route.request().url())
-    if (url.searchParams.get('cursor_address') !== '1') return route.fallback()
-    const offset = url.searchParams.get('cursor_offset')
-    const item = entries[0]
-    if (!item || item.body.type !== 'user_input') throw new Error('Input fixture missing')
-    const continuation =
-      offset === '11'
-        ? null
-        : {
-            address: item.address,
-            field: 'input_text' as const,
-            member_index: 0,
-            offset_bytes: '11',
-          }
-    return route.fulfill({
-      json: detailPage(
-        [
-          {
-            ...item,
-            projected_body_bytes: 128 + (offset === '11' ? 12 : 11),
-            body: {
-              ...item.body,
-              text: {
-                text: offset === '11' ? 'second chunk' : 'first chunk',
-                offset_bytes: offset ?? '0',
-                total_bytes: '23',
-                continuation,
+    await turnApi(page, undefined, entries)
+    await page.route('**/timeline?**', (route) => {
+      const url = new URL(route.request().url())
+      const anchor = url.searchParams.get('anchor')
+      const address = Number(url.searchParams.get('address') ?? '0')
+      const maxItems = Number(url.searchParams.get('max_items') ?? '8')
+      const end = anchor === 'latest' ? entries.length : Math.max(0, address - 1)
+      const start = Math.max(0, end - maxItems)
+      const items = entries.slice(start, end).map(({ address, kind }) => ({
+        address,
+        kind,
+        projected_structured_bytes: 64 + kind.length,
+      }))
+      return route.fulfill({
+        json: {
+          session_id: detailSessionId,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+          continuation_before: start > 0 ? (items[0]?.address ?? null) : null,
+          continuation_after: end < entries.length ? (items.at(-1)?.address ?? null) : null,
+        },
+      })
+    })
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '1')
+        return route.fallback()
+      const offset = url.searchParams.get('cursor_offset')
+      const item = entries[0]
+      if (!item || item.body.type !== 'user_input') throw new Error('Input fixture missing')
+      const continuation =
+        offset === '23'
+          ? null
+          : {
+              address: item.address,
+              field: 'input_text' as const,
+              member_index: 0,
+              offset_bytes: offset === '11' ? '23' : '11',
+            }
+      return route.fulfill({
+        json: detailPage(
+          [
+            {
+              ...item,
+              projected_body_bytes: 128 + (offset === '11' ? 12 : 11),
+              body: {
+                ...item.body,
+                text: {
+                  text:
+                    offset === '23'
+                      ? 'third chunk'
+                      : offset === '11'
+                        ? 'second chunk'
+                        : 'first chunk',
+                  offset_bytes: offset ?? '0',
+                  total_bytes: '34',
+                  continuation,
+                },
               },
             },
-          },
-        ],
-        continuation ? { type: 'more_body', body: continuation } : null,
-      ),
-    })
-  })
-  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
-  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  for (const expected of ['Message 9', 'first chunk']) {
-    await expect
-      .poll(async () => {
-        await transcript.evaluate((element) => {
-          element.scrollTop = 0
-          element.dispatchEvent(new Event('scroll'))
-        })
-        return transcript.getByText(expected, { exact: true }).isVisible()
+          ],
+          continuation ? { type: 'more_body', body: continuation } : null,
+        ),
       })
-      .toBe(true)
-  }
-  await page.getByRole('radio', { name: 'All details', exact: true }).check()
-  const input = transcript.locator('[data-event-sequence="1"]')
-  await input.getByRole('button', { name: 'Continue reading' }).click()
-  await expect(input.locator('.session-message-text')).toHaveText(['first chunk', 'second chunk'])
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    for (const expected of ['Message 9', 'first chunk']) {
+      await expect
+        .poll(async () => {
+          await transcript.evaluate((element) => {
+            element.scrollTop = 0
+            element.dispatchEvent(new Event('scroll'))
+          })
+          return transcript.getByText(expected, { exact: true }).isVisible()
+        })
+        .toBe(true)
+    }
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const input = transcript.locator('[data-event-sequence="1"]')
+    await input
+      .getByRole('button', {
+        name: level === 'All details' ? 'Continue reading' : 'Read more',
+        exact: true,
+      })
+      .click()
+    await input.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(input.locator('.session-message-text')).toHaveText([
+      'first chunk',
+      'second chunk',
+      'third chunk',
+    ])
 
-  await transcript.evaluate((element) => {
-    element.scrollTop = element.scrollHeight
-    element.dispatchEvent(new Event('scroll'))
+    await transcript.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+      element.dispatchEvent(new Event('scroll'))
+    })
+    await expect(input).toHaveCount(0)
+    await transcript.evaluate((element) => {
+      element.scrollTop = 0
+      element.dispatchEvent(new Event('scroll'))
+    })
+    await expect(input.locator('.session-message-text')).toHaveText([
+      'first chunk',
+      'second chunk',
+      'third chunk',
+    ])
+    if (level !== 'All details') {
+      await input.getByRole('button', { name: 'Close details', exact: true }).click()
+      await expect(input.locator('.session-message-text')).toHaveText(['first chunk'])
+      await input.getByRole('button', { name: 'Read more', exact: true }).click()
+      await expect(input.locator('.session-message-text')).toHaveText([
+        'first chunk',
+        'second chunk',
+      ])
+    }
+    await page.screenshot({ path: testInfo.outputPath('retained-continuation.png') })
   })
-  await expect(input).toHaveCount(0)
-  await transcript.evaluate((element) => {
-    element.scrollTop = 0
-    element.dispatchEvent(new Event('scroll'))
-  })
-  await expect(input.locator('.session-message-text')).toHaveText(['first chunk', 'second chunk'])
-})
+}
 
 test('preserves assistant text before its tool without treating it as the final response', async ({
   page,
@@ -671,12 +707,18 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   const slots = transcript.locator('.session-tool-slot')
   await slots.first().getByRole('button', { name: 'Read more', exact: true }).click()
   await slots.last().getByRole('button', { name: 'Read more', exact: true }).click()
-  await expect(slots.first().getByRole('region', { name: 'Failure', exact: true })).toContainText(
-    'Runner disconnected during the release check.',
-  )
-  await expect(slots.last().getByRole('region', { name: 'Output', exact: true })).toContainText(
-    'passed',
-  )
+  await expect(
+    slots
+      .first()
+      .getByRole('region', { name: 'More message text', exact: true })
+      .getByRole('region', { name: 'Failure', exact: true }),
+  ).toContainText('Runner disconnected during the release check.')
+  await expect(
+    slots
+      .last()
+      .getByRole('region', { name: 'More message text', exact: true })
+      .getByRole('region', { name: 'Output', exact: true }),
+  ).toContainText('passed')
   await expect(transcript.locator('.session-message-text, .session-tool-slot')).toHaveText([
     'Inspect the release status and retain the result.',
     /Runner disconnected/,
@@ -686,3 +728,138 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   ])
   await page.screenshot({ path: testInfo.outputPath('retried-tool.png') })
 })
+
+for (const level of ['Summary', 'Tools']) {
+  test(`retains an opened tool continuation across virtual unmounts in ${level}`, async ({
+    page,
+  }) => {
+    const input = detailItems[0]
+    const original = detailItems[1]
+    if (input?.body.type !== 'user_input' || original?.body.type !== 'tool_batch')
+      throw new Error('Fixture missing')
+    const tool = original.body.tools[0]
+    if (tool?.evidence.type !== 'physical_attempt') throw new Error('Attempt missing')
+    const argumentsText = detailExcerpt('first chunk')
+    const first = {
+      ...original,
+      address: { event_sequence: '1' },
+      projected_body_bytes: 128 + Number(argumentsText.total_bytes),
+      body: { ...original.body, tools: [{ ...tool, arguments: argumentsText }] },
+    }
+    const entries = Array.from({ length: 24 }, (_, index) => {
+      if (index === 0) return first
+      const sequence = String(index + 1)
+      const text = detailExcerpt(`Message ${sequence}`)
+      return {
+        ...input,
+        address: { event_sequence: sequence },
+        projected_body_bytes: 128 + Number(text.total_bytes),
+        body: {
+          ...input.body,
+          turn_id: `00000000-0000-0000-0000-${sequence.padStart(12, '0')}`,
+          text,
+          attachments: [],
+        },
+      }
+    })
+    await turnApi(page, undefined, entries)
+    await page.route('**/timeline?**', (route) => {
+      const window = transcriptFixture(
+        new URL(route.request().url()),
+        24,
+      ) as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind = item.address.event_sequence === '1' ? first.kind : item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    })
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '1')
+        return route.fallback()
+      const output = url.searchParams.get('cursor_field') === 'tool_result'
+      const last = url.searchParams.get('cursor_offset') === '12'
+      const text = last ? 'third chunk' : 'second chunk'
+      const continuation = {
+        address: first.address,
+        field: 'tool_result' as const,
+        member_index: 0,
+        offset_bytes: output ? '12' : '0',
+      }
+      const item = output
+        ? {
+            ...first,
+            projected_body_bytes: 128 + text.length,
+            body: {
+              ...first.body,
+              tools: [
+                {
+                  ...tool,
+                  arguments: null,
+                  evidence: {
+                    ...tool.evidence,
+                    result: {
+                      text,
+                      offset_bytes: last ? '12' : '0',
+                      total_bytes: '23',
+                      continuation: last ? null : continuation,
+                    },
+                  },
+                },
+              ],
+            },
+          }
+        : first
+      return route.fulfill({
+        json: detailPage([item], last ? null : { type: 'more_body', body: continuation }),
+      })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    for (const name of ['Message 9', 'exec_command']) {
+      await expect
+        .poll(async () => {
+          await transcript.evaluate((element) => {
+            element.scrollTop = 0
+            element.dispatchEvent(new Event('scroll'))
+          })
+          return transcript.getByText(name, { exact: true }).first().isVisible()
+        })
+        .toBe(true)
+    }
+    const chip = transcript.getByRole('button', { name: 'exec_command', exact: true })
+    if (level === 'Summary') await chip.click()
+    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+    await reader.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(reader.locator('pre')).toHaveText(['second chunk', 'third chunk'])
+    await transcript.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+      element.dispatchEvent(new Event('scroll'))
+    })
+    await expect(reader).toHaveCount(0)
+    await transcript.evaluate((element) => {
+      element.scrollTop = 0
+      element.dispatchEvent(new Event('scroll'))
+    })
+    await expect(reader.locator('pre')).toHaveText(['second chunk', 'third chunk'])
+    if (level === 'Summary') {
+      await chip.click()
+      await chip.click()
+      await expect(reader).toHaveCount(0)
+      await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+      await expect(reader.locator('pre')).toHaveText(['second chunk'])
+    }
+  })
+}

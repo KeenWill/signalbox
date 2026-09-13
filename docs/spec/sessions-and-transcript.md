@@ -549,14 +549,13 @@ an equal share of the detail budget; unread body continuations remain available
 on demand. Attachment references are included in the response bound. Scrolling
 loads earlier or later windows. Loading a later window preserves the reading
 position; it does not automatically request the remaining history. Session and
-anchor changes reset the view;
-observation refreshes retain visible text while rereading loaded windows, or
-refresh from latest when following the live end, retaining current text through
-a failed reread. The session-scoped reader compares immutable detail facts,
-including identities, attachment references and excerpt byte totals, across
-overlapping initial reads. It retains facts for at most 24 recently read event
-addresses; changed excerpt lengths under different read budgets do not change
-those facts.
+anchor changes reset the view; observation refreshes retain visible text while
+rereading loaded windows, or refresh from latest when following the live end,
+retaining current text through a failed reread. The session-scoped reader
+compares immutable detail facts, including identities, attachment references and
+excerpt byte totals, across overlapping initial reads. It retains facts for at
+most 24 recently read event addresses; changed excerpt lengths under different
+read budgets do not change those facts.
 
 Windows advance past metadata-only detail records automatically within the
 workspace record budget and projected-byte budget. All returned headers, detail
@@ -572,21 +571,22 @@ chronology. Summary shows user messages, assistant text accompanying tool calls,
 final assistant text, compact tool chips, and unsuccessful turn outcomes. A
 completed response remains visible as a non-final message when its
 completed-turn closure is not loaded. Distinct physical tool attempts remain
-independently inspectable in event order even when they share one request. Provider failures remain visible at their
-event position, including before a later successful retry. Expanded tool
-evidence stays beside its originating chip before later messages. Repeated
-terminal outcomes for the same turn and cause appear once. New browser profiles
-start in Summary; stored level choices are preserved. Tools shows argument and
-output summaries. All details exposes every loaded event, including bookkeeping,
-independently of the Events control. Tool-produced goal events show their status
-and bounded text alongside tools. Turn details use the bounded per-turn detail
-route. Explicit continuation reads retain earlier opened chunks until the detail
-view closes or leaves the retained transcript. The last bounded raw detail page
-remains available to validate each body continuation. Individual turns can
-expand independently of the persisted level. Escape collapses the focused
-expanded turn and restores its heading control before a subsequent Escape closes
-the workspace. The scrolling transcript owns the conversation focus entry and
-command target; the enclosing section adds no focus stop.
+independently inspectable in event order even when they share one request.
+Provider failures remain visible at their event position, including before a
+later successful retry. Expanded tool evidence stays beside its originating chip
+before later messages. Repeated terminal outcomes for the same turn and cause
+appear once. New browser profiles start in Summary; stored level choices are
+preserved. Tools shows argument and output summaries. All details exposes every
+loaded event, including bookkeeping, independently of the Events control.
+Tool-produced goal events show their status and bounded text alongside tools.
+Turn details use the bounded per-turn detail route. Explicit continuation reads
+retain earlier opened chunks until the detail view closes or leaves the retained
+transcript. The last bounded raw detail page remains available to validate each
+body continuation. Individual turns can expand independently of the persisted
+level. Escape collapses the focused expanded turn and restores its heading
+control before a subsequent Escape closes the workspace. The scrolling
+transcript owns the conversation focus entry and command target; the enclosing
+section adds no focus stop.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

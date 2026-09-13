@@ -42,6 +42,14 @@ type EventContinuationState = {
   current?: { key: string; page: WebSessionTimelineDetailPage }
 }
 
+type ContinuedEventState = {
+  sequence: string
+  cursor: WebTimelineDetailContinuation | null
+  earlier: { key: string; items: WebSessionTimelineDetailPage['items'] }[]
+  previous: WebSessionTimelineDetailPage
+  current?: WebSessionTimelineDetailPage
+}
+
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
   try {
@@ -190,6 +198,8 @@ function TranscriptWindow({
   const [eventContinuations, setEventContinuations] = useState<
     Record<string, EventContinuationState>
   >({})
+  const [continuedEvents, setContinuedEvents] = useState<Record<string, ContinuedEventState>>({})
+  const [openTools, setOpenTools] = useState<Record<string, string | null>>({})
   const surface = useRef<HTMLElement>(null)
   const commandContext: CommandContext = {
     dispatch,
@@ -308,6 +318,27 @@ function TranscriptWindow({
     [turns, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
+  const renderContinuation = (page: WebSessionTimelineDetailPage) => {
+    const key = JSON.stringify([continuationSequence(page), page.continuation])
+    return (
+      <ContinuedEvent
+        key={key}
+        sessionId={sessionId}
+        page={page}
+        limits={limits}
+        state={continuedEvents[key]}
+        onChange={(state) =>
+          setContinuedEvents((current) => {
+            if (state) return { ...current, [key]: state }
+            const next = { ...current }
+            delete next[key]
+            return next
+          })
+        }
+      />
+    )
+  }
+
   useEffect(() => {
     const loaded = new Set(
       entries.map((entry) => {
@@ -321,6 +352,21 @@ function TranscriptWindow({
         : current,
     )
     const loadedEvents = new Set(entries.map((entry) => entry.address.event_sequence))
+    const continuedSequences = new Set([...loadedEvents, ...pending.map(continuationSequence)])
+    setContinuedEvents((current) =>
+      Object.values(current).some((state) => !continuedSequences.has(state.sequence))
+        ? Object.fromEntries(
+            Object.entries(current).filter(([, state]) => continuedSequences.has(state.sequence)),
+          )
+        : current,
+    )
+    const loadedSegments = new Set(groupTranscriptTurns(entries).map((turn) => turn.id))
+    setOpenTools((current) =>
+      Object.keys(current).some((id) => !loadedSegments.has(id))
+        ? Object.fromEntries(Object.entries(current).filter(([id]) => loadedSegments.has(id)))
+        : current,
+    )
+
     setEventContinuations((current) =>
       Object.keys(current).some((sequence) => !loadedEvents.has(sequence))
         ? Object.fromEntries(
@@ -328,13 +374,15 @@ function TranscriptWindow({
           )
         : current,
     )
-  }, [entries])
+  }, [entries, pending])
   const previousDetail = useRef(detail)
   useEffect(() => {
     if (previousDetail.current === detail) return
     previousDetail.current = detail
     setTurnModes({})
     setEventContinuations({})
+    setContinuedEvents({})
+    setOpenTools({})
   }, [detail])
   useEffect(
     () =>
@@ -541,7 +589,7 @@ function TranscriptWindow({
                 className="session-message-entry"
                 data-event-sequence={row.sequence}
               >
-                <ContinuedEvent sessionId={sessionId} page={row.pending} limits={limits} />
+                {renderContinuation(row.pending)}
               </div>
             )
           const turn = row.turn
@@ -571,6 +619,25 @@ function TranscriptWindow({
                 sessionId={sessionId}
                 limits={limits}
                 target={eventSequence}
+                renderContinuation={renderContinuation}
+                openTool={openTools[turn.id] ?? null}
+                onOpenTool={(tool) => {
+                  const closed = openTools[turn.id]
+                  setOpenTools((current) => ({ ...current, [turn.id]: tool }))
+                  if (closed)
+                    setContinuedEvents((current) =>
+                      Object.fromEntries(
+                        Object.entries(current).filter(
+                          ([, state]) =>
+                            !state.previous.items.some(
+                              (item) =>
+                                item.body.type === 'tool_batch' &&
+                                item.body.tools.some((tool) => toolEvidenceKey(tool) === closed),
+                            ),
+                        ),
+                      ),
+                    )
+                }}
                 eventContinuations={eventContinuations}
                 onEventContinuation={(sequence, state) =>
                   setEventContinuations((current) => ({ ...current, [sequence]: state }))
@@ -582,6 +649,17 @@ function TranscriptWindow({
                     (row) => row.dataset.transcriptTurn === turn.id,
                   )
                   setTurnModes((current) => ({ ...current, [turn.turnId ?? turn.id]: mode }))
+                  setOpenTools((current) => ({ ...current, [turn.id]: null }))
+                  const closedEvents = new Set(
+                    turn.events.map((event) => event.address.event_sequence),
+                  )
+                  setContinuedEvents((current) =>
+                    Object.fromEntries(
+                      Object.entries(current).filter(
+                        ([, state]) => !closedEvents.has(state.sequence),
+                      ),
+                    ),
+                  )
                   if (mode !== 'full') {
                     const sequences = new Set(
                       turn.events.map((event) => event.address.event_sequence),
@@ -623,6 +701,9 @@ function TurnContent({
   sessionId,
   limits,
   target,
+  renderContinuation,
+  openTool,
+  onOpenTool,
   eventContinuations,
   onEventContinuation,
   onExpand,
@@ -635,17 +716,17 @@ function TurnContent({
   sessionId: string
   limits: SessionTranscriptLimits
   target?: string
+  renderContinuation: (page: WebSessionTimelineDetailPage) => ReactNode
+  openTool: string | null
+  onOpenTool: (tool: string | null) => void
   eventContinuations: Readonly<Record<string, EventContinuationState>>
   onEventContinuation: (sequence: string, state: EventContinuationState) => void
   onExpand: (mode: DetailMode) => void
 }) {
-  const [openTool, setOpenTool] = useState<string | null>(null)
   const tool = turn.tools.find((entry) => toolEvidenceKey(entry) === openTool)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
-    return page?.continuation ? (
-      <ContinuedEvent sessionId={sessionId} page={page} limits={limits} />
-    ) : null
+    return page?.continuation ? renderContinuation(page) : null
   }
   const moreTool = (tool: WebTimelineToolAttempt) =>
     detailPages
@@ -665,14 +746,7 @@ function TurnContent({
             ))
         )
       })
-      .map((page) => (
-        <ContinuedEvent
-          key={JSON.stringify(page.continuation)}
-          sessionId={sessionId}
-          page={page}
-          limits={limits}
-        />
-      ))
+      .map(renderContinuation)
   const events = [
     ...new Map(turn.events.map((event) => [event.address.event_sequence, event])).values(),
   ]
@@ -730,14 +804,18 @@ function TurnContent({
               <button
                 type="button"
                 key={toolEvidenceKey(entry)}
-                aria-expanded={detail === 'condensed' ? undefined : openTool === toolEvidenceKey(entry)}
+                aria-expanded={
+                  detail === 'condensed' ? undefined : openTool === toolEvidenceKey(entry)
+                }
                 aria-label={
                   detail === 'condensed' ? `Open turn details for ${entry.tool_name}` : undefined
                 }
                 onClick={() =>
                   detail === 'condensed'
                     ? onExpand('full')
-                    : setOpenTool(openTool === toolEvidenceKey(entry) ? null : toolEvidenceKey(entry))
+                    : onOpenTool(
+                        openTool === toolEvidenceKey(entry) ? null : toolEvidenceKey(entry),
+                      )
                 }
               >
                 {entry.tool_name}
@@ -1002,21 +1080,21 @@ function ContinuedEvent({
   sessionId,
   page,
   limits,
+  state,
+  onChange,
 }: {
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
+  state?: ContinuedEventState
+  onChange: (state?: ContinuedEventState) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [cursor, setCursor] = useState(page.continuation ?? null)
-  const [earlier, setEarlier] = useState<
-    { key: string; items: WebSessionTimelineDetailPage['items'] }[]
-  >([])
-  const previous = useRef(page)
+  const cursor = state?.cursor ?? page.continuation ?? null
+  const earlier = state?.earlier ?? []
   const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
     queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
-    enabled: open,
+    enabled: Boolean(state),
     queryFn: ({ signal }) =>
       readSessionTranscript(
         sessionId,
@@ -1025,13 +1103,22 @@ function ContinuedEvent({
         cursor,
         limits,
         signal,
-        previous.current,
+        state?.previous ?? page,
       ),
     gcTime: 0,
+    initialData: state?.current,
+    staleTime: state?.current ? Number.POSITIVE_INFINITY : 0,
   })
-  if (!open)
+  useEffect(() => {
+    if (!state || !detail.data || state.current === detail.data) return
+    onChange({ ...state, current: detail.data })
+  }, [state, detail.data, onChange])
+  if (!state)
     return (
-      <button type="button" onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        onClick={() => onChange({ sequence, cursor, earlier: [], previous: page })}
+      >
         Read more
       </button>
     )
@@ -1064,24 +1151,19 @@ function ContinuedEvent({
           onClick={() => {
             if (detail.data) {
               const items = detail.data.items
-              setEarlier((chunks) => [...chunks, { key: JSON.stringify(cursor), items }])
-              previous.current = detail.data
-              setCursor(detail.data.continuation ?? null)
+              onChange({
+                sequence,
+                earlier: [...earlier, { key: JSON.stringify(cursor), items }],
+                previous: detail.data,
+                cursor: detail.data.continuation ?? null,
+              })
             }
           }}
         >
           Continue reading
         </button>
       )}
-      <button
-        type="button"
-        onClick={() => {
-          setOpen(false)
-          setEarlier([])
-          setCursor(page.continuation ?? null)
-          previous.current = page
-        }}
-      >
+      <button type="button" onClick={() => onChange(undefined)}>
         Close details
       </button>
     </section>

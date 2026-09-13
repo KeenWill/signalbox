@@ -1,7 +1,7 @@
 import type { Page } from '../../e2e/fontTest'
 import {
-  detailItems,
   detailExcerpt,
+  detailItems,
   detailLive,
   detailPage,
   detailSessionId,
