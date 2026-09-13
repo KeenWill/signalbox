@@ -775,11 +775,7 @@ where
         tokio::pin!(shutdown);
         let mut shutdown_requested = false;
         loop {
-            if shutdown_requested
-                && self.pending_offer.is_none()
-                && self.execution.is_none()
-                && state.reconnect_inventory().lease.is_none()
-            {
+            if shutdown_requested && !self.has_unsettled_lease(state) {
                 return Ok(ServeOutcome::ShutdownReady);
             }
             let event = tokio::select! {
@@ -793,6 +789,14 @@ where
                 return Ok(ServeOutcome::ConnectionEnded(end));
             }
         }
+    }
+
+    fn has_unsettled_lease(&self, state: &RunnerStateRoot) -> bool {
+        let inventory = state.reconnect_inventory();
+        self.pending_offer.is_some()
+            || self.execution.is_some()
+            || inventory.lease.is_some()
+            || inventory.result.is_some()
     }
 
     /// Handles one complete daemon frame or completed child result.

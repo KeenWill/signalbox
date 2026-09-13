@@ -351,6 +351,54 @@ async fn retained_result_is_resent_until_the_exact_durable_acknowledgement() {
 }
 
 #[tokio::test]
+async fn local_shutdown_waits_for_the_durable_result_acknowledgement() {
+    let parent = TempDir::new().expect("fixture parent");
+    let (mut state, mut connection, mut hub, offer) = fixture(&parent);
+    connection.pending_offer = Some(offer.clone());
+    for phase in [
+        LeasePhaseKind::WaitingDispatch,
+        LeasePhaseKind::DispatchReceived,
+        LeasePhaseKind::ExecutionMayHaveStarted,
+    ] {
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: offer.correlation.clone(),
+                phase,
+            })
+            .expect("ordered durable phase");
+    }
+    state
+        .record_terminal_result(RetainedResult {
+            correlation: offer.correlation.clone(),
+            result: TerminalResult::Success {
+                text: "exact result".to_owned(),
+            },
+        })
+        .expect("durable result");
+
+    let serving = connection.serve_until_shutdown(&mut state, async {});
+    tokio::pin!(serving);
+    tokio::select! {
+        biased;
+        outcome = &mut serving => panic!("shutdown completed before result acknowledgement: {outcome:?}"),
+        () = tokio::task::yield_now() => {},
+    }
+
+    send_message(
+        &mut hub,
+        Message::ResultRecorded(ResultRecorded {
+            correlation: offer.correlation,
+        }),
+    )
+    .await
+    .expect("result acknowledgement");
+    assert_eq!(
+        serving.await.expect("clean shutdown boundary"),
+        ServeOutcome::ShutdownReady
+    );
+}
+
+#[tokio::test]
 async fn a_partial_daemon_frame_survives_a_child_completion_wakeup() {
     let (runner, mut hub) = tokio::io::duplex(4096);
     let mut reader = BufReader::new(runner);
