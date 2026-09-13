@@ -7,6 +7,10 @@
 //! deployment configuration, and migration policy at this executable
 //! boundary.
 
+mod heap_allocator;
+#[cfg(all(test, target_os = "linux"))]
+mod heap_retention;
+
 #[cfg(test)]
 use signalboxd::credential_files_conflict;
 use signalboxd::repo_watch_runtime::{
@@ -2282,7 +2286,16 @@ async fn run_hub_incarnation(
         };
         let composed = await_while_guarded(
             &mut database,
-            signalboxd::DaemonFileMediaExecutor::compose(pool.clone(), Arc::clone(stores)),
+            signalboxd::DaemonFileMediaExecutor::compose(
+                pool.clone(),
+                Arc::clone(stores),
+                model_configuration
+                    .numeric_bounds()
+                    .integer("max_raster_dimension")
+                    .flatten()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(signalbox_file_media_runtime::MAX_IMAGE_AXIS),
+            ),
         )
         .await;
         match composed {

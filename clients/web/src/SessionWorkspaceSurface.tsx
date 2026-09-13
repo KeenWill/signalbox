@@ -78,18 +78,21 @@ export const reconcileVisibleSessionSelection = (
 export const visibleSessionItems = (
   items: WebSessionTimelineWindow['items'],
   detail: 'full' | 'condensed' | 'results',
+  requestedAddress?: string,
 ) =>
   detail === 'results'
-    ? items.filter((item) =>
-        [
-          'input_accepted',
-          'turn_completed',
-          'turn_failed',
-          'turn_refused',
-          'turn_cancelled',
-          'turn_reconciliation_required',
-          'goal_turn_retired',
-        ].includes(item.kind),
+    ? items.filter(
+        (item) =>
+          item.address.event_sequence === requestedAddress ||
+          [
+            'input_accepted',
+            'turn_completed',
+            'turn_failed',
+            'turn_refused',
+            'turn_cancelled',
+            'turn_reconciliation_required',
+            'goal_turn_retired',
+          ].includes(item.kind),
       )
     : items
 
@@ -114,6 +117,8 @@ export const pruneExpandedSessionItems = (
 
 export function SessionWorkspaceSurface({
   initialSessionId,
+  initialAround,
+  onAroundConsumed,
   focusEntry,
   onSessionOpen,
   onReturnToCatalog,
@@ -128,6 +133,8 @@ export function SessionWorkspaceSurface({
   windowRequest,
 }: {
   initialSessionId?: string
+  initialAround?: string
+  onAroundConsumed: () => void
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
   onReturnToCatalog: () => void
@@ -162,10 +169,24 @@ export function SessionWorkspaceSurface({
     initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
   )
   const [refetchRequest, setRefetchRequest] = useState(0)
-  const [showEvents, setShowEvents] = useState(false)
+  const [showEvents, setShowEvents] = useState(initialAround !== undefined)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
-  const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
+  const manualAnchorRef = useRef<SessionWindowAnchor | null>(
+    initialAround ? { kind: 'around', eventSequence: initialAround } : null,
+  )
+  const requestedSelection = useRef(initialAround)
+  const previousAround = useRef(initialAround)
+  useEffect(() => {
+    if (previousAround.current === initialAround) return
+    previousAround.current = initialAround
+    if (initialAround === undefined) return
+    manualAnchorRef.current = { kind: 'around', eventSequence: initialAround }
+    requestedSelection.current = initialAround
+    setShowEvents(true)
+    setAwaitingSessionId(sessionId)
+    setRefetchRequest((current) => current + 1)
+  }, [initialAround, sessionId])
   const handledRefetchRequest = useRef(0)
   const boundaryRequest = useRef(0)
   const session = useQuery({
@@ -223,6 +244,7 @@ export function SessionWorkspaceSurface({
       }
       return {
         active: reconciledActive,
+        requestedAddress: manualAnchorRef.current?.kind === 'around' ? initialAround : undefined,
         anchor,
         descriptor: reconciledDescriptor,
         history,
@@ -244,14 +266,16 @@ export function SessionWorkspaceSurface({
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
   const items = useMemo(
-    () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail),
-    [app.detail, displayedSession?.window.items],
+    () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail, initialAround),
+    [app.detail, displayedSession?.window.items, initialAround],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
   const loadWindow = useCallback(
     async (anchor: 'first' | 'latest', control?: HTMLButtonElement) => {
       const request = ++boundaryRequest.current
       manualAnchorRef.current = { kind: anchor }
+      requestedSelection.current = undefined
+      onAroundConsumed()
       const result = await refetchSession()
       if (!result.isSuccess || result.data === undefined || request !== boundaryRequest.current) {
         return
@@ -263,7 +287,7 @@ export function SessionWorkspaceSurface({
       )
       if (control === undefined) timelineRef.current?.focus()
     },
-    [dispatch, refetchSession, timelineRef],
+    [dispatch, onAroundConsumed, refetchSession, timelineRef],
   )
   const toggleSelectedExpansion = useCallback(() => {
     const eventSequence = store.getState().app.selectedTimeline
@@ -284,6 +308,14 @@ export function SessionWorkspaceSurface({
   useEffect(() => {
     const preferred =
       displayedSession?.anchor.kind === 'around' ? displayedSession.anchor.eventSequence : null
+    const requested = requestedSelection.current
+    if (requested !== undefined && timelineIds.includes(requested)) {
+      requestedSelection.current = undefined
+      dispatch(actions.timelineSelected(requested))
+      rowRefs.current.get(requested)?.scrollIntoView({ block: 'nearest' })
+      timelineRef.current?.focus()
+      return
+    }
     const reconciled = reconcileVisibleSessionSelection(
       app.selectedTimeline,
       timelineIds,
@@ -292,7 +324,7 @@ export function SessionWorkspaceSurface({
     if (reconciled !== app.selectedTimeline) {
       dispatch(actions.timelineSelected(reconciled))
     }
-  }, [app.selectedTimeline, dispatch, displayedSession?.anchor, timelineIds])
+  }, [app.selectedTimeline, dispatch, displayedSession?.anchor, timelineIds, timelineRef])
   useEffect(() => {
     setExpanded((current) =>
       pruneExpandedSessionItems(current, displayedSession?.window.items ?? []),
@@ -361,6 +393,7 @@ export function SessionWorkspaceSurface({
     const reopeningCurrentSession = candidate === sessionId
     setOpeningPosition(app.lastLogicalPositions[candidate])
     manualAnchorRef.current = null
+    requestedSelection.current = undefined
     setExpanded(new Set())
     if (!reopeningCurrentSession) {
       setAwaitingSessionId(candidate)
@@ -585,6 +618,8 @@ export function SessionWorkspaceSurface({
                 const address = displayedSession.window.continuation_before?.event_sequence
                 if (address) {
                   manualAnchorRef.current = { kind: 'before', eventSequence: address }
+                  requestedSelection.current = undefined
+                  onAroundConsumed()
                   void refetchSession()
                 }
               }}
@@ -598,6 +633,8 @@ export function SessionWorkspaceSurface({
                 const address = displayedSession.window.continuation_after?.event_sequence
                 if (address) {
                   manualAnchorRef.current = { kind: 'after', eventSequence: address }
+                  requestedSelection.current = undefined
+                  onAroundConsumed()
                   void refetchSession()
                 }
               }}

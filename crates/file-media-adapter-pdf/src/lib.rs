@@ -1,5 +1,7 @@
 //! Bounded PDF interpretation inside the supervised file-media worker.
 
+mod raster;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -22,9 +24,11 @@ use signalbox_file_media_runtime::{
 const MEDIA_TYPE: &str = "application/pdf";
 const PROVIDER_NAME: &str = "pdf";
 const READER_NAME: &str = "lopdf";
-const READER_REVISION: &str = "lopdf-0-44-v2";
+const READER_REVISION: &str = "lopdf-hayro-v4";
 const TEXT_VIEW: &str = "text";
 const METADATA_VIEW: &str = "metadata";
+const DOCUMENT_VIEW: &str = "document";
+const PAGE_IMAGE_VIEW: &str = "page_image";
 const MALFORMED_REASON: &str = "malformed_pdf";
 const DECODED_CONTENT_LIMIT: &str = "decoded_content_limit";
 const OBJECT_COUNT_LIMIT: &str = "object_count_limit";
@@ -273,7 +277,15 @@ impl FileMediaProvider for PdfProvider {
                     return Ok(ProcessorReadOutput::InvalidViewArguments);
                 }
             };
-            if !empty_options(options) {
+            let page_image = if request.view.as_str() == PAGE_IMAGE_VIEW {
+                let Some(options) = raster::PageImageOptions::parse(options) else {
+                    return Ok(ProcessorReadOutput::InvalidViewArguments);
+                };
+                Some(options)
+            } else {
+                None
+            };
+            if page_image.is_none() && !empty_options(options) {
                 return Ok(ProcessorReadOutput::InvalidViewArguments);
             }
             let source_length = source.byte_length().get();
@@ -316,8 +328,16 @@ impl FileMediaProvider for PdfProvider {
             };
             require_active(cancellation)?;
             match request.view.as_str() {
+                DOCUMENT_VIEW => Ok(ProcessorReadOutput::DirectReference {
+                    media_type: String::from(MEDIA_TYPE),
+                }),
                 TEXT_VIEW => read_text(&document, &pages, cancellation),
                 METADATA_VIEW => read_metadata(&document, pages.len()),
+                PAGE_IMAGE_VIEW => page_image.ok_or(FileMediaProviderFailure::Failed)?.render(
+                    bytes,
+                    pages.len(),
+                    &request,
+                ),
                 _ => Ok(ProcessorReadOutput::UnsupportedView),
             }
         })
@@ -326,6 +346,14 @@ impl FileMediaProvider for PdfProvider {
 
 /// Returns the exact declaration shared by worker and daemon registration.
 pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
+    declaration_with_raster_dimension(signalbox_file_media_runtime::MAX_IMAGE_AXIS)
+}
+
+/// Returns the reader declaration with a lowered page-image output dimension.
+pub fn declaration_with_raster_dimension(
+    maximum_dimension: u32,
+) -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
+    let maximum_dimension = maximum_dimension.min(signalbox_file_media_runtime::MAX_IMAGE_AXIS);
     let provider = FileReaderProviderName::try_new(PROVIDER_NAME)?;
     let text_view = ReadViewDeclaration::try_new(
         ReadViewName::try_new(TEXT_VIEW)?,
@@ -365,7 +393,27 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
             VALIDATION_SOURCE_BYTES,
             signalbox_file_media_runtime::MAX_VALIDATION_RANGES,
         ),
-        views: vec![text_view, metadata_view],
+        views: vec![text_view, metadata_view, ReadViewDeclaration::try_new(
+            ReadViewName::try_new(DOCUMENT_VIEW)?,
+            String::from("Presents the validated PDF as a native document where the model supports it."),
+            CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
+            ReadAccessPattern::Streaming { maximum_ranges: 32 },
+            ReadViewBounds::File { source_bytes: signalbox_file_media_runtime::MAX_PRESENTED_FILE_BYTES,
+                output_bytes: signalbox_file_media_runtime::MAX_PRESENTED_FILE_BYTES },
+        )?, ReadViewDeclaration::try_new(
+            ReadViewName::try_new(PAGE_IMAGE_VIEW)?,
+            String::from("Renders one PDF page as PNG; page is one-based, scale defaults to 1 and is bounded to fit."),
+            CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"properties":{"page":{"minimum":1,"type":"integer"},"scale":{"exclusiveMinimum":0,"type":"number"}},"required":["page"],"type":"object"}"#)?,
+            ReadAccessPattern::Streaming { maximum_ranges: 32 },
+            ReadViewBounds::Image {
+                source_bytes: READ_SOURCE_BYTES,
+                width: maximum_dimension,
+                height: maximum_dimension,
+                pixels: signalbox_file_media_runtime::MAX_DECODED_IMAGE_PIXELS,
+                output_bytes: signalbox_file_media_runtime::MAX_PRESENTED_IMAGE_BYTES,
+            },
+        )?.with_image_output(signalbox_file_media_runtime::ImageViewKind::Generated,
+            vec![CanonicalMediaType::from_str("image/png")?])],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
             ReasonCode::try_new(DECODED_CONTENT_LIMIT)?,

@@ -3,6 +3,7 @@ import type {
   WebSessionTimelineDescriptor,
   WebSessionTimelineDetail,
 } from '../src/generated/web-contract.mjs'
+import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src/preferences'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, test } from './fontTest'
 
@@ -32,6 +33,7 @@ async function sessionApi(
     grown: false,
     observed: false,
     historyReads: [] as string[],
+    historyAddresses: [] as Array<string | null>,
     textReads: [] as string[],
     submissions: [] as Array<{ command_id: string; message: string }>,
   }
@@ -140,6 +142,7 @@ async function sessionApi(
     const latest = state.grown ? '44' : '43'
     if (url.pathname.endsWith('/timeline')) {
       state.historyReads.push(url.searchParams.get('anchor') ?? '')
+      state.historyAddresses.push(url.searchParams.get('address'))
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
@@ -883,3 +886,148 @@ for (const response of [204, 500]) {
     ).toBeVisible()
   })
 }
+
+for (const active of [false, true]) {
+  test(`opens a search result at its matching address when active is ${active}`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page, active)
+    await page.route('**/api/search?**', (route) =>
+      route.fulfill({
+        json: {
+          results: [
+            {
+              session_id: sessionId,
+              address: { event_sequence: '41' },
+              projection_id: '1',
+              source: { kind: 'accepted_input', accepted_input_id: turnId, turn_id: turnId },
+              content_class: 'user_transcript',
+              snippet: initialMessage,
+              highlights: [],
+            },
+          ],
+          continuation: null,
+        },
+      }),
+    )
+    await page.goto(`/sessions?session=${sessionId}&workspace=true`)
+    await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+    await page.getByRole('row', { name: /43 Turn completed/ }).click()
+    await page.getByRole('link', { name: /Search/ }).click()
+    await page.getByRole('textbox', { name: 'Search text' }).fill('check')
+    await page.getByRole('button', { name: 'Search', exact: true }).click()
+    api.state.historyReads.length = 0
+    api.state.historyAddresses.length = 0
+    const result = page.getByRole('link', { name: new RegExp(initialMessage) })
+    await result.focus()
+    await result.press('Enter')
+    await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeFocused()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    expect(api.state.historyReads).toEqual(['around'])
+    expect(api.state.historyAddresses).toEqual(['41'])
+    await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+    await expect(page.getByRole('row', { name: /41 Message accepted/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await page.getByRole('button', { name: /^Latest/ }).click()
+    await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
+    await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  })
+}
+
+for (const action of ['switch', 'close', 'reopen'] as const) {
+  const outcome =
+    action === 'switch'
+      ? 'switches sessions'
+      : action === 'close'
+        ? 'closes'
+        : 'reopens the current session'
+  test(`clears a matching address when the workspace ${outcome}`, async ({ page }) => {
+    const api = await sessionApi(page)
+    const otherId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
+    const other = await sessionApi(page, false, otherId)
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          cursor: '0',
+          sort: 'last_activity_descending',
+          summaries: [],
+          continuation: null,
+          total: '0',
+        },
+      }),
+    )
+    await page.goto(`/sessions?session=${sessionId}&workspace=true&around=41`)
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    const session = page.getByRole('textbox', { name: 'Session ID', exact: true })
+    if (action === 'switch') {
+      await session.fill(otherId)
+      await session.press('Enter')
+      await expect.poll(() => other.state.historyReads).toEqual(['latest'])
+    } else if (action === 'close') {
+      await session.press('Escape')
+      await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
+    } else {
+      api.state.active = true
+      api.advanceObservation()
+      await session.press('Enter')
+      await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+    }
+    await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  })
+}
+
+test('keeps an explicit non-result event visible and focused in Results mode', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  api.grow()
+  await page.addInitScript(
+    ({ key, preferences }) => {
+      localStorage.setItem(key, JSON.stringify(preferences))
+    },
+    {
+      key: BROWSER_PREFERENCES_KEY,
+      preferences: { ...createDefaultBrowserPreferences(), detail: 'results' },
+    },
+  )
+  await page.goto(`/sessions?session=${sessionId}&workspace=true&around=44`)
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  const match = timeline.getByRole('row').filter({ hasText: '44' })
+  await expect(match).toBeVisible()
+  await expect(match).toHaveAttribute('aria-selected', 'true')
+  await expect(timeline).toBeFocused()
+  await page.getByRole('button', { name: /^Latest/ }).click()
+  await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  await expect(match).toHaveCount(0)
+  await page.reload()
+  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+})
+
+test('consumes a pending search match when reopening the current session', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  let releaseMatch = () => {}
+  const matchReleased = new Promise<void>((resolve) => {
+    releaseMatch = resolve
+  })
+  let matchRequested = false
+  await page.route('**/api/sessions/*/timeline?**', async (route) => {
+    if (new URL(route.request().url()).searchParams.get('anchor') === 'around') {
+      matchRequested = true
+      await matchReleased
+    }
+    await route.fallback()
+  })
+  await page.goto(`/sessions?session=${sessionId}&workspace=true&around=43`)
+  await expect.poll(() => matchRequested).toBe(true)
+  const session = page.getByRole('textbox', { name: 'Session ID', exact: true })
+  await session.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  releaseMatch()
+  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('row', { name: /43 Turn completed/ })).toHaveAttribute(
+    'aria-selected',
+    'false',
+  )
+  await expect(session).toBeFocused()
+})

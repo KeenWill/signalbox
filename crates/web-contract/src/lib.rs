@@ -180,6 +180,20 @@ pub struct WebSubmitInputRequest {
     pub message: String,
 }
 
+/// Human title replacement preserving the other loaded metadata fields.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTitleRequest {
+    /// Durable identity retained when retrying the title edit.
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    /// Exact nonempty human-facing title.
+    #[schemars(length(min = 1))]
+    pub title: String,
+}
+
 /// Small generated-contract fixture proving Rust/TypeScript round trips.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -563,6 +577,79 @@ pub enum WebModelSelection {
         /// Model alias UUID.
         alias_id: String,
     },
+}
+
+/// Complete loaded template catalog in name order.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateList {
+    pub templates: Vec<WebTemplateSummary>,
+}
+
+/// Creation defaults and workflow authority for one loaded template.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSummary {
+    pub name: String,
+    pub digest: String,
+    pub version: WebPositiveU64,
+    pub model: WebModelSelection,
+    pub model_label: String,
+    pub dangerous_tool_auto_approval: bool,
+    pub workflow_tools: Vec<WebTemplateWorkflowTool>,
+}
+
+/// One declared workflow operation with its effective approval posture.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateWorkflowTool {
+    pub name: String,
+    pub grant: WebTemplateWorkflowGrant,
+    pub posture: WebTemplateApprovalPosture,
+}
+
+/// Operation authority copied from the accepted template.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebTemplateWorkflowGrant {
+    Enabled { enabled: bool },
+    AllRegistrations,
+    Registrations { names: Vec<String> },
+}
+
+/// Effective workflow approval selection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTemplateApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+/// Source section that defines the selected template.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTemplateSourceKind {
+    Template,
+    ReviewLibrary,
+}
+
+/// Replacement source for one template or its shared review library.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSaveRequest {
+    pub definition_toml: String,
+}
+
+/// Full accepted definition, including retained external prompt contents.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateDetail {
+    pub summary: WebTemplateSummary,
+    pub system_prompt: String,
+    pub source_kind: WebTemplateSourceKind,
+    /// Version-one TOML document containing this template or its shared review library.
+    pub definition_toml: String,
 }
 
 /// Idempotent continuation command for one selected immutable frontier.
@@ -2926,6 +3013,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
         },
         ContractSchema {
+            name: "WebSessionTitleRequest",
+            decoder: "decodeWebSessionTitleRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSessionTitleRequest).to_value()),
+        },
+        ContractSchema {
             name: "WebContractExample",
             decoder: "decodeWebContractExample",
             schema: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
@@ -2984,6 +3076,21 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSessionLiveStreamEvent",
             decoder: "decodeWebSessionLiveStreamEvent",
             schema: live_event_schema,
+        },
+        ContractSchema {
+            name: "WebTemplateList",
+            decoder: "decodeWebTemplateList",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateList).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateSaveRequest",
+            decoder: "decodeWebTemplateSaveRequest",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateSaveRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateDetail",
+            decoder: "decodeWebTemplateDetail",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateDetail).to_value()),
         },
         ContractSchema {
             name: "WebImportListRequest",

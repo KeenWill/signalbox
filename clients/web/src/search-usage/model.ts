@@ -204,7 +204,7 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     ) {
       throw new TypeError('search or usage contract limits are invalid')
     }
-    return new HttpSearchUsageSource(bootstrap.limits, request)
+    return new HttpSearchUsageSource(bootstrap.limits, (...args) => request(...args))
   }
 
   async search(request: SearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
