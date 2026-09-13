@@ -100,6 +100,49 @@ const searchErrorFixture = {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('SameOriginProductTransport', () => {
+  it('reuses usage admission while each summary keeps its own cancellation signal', async () => {
+    const summary = { groups: [], truncated: false }
+    const request = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      init?.signal?.throwIfAborted()
+      return new Response(JSON.stringify(input === '/api/bootstrap' ? bootstrapFixture : summary))
+    })
+    vi.stubGlobal('fetch', request)
+    const transport = new SameOriginProductTransport()
+    const first = new AbortController()
+    const second = new AbortController()
+    await expect(transport.usageSummary({ sessionId }, first.signal)).resolves.toEqual(summary)
+    first.abort()
+    await expect(transport.usageSummary({ sessionId }, second.signal)).resolves.toEqual(summary)
+    expect(request.mock.calls).toEqual([
+      ['/api/bootstrap', { signal: first.signal }],
+      [`/api/usage/summary?session_id=${sessionId}`, { signal: first.signal }],
+      [`/api/usage/summary?session_id=${sessionId}`, { signal: second.signal }],
+    ])
+  })
+
+  it('can reconnect usage after bootstrap is cancelled', async () => {
+    const request = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      init?.signal?.throwIfAborted()
+      return new Response(
+        JSON.stringify(
+          input === '/api/bootstrap' ? bootstrapFixture : { groups: [], truncated: false },
+        ),
+      )
+    })
+    vi.stubGlobal('fetch', request)
+    const transport = new SameOriginProductTransport()
+    const cancelled = new AbortController()
+    cancelled.abort()
+    await expect(transport.usageSummary({ sessionId }, cancelled.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    await expect(transport.usageSummary({ sessionId })).resolves.toEqual({
+      groups: [],
+      truncated: false,
+    })
+    expect(request.mock.calls.filter(([input]) => input === '/api/bootstrap')).toHaveLength(2)
+  })
+
   it('decodes the Rust-authored bootstrap contract', async () => {
     vi.stubGlobal(
       'fetch',

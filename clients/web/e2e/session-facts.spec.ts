@@ -1,5 +1,4 @@
 import type { Request } from '@playwright/test'
-import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, test } from './fontTest'
 import {
   openSession,
@@ -112,7 +111,7 @@ for (const example of [
     await expect(page.getByTitle('Session cost', { exact: true })).toHaveText(example.text)
   })
 
-test('leaving a session cancels its pending cost bootstrap', async ({ page }) => {
+test('leaving a session cancels its pending cost summary', async ({ page }) => {
   const api = await sessionApi(page)
   await page.route('**/api/usage/summary?**', (route) =>
     route.fulfill({ json: { groups: [], truncated: false } }),
@@ -124,10 +123,10 @@ test('leaving a session cancels its pending cost bootstrap', async ({ page }) =>
   const waiting = new Promise<void>((resolve) => {
     release = resolve
   })
-  await page.route('**/api/bootstrap', async (route) => {
+  await page.route('**/api/usage/summary?**', async (route) => {
     blocked = route.request()
     await waiting
-    await route.fulfill({ json: bootstrapFixture })
+    await route.fulfill({ json: { groups: [], truncated: false } })
   })
   api.grow()
   await expect.poll(() => blocked !== null).toBe(true)

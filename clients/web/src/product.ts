@@ -23,7 +23,9 @@ import {
   type WebSessionTimelineDetailPage,
   type WebSubmitInputRequest,
   type WebTimelineDetailContinuation,
+  type WebUsageSummary,
 } from './generated/web-contract.mjs'
+import { HttpSearchUsageSource, type UsageFilters } from './search-usage/model'
 import { hasConversationContent } from './session-timeline/conversation'
 import { validateDetailContinuation } from './session-timeline/model'
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
@@ -857,6 +859,15 @@ const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractB
 }
 
 export class SameOriginProductTransport implements ProductTransport {
+  private usageSource: HttpSearchUsageSource | undefined
+
+  async usageSummary(filters: UsageFilters, signal?: AbortSignal): Promise<WebUsageSummary> {
+    const source =
+      this.usageSource ?? (await HttpSearchUsageSource.connect(fetch.bind(globalThis), signal))
+    this.usageSource = source
+    return source.usageSummary(filters, signal)
+  }
+
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await request('/api/bootstrap', {
       headers: { accept: 'application/json' },

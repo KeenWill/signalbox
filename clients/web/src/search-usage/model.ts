@@ -180,8 +180,11 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSearchUsageSource> {
-    const response = await request('/api/bootstrap')
+  static async connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSearchUsageSource> {
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (!bootstrap.capabilities.bounded_lexical_search) {

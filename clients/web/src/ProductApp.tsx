@@ -803,6 +803,7 @@ export function ProductApp({
       bootstrap.isSuccess &&
       (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
+        usageSource={productTransport}
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')

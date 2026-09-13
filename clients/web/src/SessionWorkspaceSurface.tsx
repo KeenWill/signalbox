@@ -17,7 +17,7 @@ import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
-import { HttpSearchUsageSource } from './search-usage/model'
+import type { SearchUsageSource } from './search-usage/model'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
@@ -134,6 +134,7 @@ const sessionCostLabel = (summary: WebUsageSummary): string => {
 }
 
 export function SessionWorkspaceSurface({
+  usageSource,
   initialSessionId,
   onReturnToCatalog,
   onTimelineIds,
@@ -145,6 +146,7 @@ export function SessionWorkspaceSurface({
   timelineRef,
   windowRequest,
 }: {
+  usageSource: Pick<SearchUsageSource, 'usageSummary'>
   initialSessionId?: string
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
@@ -254,10 +256,7 @@ export function SessionWorkspaceSurface({
     queryKey: ['production', 'session-cost', sessionId],
     queryFn: async ({ signal }) => {
       observedCostPosition.current = displayedSession?.descriptor.observed_through
-      const source = await HttpSearchUsageSource.connect((input, init) =>
-        window.fetch(input, { ...init, signal }),
-      )
-      return source.usageSummary({ sessionId: sessionId ?? '' }, signal)
+      return usageSource.usageSummary({ sessionId: sessionId ?? '' }, signal)
     },
     enabled: displayedSession !== undefined,
     gcTime: 0,
