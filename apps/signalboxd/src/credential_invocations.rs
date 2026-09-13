@@ -53,6 +53,7 @@ impl CredentialInvocationProcesses {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn submit_title(&self, task: crate::web_http::SessionTitleTask) -> bool {
         match &self.title_tasks {
             Some(tasks) => tasks.try_send(task).is_ok(),
@@ -385,8 +386,17 @@ mod tests {
             std::path::PathBuf::new(),
             None,
         )
-        .expect("fixture configuration");
-        for _ in 0..3 {
+        .expect("fixture configuration")
+        .with_title_invocation_processes(processes.clone());
+        let queued_session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let queued_turn = TurnId::from_uuid(uuid::Uuid::now_v7());
+        configuration.queue_initial_title(queued_session, queued_turn);
+        assert_eq!(
+            *processes.pending_titles.lock().expect("pending work"),
+            BTreeMap::from([(queued_session, queued_turn)]),
+            "completed-turn handoff queues identifiers without touching persistence"
+        );
+        for _ in 0..2 {
             processes.retain_initial_title(
                 SessionId::from_uuid(uuid::Uuid::now_v7()),
                 TurnId::from_uuid(uuid::Uuid::now_v7()),
@@ -685,9 +695,7 @@ mod tests {
             None, None, None,
         ))
         .with_title_invocation_processes(processes.clone());
-        disabled_configuration
-            .start_initial_title(pool.clone(), session, turn)
-            .await;
+        disabled_configuration.queue_initial_title(session, turn);
         processes.retain_initial_title(session, turn);
         disabled_configuration.recover().await?;
         assert!(
@@ -719,9 +727,7 @@ mod tests {
                 .session_titles(pool.clone())
                 .is_none()
         );
-        unavailable_configuration
-            .start_initial_title(pool.clone(), session, turn)
-            .await;
+        unavailable_configuration.queue_initial_title(session, turn);
         assert_eq!(
             *processes.pending_titles.lock().expect("pending titles"),
             BTreeMap::from([(session, turn)]),

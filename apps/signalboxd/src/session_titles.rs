@@ -67,6 +67,7 @@ impl SessionTitles {
         self.processes.retain_initial_title(session, turn);
     }
 
+    #[cfg(test)]
     pub(crate) async fn start_initial(&self, session: SessionId, turn: TurnId) {
         match self.prepare(session, Some(turn)).await {
             Ok(Some(prepared)) => self.submit_initial(prepared).await,
@@ -80,7 +81,8 @@ impl SessionTitles {
         }
     }
 
-    pub(crate) async fn submit_initial(&self, prepared: PreparedTitle) {
+    #[cfg(test)]
+    async fn submit_initial(&self, prepared: PreparedTitle) {
         let call = prepared.call.call;
         let session = prepared.call.session;
         let initial_for_turn = prepared.call.initial_for_turn;

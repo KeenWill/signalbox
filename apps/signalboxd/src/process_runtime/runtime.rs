@@ -416,9 +416,7 @@ async fn dispatch_updates_with_titles(
                 if let Some((session, turn)) = title_work
                     && let Some(configuration) = &title_configuration
                 {
-                    configuration
-                        .start_initial_title(pool.clone(), session, turn)
-                        .await;
+                    configuration.queue_initial_title(session, turn);
                 }
             }
             Ok(OutboxDispatchOutcome::Idle)
