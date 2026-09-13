@@ -414,3 +414,28 @@ it('rejects oversized action text and escaped payloads before sending', async ()
     fetch.mockRestore()
   }
 })
+
+it('rejects NUL characters in goal and cancellation text before sending', async () => {
+  const fetch = vi.spyOn(globalThis, 'fetch')
+  try {
+    await expect(
+      submitSessionAction(sessionId, {
+        kind: 'set-goal',
+        input: { command_id: anotherSessionId, statement: 'goal\0text' },
+      }),
+    ).rejects.toThrow('Action content cannot contain NUL characters.')
+    await expect(
+      submitSessionAction(sessionId, {
+        kind: 'cancel',
+        input: {
+          command_id: anotherSessionId,
+          expected_active_turn_id: turnId,
+          message: 'continue\0here',
+        },
+      }),
+    ).rejects.toThrow('Action content cannot contain NUL characters.')
+    expect(fetch).not.toHaveBeenCalled()
+  } finally {
+    fetch.mockRestore()
+  }
+})
