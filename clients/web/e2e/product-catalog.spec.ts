@@ -1063,7 +1063,7 @@ test('releases the rename editor while the acknowledged catalog refresh is stall
   await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveCount(0)
   await expect(rename).toBeEnabled()
   await expect(rename).toBeFocused()
-  await expect(page.getByRole('button', { name: /Acknowledged title/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
   await rename.click()
   await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveValue(
     'Acknowledged title',
@@ -1074,7 +1074,7 @@ test('releases the rename editor while the acknowledged catalog refresh is stall
     'Acknowledged title',
     'Acknowledged title',
   ])
-  expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
+  expect(requests[1]?.command_id).toBe(requests[0]?.command_id)
 })
 
 for (const [leaveCatalog, firstRequestArrived] of [
@@ -1128,7 +1128,7 @@ for (const [leaveCatalog, firstRequestArrived] of [
         })
       } else {
         if (requests.at(-1)?.command_id !== requests[0]?.command_id)
-          savedTitle = 'Stale title reinstalled'
+          savedTitle = requests.at(-1)?.title ?? savedTitle
         if (!firstRequestArrived) savedTitle = 'My ambiguous title'
         stallRefresh = leaveCatalog
         await route.fulfill({ status: 204 })
@@ -1169,7 +1169,6 @@ for (const [leaveCatalog, firstRequestArrived] of [
       await expect(input).toHaveAttribute('readonly', '')
       await expect(input).toHaveValue('My ambiguous title')
       await expect(page.getByRole('alert')).toContainText('Rename acknowledged')
-      await page.getByRole('button', { name: 'Cancel', exact: true }).click()
       const refreshed = page.waitForResponse((response) =>
         response.url().includes('/api/sessions?'),
       )
@@ -1180,12 +1179,16 @@ for (const [leaveCatalog, firstRequestArrived] of [
           name: firstRequestArrived ? /Another writer title/ : /My ambiguous title/,
         }),
       ).toBeVisible()
-      await rename.click()
     }
     await expect(input).toBeEditable()
-    await expect(input).toHaveValue(
-      firstRequestArrived ? 'Another writer title' : 'My ambiguous title',
-    )
+    const confirmedTitle = firstRequestArrived ? 'Another writer title' : 'My ambiguous title'
+    await expect(input).toHaveValue(confirmedTitle)
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect.poll(() => requests.length).toBe(3)
+    expect(requests[2]?.title).toBe(confirmedTitle)
+    expect(requests[2]?.command_id).not.toBe(requests[0]?.command_id)
+    await expect(input).toBeHidden()
+    await expect(page.getByRole('button', { name: new RegExp(confirmedTitle) })).toBeVisible()
   })
 }
 

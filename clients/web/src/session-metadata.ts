@@ -62,8 +62,7 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
       signal: controller.signal,
     })
     if (response.status === 204) {
-      if (retained) acknowledgedRenames.set(sessionId, request)
-      else unresolvedRenames.delete(sessionId)
+      acknowledgedRenames.set(sessionId, request)
       return
     }
     if (!response.ok) {

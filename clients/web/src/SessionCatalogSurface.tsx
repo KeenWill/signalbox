@@ -100,10 +100,12 @@ const SessionTitle = ({
 const SessionMetadata = ({
   summary,
   canRename,
+  catalogUpdatedAt,
   onRename,
 }: {
   summary: SessionSummary
   canRename: boolean
+  catalogUpdatedAt: number
   onRename: () => void
 }) => {
   const queryClient = useQueryClient()
@@ -122,6 +124,19 @@ const SessionMetadata = ({
       renameButton.current?.focus()
     }
   }, [editing])
+  useEffect(() => {
+    if (
+      catalogUpdatedAt &&
+      editing &&
+      !saving &&
+      intent.current &&
+      !retainedRename(summary.session_id)
+    ) {
+      intent.current = null
+      setTitle(summary.title_truncated ? '' : (summary.title_summary ?? ''))
+      setError(null)
+    }
+  }, [catalogUpdatedAt, editing, saving, summary])
   const provenance = summary.repository_watch
   const repositoryUrl = provenance
     ? `https://github.com/${provenance.repository.split('/').map(encodeURIComponent).join('/')}`
@@ -142,27 +157,7 @@ const SessionMetadata = ({
       if (intent.current?.title !== title) {
         intent.current = { command_id: createRenameCommandId(), title }
       }
-      const retainedRetry = retainedRename(summary.session_id) !== null
       await renameSession(summary.session_id, intent.current)
-      if (!retainedRetry) {
-        const scalars = Array.from(intent.current.title)
-        queryClient.setQueriesData<WebSessionCatalogSnapshot>(
-          { queryKey: ['production', 'sessions'] },
-          (snapshot) =>
-            snapshot && {
-              ...snapshot,
-              summaries: snapshot.summaries.map((row) =>
-                row.session_id === summary.session_id
-                  ? {
-                      ...row,
-                      title_summary: scalars.slice(0, MAX_SESSION_SUMMARY_SCALARS).join(''),
-                      title_truncated: scalars.length > MAX_SESSION_SUMMARY_SCALARS,
-                    }
-                  : row,
-              ),
-            },
-        )
-      }
       intent.current = null
       close()
       void queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
@@ -625,6 +620,7 @@ export function SessionCatalogSurface({
                           keyboardSelection === summary.session_id ? null : summary.session_id
                         dispatch(actions.timelineSelected(summary.session_id))
                       }}
+                      catalogUpdatedAt={sessions.dataUpdatedAt}
                       canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
                     />
                   </li>
