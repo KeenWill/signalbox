@@ -121,6 +121,13 @@ impl CredentialInvocationProcesses {
             .or_insert(turn);
     }
 
+    pub(crate) fn clear_pending_titles(&self) {
+        self.pending_titles
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     pub(crate) async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
         for (session, turn) in
             signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone())
@@ -137,6 +144,15 @@ impl CredentialInvocationProcesses {
         configuration: &crate::configuration_reload::ConfigurationReload,
         after: &mut Option<SessionId>,
     ) {
+        if configuration
+            .catalogs()
+            .models
+            .session_title_selection()
+            .is_none()
+        {
+            self.clear_pending_titles();
+            return;
+        }
         let Some(tasks) = &self.title_tasks else {
             return;
         };
@@ -359,8 +375,11 @@ mod tests {
             CredentialInvocationProcesses::new(pool.clone(), nudge).with_session_title_tasks(tasks);
         let configuration = crate::configuration_reload::ConfigurationReload::new(
             pool,
-            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
-                .expect("fixture models"),
+            crate::HubModelConfiguration::parse(&format!(
+                "{}\n[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\n",
+                crate::configuration::tests::CONFIGURATION
+            ))
+            .expect("fixture models"),
             crate::SessionTemplateConfiguration::default(),
             std::path::PathBuf::new(),
             std::path::PathBuf::new(),
@@ -407,6 +426,25 @@ mod tests {
             "the next submission advances past a requeued unavailable session"
         );
         drop(first);
+        let disabled = crate::configuration_reload::ConfigurationReload::new(
+            processes.pool.clone(),
+            crate::HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
+                .expect("fixture models"),
+            crate::SessionTemplateConfiguration::default(),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::new(),
+            None,
+        )
+        .expect("disabled configuration");
+        processes.submit_pending_titles(&disabled, &mut after);
+        assert!(
+            processes
+                .pending_titles
+                .lock()
+                .expect("pending work")
+                .is_empty(),
+            "disabled recovery clears retained work even with a full handoff"
+        );
     }
 
     #[tokio::test]
@@ -650,6 +688,7 @@ mod tests {
         disabled_configuration
             .start_initial_title(pool.clone(), session, turn)
             .await;
+        processes.retain_initial_title(session, turn);
         disabled_configuration.recover().await?;
         assert!(
             processes
@@ -657,7 +696,7 @@ mod tests {
                 .lock()
                 .expect("pending titles")
                 .is_empty(),
-            "disabled title generation neither retains completed turns nor reconstructs retries"
+            "disabled title generation clears retained work instead of reconstructing retries"
         );
         let unavailable_configuration = crate::configuration_reload::ConfigurationReload::new(
             pool.clone(),

@@ -163,10 +163,25 @@ impl SessionTitleRepository {
         else {
             return Ok(String::new());
         };
+        let members = crate::context_compaction::projected_frontier_membership(
+            &mut tx,
+            session,
+            source.frontier,
+        )
+        .await
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let sources = members
+            .iter()
+            .map(|member| member.source_session().into_uuid())
+            .collect::<Vec<_>>();
+        let entries = members
+            .iter()
+            .map(|member| member.entry().into_uuid())
+            .collect::<Vec<_>>();
         let mut rows = sqlx::query(
             "SELECT LEFT(COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value), $2) AS value,
                     substring(imported.content_encoding FROM 1 FOR $3) AS content_encoding
-             FROM context_frontier_member AS member
+             FROM unnest($1::uuid[], $4::uuid[]) WITH ORDINALITY AS member(source_session_id, semantic_entry_id, member_position)
              JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
              LEFT JOIN accepted_input_content_part AS part
                ON part.accepted_input_id = entry.origin_accepted_input_id AND part.part_kind = 'text'
@@ -174,14 +189,13 @@ impl SessionTitleRepository {
                ON imported.imported_conversation_id = entry.imported_conversation_id
               AND imported.imported_transcript_entry_id = entry.imported_transcript_entry_id
               AND imported.content_kind = 1
-             WHERE member.owning_session_id = $1 AND member.context_frontier_id = $4
-               AND (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) IS NOT NULL
+             WHERE (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) IS NOT NULL
                 OR imported.content_encoding IS NOT NULL)
              ORDER BY member.member_position DESC, part.position DESC NULLS LAST
              LIMIT $2")
-            .bind(session.into_uuid()).bind(max_utf8_bytes)
+            .bind(sources).bind(max_utf8_bytes)
             .bind(max_utf8_bytes.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
-            .bind(source.frontier.into_uuid()).fetch(&mut *tx);
+            .bind(entries).fetch(&mut *tx);
         let mut remaining = usize::try_from(max_utf8_bytes).unwrap_or_default();
         let mut parts = Vec::new();
         while remaining > 0 {
