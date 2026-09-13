@@ -5,10 +5,9 @@ This design is not built; it extends
 
 ## Goal
 
-This design adds four capabilities. A turn parks durably while no credential in
+This design adds three capabilities. A turn parks durably while no credential in
 its pool is available and resumes when one is. A runner retry takes over the
-successor placement before continuation, and a restart reconciles retained
-runner work before the generic scan can end it. Activation freezes the session's
+successor placement before continuation. Activation freezes the session's
 instruction eligibility for the turn.
 
 ## Design
@@ -90,12 +89,6 @@ path, or process state supplies the pool-availability wait. The active-phase
 vocabulary and its storage discriminators admit a new phase without
 reinterpreting an existing one.
 
-The recovery-only ordering exists so that generic recovery cannot terminalize
-authority that retained runner evidence resolves. Startup binds the runner
-socket in recovery-only mode and reconciles retained runner execution before the
-generic scan. Ordinary enrollment remains unavailable until the process socket
-is bound and runtime admission begins.
-
 Only the path that prepares the turn's initial model call inside the activation
 transaction records the manifest there. The ordinary path records it after
 activation, and a turn that stops being active first has none. The freeze moves
@@ -119,9 +112,6 @@ than contended, so its wake re-runs the exhaustion decision and a `fail` pool
 terminalizes it through the same failure rows. A stop-turn request against a
 parked turn terminalizes it cancelled through a fresh cancelled successor
 attempt and leaves no wait stored.
-
-A restart with retained runner work resolves every runner-owned attempt before
-the generic scan runs, and the generic scan ends no attempt a runner still owns.
 
 Every activated turn owns exactly one turn-start instruction manifest, written
 in its activation transaction rather than by a post-activation scan.
