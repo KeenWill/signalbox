@@ -151,12 +151,7 @@ class Trial:
         source = args.workspace / "review-judge-eval" / args.output.name / self.key
         source.mkdir(parents=True, exist_ok=True)
         tree = prepare_checkout(args.repository, args.workspace, self.case["head_sha"])
-        default_case = self.case
-        if full_context:
-            default_case = {**self.case, "findings": [
-                {key: value for key, value in finding.items() if key != "source_thread_id"}
-                for finding in self.case["findings"]]}
-        context = default_context(default_case, tree)
+        context = default_context(self.case, tree)
         if args.sibling_full_text_bytes is not None and not full_context:
             context["sibling_context"] = sibling_context(
                 self.case["review_context"], pr=self.case["pr"], head_sha=self.case["head_sha"],
