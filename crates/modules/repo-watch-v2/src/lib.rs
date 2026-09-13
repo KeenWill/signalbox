@@ -1084,23 +1084,15 @@ impl RepoWatchStore {
                  WHERE repository = $1
              )
              SELECT
-                NOT EXISTS (
-                    (SELECT * FROM stored EXCEPT SELECT * FROM candidate)
-                    UNION ALL
-                    (SELECT * FROM candidate EXCEPT SELECT * FROM stored)
-                ),
-                EXISTS (
-                    SELECT 1
-                      FROM stored
-                      LEFT JOIN candidate USING (stream_identity)
-                     WHERE candidate.stream_identity IS NULL
-                ),
-                EXISTS (
-                    SELECT 1
-                      FROM stored
-                      JOIN candidate USING (stream_identity)
-                     WHERE stored.sequence > candidate.sequence
-                )",
+                COALESCE(bool_and(
+                    stored.sequence IS NOT DISTINCT FROM candidate.sequence
+                    AND stored.pull_request_number
+                        IS NOT DISTINCT FROM candidate.pull_request_number
+                ), true),
+                COALESCE(bool_or(candidate.stream_identity IS NULL), false),
+                COALESCE(bool_or(stored.sequence > candidate.sequence), false)
+               FROM stored
+               FULL JOIN candidate USING (stream_identity)",
         )
         .bind(repository.as_str())
         .bind(&stream_identities)
