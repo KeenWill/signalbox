@@ -119,16 +119,17 @@ impl CredentialInvocationProcesses {
         Ok(())
     }
 
-    pub(crate) fn retain_initial_title(&self, session: SessionId, turn: TurnId) {
+    pub(crate) fn retain_initial_title(&self, session: SessionId, turn: TurnId) -> bool {
         let mut pending = self
             .pending_titles
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if pending.len() < TITLE_RECOVERY_PAGE_SIZE as usize {
-            pending.entry(session).or_insert(turn);
-        } else if !pending.contains_key(&session) {
+        if pending.len() >= TITLE_RECOVERY_PAGE_SIZE as usize && !pending.contains_key(&session) {
             self.title_scan_requested.store(true, Ordering::Release);
+            return false;
         }
+        pending.entry(session).or_insert(turn);
+        true
     }
 
     pub(crate) fn clear_pending_titles(&self) {
@@ -168,13 +169,15 @@ impl CredentialInvocationProcesses {
                 .inspect_err(|_| {
                     self.title_scan_requested.store(true, Ordering::Release);
                 })?;
-        *after = if rows.len() < available as usize {
-            None
-        } else {
-            rows.last().map(|(session, _)| *session)
-        };
+        let exhausted = rows.len() < available as usize;
         for (session, turn) in rows {
-            self.retain_initial_title(session, turn);
+            if !self.retain_initial_title(session, turn) {
+                return Ok(());
+            }
+            *after = Some(session);
+        }
+        if exhausted {
+            *after = None;
         }
         Ok(())
     }
@@ -674,7 +677,7 @@ mod tests {
         let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
             PostgresEligibilitySweep::new(pool.clone()),
         );
-        let processes = CredentialInvocationProcesses::new(pool, nudge);
+        let processes = CredentialInvocationProcesses::new(pool.clone(), nudge.clone());
         processes.restore_pending_titles().await?;
         let expected = completed
             .iter()
@@ -709,6 +712,55 @@ mod tests {
             *processes.pending_titles.lock().expect("remaining page"),
             BTreeMap::from([(session, turn)])
         );
+        for occupied in [63, 64] {
+            let scan_pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(pool.connect_options().as_ref().clone())
+                .await?;
+            let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&scan_pool)
+                .await?;
+            let racing = CredentialInvocationProcesses::new(scan_pool.clone(), nudge.clone());
+            let mut held = pool.begin().await?;
+            sqlx::query("LOCK TABLE turn_lifecycle IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *held)
+                .await?;
+            let scan = racing.clone();
+            let refill = tokio::spawn(async move { scan.restore_pending_titles().await });
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')"
+                    ).bind(backend).fetch_one(&pool).await?;
+                    if waiting { return Ok::<(), sqlx::Error>(()); }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await??;
+            for (&session, &turn) in completed.iter().rev().take(occupied) {
+                racing.retain_initial_title(session, turn);
+            }
+            held.rollback().await?;
+            refill.await??;
+            assert_eq!(
+                racing.pending_titles.lock().expect("filled window").len(),
+                64
+            );
+            racing.clear_pending_titles();
+            racing.refill_pending_titles().await?;
+            let retained_before_full = 64 - occupied;
+            let expected = completed
+                .iter()
+                .skip(retained_before_full)
+                .take(64)
+                .map(|(session, turn)| (*session, *turn))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                *racing.pending_titles.lock().expect("resumed scan"),
+                expected,
+                "the scan resumes at the first row rejected while live work filled the window"
+            );
+            scan_pool.close().await;
+        }
         Ok(())
     }
 
