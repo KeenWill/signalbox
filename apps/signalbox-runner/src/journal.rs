@@ -136,9 +136,10 @@ mod tests {
         assert!(matches!(
             error,
             RunnerStateError::Io {
+                operation: StateOperation::Open,
                 resource: StateResource::Journal,
-                ..
-            }
+                source,
+            } if source.kind() == std::io::ErrorKind::NotFound
         ));
         assert!(!path.join(DocumentKind::Journal.file_name()).exists());
     }
