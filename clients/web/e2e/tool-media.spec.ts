@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { imageDescriptor } from '../src/features/artifacts/artifactScenario'
-import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
+import {
+  decodeWebBlobDescriptor,
+  decodeWebSessionTimelineDetailPage,
+  type WebSessionTimelineWindow,
+} from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
 import { openAttachmentConversation } from './attachment-api-fixture'
 import { expect, test } from './fontTest'
+import { detailExcerpt, detailPage, toolResultItem } from './session-detail-fixture'
 
 const image = decodeWebBlobDescriptor({
   ...imageDescriptor,
@@ -136,3 +142,99 @@ for (const [mediaType, label, source] of [
     await expect(pane).not.toContainText('sha256:')
   })
 }
+
+test('stops automatic summary scans at a media-returning tool window', async ({ page }) => {
+  const reads: string[] = []
+  const batch = toolResultItem()
+  if (batch.body.type !== 'tool_batch') throw new Error('Tool fixture required')
+  const body = batch.body
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.startsWith('/api/blobs/') && url.pathname.endsWith('/descriptor'))
+      return route.fulfill({ json: image })
+    if (url.pathname.includes('/content/'))
+      return route.fulfill({ body: preview, contentType: 'image/png' })
+    const payload = transcriptFixture(url)
+    if (url.pathname.endsWith('/timeline')) {
+      if (url.searchParams.get('max_items') === '8')
+        reads.push(url.searchParams.get('anchor') ?? '')
+      const window = payload as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind = Number(item.address.event_sequence) > 99992 ? batch.kind : item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      Number(url.searchParams.get('first')) > 99992
+    ) {
+      const item = {
+        ...batch,
+        projected_body_bytes: 130,
+        address: { event_sequence: url.searchParams.get('first') ?? '' },
+        body: {
+          ...body,
+          tools: body.tools.map((tool) => ({
+            ...tool,
+            arguments: detailExcerpt('{}'),
+            evidence:
+              tool.evidence.type === 'physical_attempt'
+                ? {
+                    ...tool.evidence,
+                    result_present: true,
+                    result: null,
+                    result_media_reference: {
+                      digest: image.digest,
+                      length_bytes: image.byte_length,
+                      media_type: image.declared_media_type,
+                      presentation_kind: 'image' as const,
+                    },
+                  }
+                : tool.evidence,
+          })),
+        },
+      }
+      return route.fulfill({
+        json: decodeWebSessionTimelineDetailPage({
+          ...detailPage([item], {
+            type: 'more_body',
+            body: {
+              address: item.address,
+              field: 'tool_result',
+              member_index: 0,
+              offset_bytes: '0',
+            },
+          }),
+          session_id: transcriptSessionId,
+        }),
+      })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  await expect(page.getByRole('list', { name: 'Attachments' })).toBeVisible()
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  )
+  expect(reads).toEqual(['latest'])
+  await expect(page.getByRole('list', { name: 'Attachments' })).toBeVisible()
+})

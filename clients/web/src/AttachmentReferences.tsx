@@ -3,9 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from 'react-redux'
 import {
   ArtifactInspector,
+  type ArtifactRequest,
   artifactResolutionId,
-  attachmentTypeLabel,
-  emptyArtifactInspectorState,
   inspectedArtifact,
   nextResolutionSequence,
 } from './ArtifactInspector'
@@ -18,6 +17,7 @@ import type {
   WebSessionTimelineDetailBody,
   WebTimelineBlobReference,
 } from './generated/web-contract.mjs'
+import { attachmentTypeLabel } from './labels'
 import { actions, type store as appStore } from './state'
 import './features/artifacts/artifacts.css'
 
@@ -38,6 +38,7 @@ function AttachmentReference({
   const chip = useRef<HTMLButtonElement>(null)
   const opener = useRef<HTMLButtonElement | null>(null)
   const [visible, setVisible] = useState(false)
+  const [focused, setFocused] = useState(false)
   const [reservedHeight, setReservedHeight] = useState(0)
   useEffect(() => {
     const element = container.current
@@ -52,7 +53,7 @@ function AttachmentReference({
   }, [])
   const store = useAttachmentStore()
   const [sequence] = useState(nextResolutionSequence)
-  const [state, setState] = useState(emptyArtifactInspectorState)
+  const [request, setRequest] = useState<ArtifactRequest | null>(null)
   const input = useMemo(
     () => ({
       digest: attachment.blob_id,
@@ -60,8 +61,9 @@ function AttachmentReference({
     }),
     [attachment.blob_id, attachment.media_type],
   )
+  const active = visible || focused || request !== null
   const descriptor = useArtifactDescriptor(
-    available && visible ? input : null,
+    available && active ? input : null,
     attachment.length_bytes,
   )
   const artifact = useMemo(
@@ -69,7 +71,7 @@ function AttachmentReference({
     [descriptor.data, sequence, presentationKind],
   )
   const inlineId = artifact?.id
-  const detailId = state.request ? artifactResolutionId(state.request) : undefined
+  const detailId = request ? artifactResolutionId(request) : undefined
   useEffect(() => {
     if (!inlineId) return
     return () => {
@@ -96,24 +98,22 @@ function AttachmentReference({
         ? [artifact.id]
         : [],
     focusTimeline: () => {},
-    openArtifactInspector: () =>
-      setState({
-        digest: input.digest,
-        mediaType: input.mediaType,
-        displayFilename: '',
-        request: { ...input, sequence: nextResolutionSequence() },
-      }),
+    openArtifactInspector: () => setRequest({ ...input, sequence: nextResolutionSequence() }),
   }
-  const close = () => setState(emptyArtifactInspectorState)
+  const close = () => setRequest(null)
   return (
     <Dialog.Root
-      open={state.request !== null}
+      open={request !== null}
       onOpenChange={(open) => {
         if (!open) close()
       }}
     >
       <div
         ref={container}
+        onFocusCapture={() => setFocused(true)}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false)
+        }}
         className="inline-attachment"
         style={{ minHeight: artifact ? undefined : reservedHeight }}
       >
@@ -148,7 +148,7 @@ function AttachmentReference({
             }}
           />
         )}
-        {available && visible && descriptor.isPending && (
+        {available && active && descriptor.isPending && (
           <small role="status">Loading attachment…</small>
         )}
         {descriptor.isError && (
@@ -212,8 +212,7 @@ function AttachmentReference({
             expectedByteLength={attachment.length_bytes}
             available={available}
             commandContext={context}
-            state={state}
-            onStateChange={setState}
+            request={request}
             onClose={close}
           />
         </Dialog.Content>

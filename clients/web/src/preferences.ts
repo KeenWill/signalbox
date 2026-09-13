@@ -6,7 +6,7 @@ export interface BrowserPreferences {
   density: DensityMode
   detail: DetailMode
   theme: ThemeMode
-  paneSizes: { navigation: number; inspector: number }
+  paneSizes: { navigation: number }
   lastLogicalPositions: Record<string, string>
 }
 
@@ -16,7 +16,7 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   density: 'compact',
   detail: 'results',
   theme: 'dark',
-  paneSizes: { navigation: 218, inspector: 252 },
+  paneSizes: { navigation: 218 },
   lastLogicalPositions: {},
 }
 
@@ -115,7 +115,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
     throw new TypeError('preferences.paneSizes must be an object')
   }
   const panes = candidate.paneSizes as Record<string, unknown>
-  if (!exactKeys(panes, ['navigation', 'inspector'])) {
+  if (!exactKeys(panes, ['navigation'])) {
     throw new TypeError('preferences.paneSizes must match the current exact schema')
   }
   if (typeof candidate.navigationCollapsed !== 'boolean') {
@@ -129,7 +129,6 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
     theme: oneOf(candidate.theme, ['light', 'dark'], 'preferences.theme'),
     paneSizes: {
       navigation: boundedNumber(panes.navigation, 160, 360, 'preferences.paneSizes.navigation'),
-      inspector: boundedNumber(panes.inspector, 200, 480, 'preferences.paneSizes.inspector'),
     },
     lastLogicalPositions: boundedRecord(
       candidate.lastLogicalPositions,
