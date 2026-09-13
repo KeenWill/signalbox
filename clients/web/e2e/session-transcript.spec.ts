@@ -1017,9 +1017,10 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
   [128, 1024, 7, false],
   [9, 65536, 9, true],
   [9, 65536, 9, 'gesture'],
+  [9, 65536, 9, 'retry-gesture'],
   [128, 1024, 7, true],
 ] as const) {
-  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${retry === 'gesture' ? ' with a fresh gesture after failure' : retry ? ' across failed retries' : ''}`, async ({
+  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${typeof retry === 'string' ? ` with a fresh ${retry} after failure` : retry ? ' across failed retries' : ''}`, async ({
     page,
   }) => {
     const reads: URL[] = []
@@ -1102,9 +1103,15 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
     })
     await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
     const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
-    if (retry === 'gesture') {
+    if (typeof retry === 'string') {
       await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
       expect(reads).toHaveLength(expectedReads - 1)
+      if (retry === 'retry-gesture') {
+        await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
+        await expect.poll(() => failed.length).toBe(2)
+        await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+        expect(failed[1]).toBe(failed[0])
+      }
       const beforeGesture = headers.length
       const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
       await transcript.hover()
@@ -1113,7 +1120,7 @@ for (const [itemLimit, byteLimit, expectedReads, retry] of [
       await expect(surface).toHaveAttribute('aria-busy', 'false')
       await expect(surface.getByRole('alert')).toHaveCount(0)
       expect(headers[beforeGesture]?.searchParams.get('max_items')).toBe('8')
-      expect(failed).toHaveLength(1)
+      expect(failed).toHaveLength(retry === 'gesture' ? 1 : 2)
       return
     }
     if (retry) {
