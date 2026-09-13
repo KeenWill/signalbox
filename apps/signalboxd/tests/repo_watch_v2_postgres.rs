@@ -299,6 +299,89 @@ async fn module_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn a_large_unchanged_frontier_finishes_with_a_generic_query_plan()
+-> Result<(), Box<dyn Error>> {
+    let (_database, _core_pool, database_url) = postgres().await?;
+    let options = local_test_connection_options(&database_url)?.username("mod_repo_watch");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SET search_path = mod_repo_watch, pg_catalog")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("SET plan_cache_mode = force_generic_plan")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("owner/repository".into())?;
+    let default_branch = BranchName::try_new("main".into())?;
+    let default_head = CommitSha::try_new("1111111111111111111111111111111111111111".into())?;
+    let observed_at = OffsetDateTime::UNIX_EPOCH;
+    let observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+    );
+    let projection = RepositoryProjection {
+        repository: RepositoryState {
+            repository: &repository,
+            default_branch: &default_branch,
+            default_head: &default_head,
+            observed_at,
+        },
+        pull_requests: Vec::new(),
+        comparison_baseline: &observation,
+        merged_baselines: &[],
+    };
+    // Many retained streams exercise the generic plan's cardinality estimate.
+    let frontier = (0_u64..32_768)
+        .map(|index| {
+            RepoWatchEventIdentityFrontierEntryV1::new(
+                Sha256::digest(index.to_be_bytes()).into(),
+                NonZeroU64::MIN,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        store
+            .commit_frontier_candidate(
+                &projection,
+                0,
+                &frontier,
+                &[],
+                EventProducer::Poll,
+                observed_at,
+            )
+            .await?,
+        FrontierEventAdmission::Committed {
+            generation: 1,
+            events: Box::new([])
+        }
+    );
+    sqlx::query("ANALYZE frontier").execute(&pool).await?;
+    let admission = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.commit_frontier_candidate(
+            &projection,
+            1,
+            &frontier,
+            &[],
+            EventProducer::Poll,
+            observed_at,
+        ),
+    )
+    .await??;
+    assert_eq!(admission, FrontierEventAdmission::Unchanged);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn Error>> {
     let (container, core_pool, database_url) = postgres().await?;
     migrate(&core_pool).await?;
