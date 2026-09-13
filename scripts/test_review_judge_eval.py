@@ -102,6 +102,20 @@ class ScratchCheckoutTests(unittest.TestCase):
         self.assertNotEqual(first.parent, second.parent)
         self.assertEqual(prepare_workspace(self.workspace, "first-session", tree, self.head, evidence, "First context"), first)
 
+    def test_changed_agentic_replay_preserves_original_patch_and_context(self):
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        patch = self.repository.parent / "change.patch"
+        patch.write_text("Original diff")
+        head = prepare_workspace(self.workspace, "session", tree, self.head, patch, "Original context")
+        for changed_patch, changed_context in (("Original diff", "Changed context"),
+                                                ("Changed diff", "Original context")):
+            with self.subTest(patch=changed_patch, context=changed_context):
+                patch.write_text(changed_patch)
+                with self.assertRaisesRegex(ValueError, "workspace evidence differs"):
+                    prepare_workspace(self.workspace, "session", tree, self.head, patch, changed_context)
+                self.assertEqual((head.parent / "change.patch").read_text(), "Original diff")
+                self.assertEqual((head.parent / "context.txt").read_text(), "Original context")
+
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
                                output=self.repository.parent / "results",

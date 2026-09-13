@@ -3,7 +3,6 @@
 import base64
 import hashlib
 import json
-import shutil
 import socket
 import subprocess
 
@@ -26,8 +25,14 @@ def prepare_workspace(workspace, session_id, checkout, head_sha, patch, context)
     if git("-C", head, "rev-parse", "HEAD") != head_sha:
         raise ValueError("agentic workspace differs from the reviewed head")
     git("-C", head, "diff", "--exit-code", "HEAD", "--")
-    shutil.copyfile(patch, root / "change.patch")
-    (root / "context.txt").write_text(context)
+    for path, content in ((root / "change.patch", patch.read_bytes()),
+                          (root / "context.txt", context.encode())):
+        try:
+            with path.open("xb") as output:
+                output.write(content)
+        except FileExistsError:
+            if path.read_bytes() != content:
+                raise ValueError("agentic workspace evidence differs: " + path.name)
     return head
 
 
