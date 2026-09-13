@@ -145,7 +145,16 @@ template through `CreateSession`, with an open start gate and unmonitored
 ownership. It accepts a creation command ID and an optional first text input
 with its own command ID; creation commits before input submission. A 201
 response returns the session ID and current catalog summary after both requested
-commands succeed. Retries retain both identities and payloads.
+commands succeed. Retries retain both identities and payloads. The browser shell
+opens a template picker from New session in navigation and navigates to the
+created workspace. Session-picker catalog responses are bounded to 65,536 bytes
+before JSON parsing and 100 entries before template decoding and rendering;
+exceeding either limit surfaces the picker’s load error and retry action.
+Conversation headers omit this action. Unconfirmed creation requests retain
+their identity and template across reloads. The browser bounds creation success
+and error response bodies to 65,536 bytes before decoding JSON. Creation
+requests have a 30-second deadline covering response body consumption;
+expiration leaves the retained request available for retry.
 
 The web timeline descriptor includes the current catalog title summary and last
 activity category and timestamp, including for archived sessions. Both members
