@@ -374,8 +374,9 @@ Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,
 including its absolute working directory. The daemon acknowledges a durably
 retained receipt even while installation waits. Provisioning retains a
-repository key and checkout revision together or neither; a mismatched pair is
-rejected before staging. Installation consumes that receipt, promotes the
+repository key and checkout recovery facts together or neither; mismatched
+repository and recovery facts are rejected before staging. Installation consumes
+that receipt, promotes the
 pending candidate, installs the placement and grant, appends the reference-only
 placement boundary, and records the terminal result atomically after any
 authorized in-flight call reaches its observation boundary and, for a tool
