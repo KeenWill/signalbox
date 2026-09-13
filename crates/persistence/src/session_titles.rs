@@ -33,7 +33,7 @@ impl SessionTitleRepository {
         Self { pool }
     }
 
-    /// Claims an initial call once, for a completed turn and an unset title.
+    /// Claims an initial call for a completed turn and an unset, unclaimed session.
     /// On-demand calls require only an existing session.
     pub async fn prepare(
         &self,
@@ -53,7 +53,7 @@ impl SessionTitleRepository {
         if let Some(turn) = call.initial_for_turn {
             let eligible: bool = sqlx::query_scalar(
                 "SELECT NOT EXISTS (SELECT 1 FROM session_metadata WHERE session_id = $1 AND title IS NOT NULL)
-                 AND NOT EXISTS (SELECT 1 FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn IS NOT NULL)
+                 AND NOT EXISTS (SELECT 1 FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn IS NOT NULL AND NOT abandoned)
                  AND EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2
                      AND state_kind = 'terminal' AND terminal_disposition_kind = 'completed')")
                 .bind(call.session.into_uuid()).bind(turn.into_uuid()).fetch_one(&mut *tx).await?;
@@ -92,11 +92,29 @@ impl SessionTitleRepository {
         Ok(true)
     }
 
-    /// Closes abandoned title calls at daemon startup without retrying generation.
+    /// Closes abandoned title calls at startup and releases their initial claims.
     /// Registered processes retain capacity until their existing observer confirms cleanup.
     pub async fn abandon_incomplete(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE session_title_model_call SET state_kind = 'terminal', terminal_at = statement_timestamp()
+        sqlx::query("UPDATE session_title_model_call SET state_kind = 'terminal', terminal_at = statement_timestamp(), abandoned = true
             WHERE state_kind IN ('prepared', 'in_flight')").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Abandons an unsettled call, releasing its initial claim and unregistered capacity.
+    /// Already terminal calls retain their immutable completion and claim.
+    pub async fn abandon(&self, call: ModelCallId) -> Result<(), sqlx::Error> {
+        let affected = sqlx::query(
+            "UPDATE session_title_model_call
+            SET state_kind = 'terminal', terminal_at = statement_timestamp(), abandoned = true
+            WHERE model_call_id = $1 AND state_kind IN ('prepared', 'in_flight')",
+        )
+        .bind(call.into_uuid())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
         Ok(())
     }
 
@@ -181,6 +199,7 @@ impl SessionTitleRepository {
     /// Validates a generated title against preserved metadata before recording success.
     /// Initial-title installation and terminal usage commit in the same transaction.
     /// An invalid combined snapshot records failed generation and returns no title.
+    /// A repeated settlement returns the immutable terminal title.
     pub async fn finish_generated(
         &self,
         command_id: DurableCommandId,
@@ -189,14 +208,17 @@ impl SessionTitleRepository {
         usage: UsageTokenAxes,
     ) -> Result<Option<String>, SessionMetadataRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        if let Some(value) = title.as_ref() {
-            let row = sqlx::query(
-                "SELECT session_id, initial_for_turn IS NOT NULL AS initial
+        let row = sqlx::query(
+            "SELECT session_id, initial_for_turn IS NOT NULL AS initial, state_kind, title
                 FROM session_title_model_call WHERE model_call_id = $1",
-            )
-            .bind(call.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
+        )
+        .bind(call.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if row.try_get::<String, _>("state_kind")? == "terminal" {
+            return Ok(row.try_get("title")?);
+        }
+        if let Some(value) = title.as_ref() {
             let session = SessionId::from_uuid(row.try_get("session_id")?);
             let initial: bool = row.try_get("initial")?;
             match crate::session_metadata::accept_generated_title(
