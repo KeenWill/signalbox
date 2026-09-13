@@ -273,9 +273,19 @@ function TranscriptWindow({
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],
   )
+  const windowStarts = useMemo(
+    () =>
+      new Set(
+        pages?.flatMap((page) => {
+          const first = page.details.flatMap((detail) => detail.items)[0]
+          return first ? [first.address.event_sequence] : []
+        }) ?? [],
+      ),
+    [pages],
+  )
   const turns = useMemo(
     () =>
-      groupTranscriptTurns(entries).filter(
+      groupTranscriptTurns(entries, windowStarts).filter(
         (turn) =>
           detail === 'full' ||
           turnModes[turn.turnId ?? turn.id] === 'full' ||
@@ -286,7 +296,7 @@ function TranscriptWindow({
           turn.warnings.length > 0 ||
           turn.outcome,
       ),
-    [entries, detail, turnModes, eventSequence],
+    [entries, windowStarts, detail, turnModes, eventSequence],
   )
   const pending = useMemo(
     () =>
@@ -360,7 +370,9 @@ function TranscriptWindow({
           )
         : current,
     )
-    const loadedSegments = new Set(groupTranscriptTurns(entries).map((turn) => turn.id))
+    const loadedSegments = new Set(
+      groupTranscriptTurns(entries, windowStarts).map((turn) => turn.id),
+    )
     setOpenTools((current) =>
       Object.keys(current).some((id) => !loadedSegments.has(id))
         ? Object.fromEntries(Object.entries(current).filter(([id]) => loadedSegments.has(id)))
@@ -374,7 +386,7 @@ function TranscriptWindow({
           )
         : current,
     )
-  }, [entries, pending])
+  }, [entries, pending, windowStarts])
   const previousDetail = useRef(detail)
   useEffect(() => {
     if (previousDetail.current === detail) return
