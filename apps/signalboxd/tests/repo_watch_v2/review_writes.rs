@@ -519,3 +519,33 @@ async fn identity_recovery_drains_the_triggering_webhook_wake() -> Result<(), Bo
     core.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn a_new_polling_account_replaces_the_ready_identity_without_reload()
+-> Result<(), Box<dyn Error>> {
+    let (_container, core, url) = postgres().await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("rotated/project".to_owned())?;
+    assert!(identity_attempt(&store, &repository, Some("first-account")).await);
+    assert!(identity_attempt(&store, &repository, Some("second-account")).await);
+    let actor: (String, bool) =
+        sqlx::query_as("SELECT login,ready FROM observer_actor WHERE repository=$1")
+            .bind(repository.as_str())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(actor, ("second-account".to_owned(), true));
+    assert!(!identity_attempt(&store, &repository, None).await);
+    let ready: bool = sqlx::query_scalar("SELECT ready FROM observer_actor WHERE repository=$1")
+        .bind(repository.as_str())
+        .fetch_one(&pool)
+        .await?;
+    assert!(
+        !ready,
+        "a failed identity lookup cannot use the preceding account"
+    );
+    pool.close().await;
+    core.close().await;
+    Ok(())
+}

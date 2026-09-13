@@ -35,19 +35,6 @@ impl RepoWatchStore {
         .await?)
     }
 
-    pub(crate) async fn observer_identity_ready(
-        &self,
-        repository: &RepositorySlug,
-    ) -> Result<bool, StoreError> {
-        Ok(
-            sqlx::query_scalar("SELECT ready FROM observer_actor WHERE repository=$1")
-                .bind(repository.as_str())
-                .fetch_optional(&self.pool)
-                .await?
-                .unwrap_or(false),
-        )
-    }
-
     pub(crate) async fn record_observer_identity(
         &self,
         repository: &RepositorySlug,
