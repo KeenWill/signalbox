@@ -1,3 +1,8 @@
+import type {
+  WebSessionTimelineDetailBody,
+  WebTimelineBodyField,
+  WebTimelineTextExcerpt,
+} from '../src/generated/web-contract.mjs'
 import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
 import { expect, test } from './fontTest'
 import { detailItems, detailPage, resultCursor, toolResultItem } from './session-detail-fixture'
@@ -991,3 +996,159 @@ test('follows a taller live window that replaces every retained row', async ({
   await page.screenshot({ path: testInfo.outputPath('replacement-tail.png') })
   expect(problems).toEqual([])
 })
+
+const hiddenDetailCases: {
+  kind: string
+  field: WebTimelineBodyField
+  body: (excerpt: WebTimelineTextExcerpt) => WebSessionTimelineDetailBody
+}[] = [
+  {
+    kind: 'goal_changed',
+    field: 'goal_text',
+    body: (text) => ({
+      type: 'goal_event',
+      session_id: transcriptSessionId,
+      event: { type: 'blocked', generation: '1', reason: 'user_input_required', text },
+    }),
+  },
+  {
+    kind: 'context_compacted',
+    field: 'compaction_summary',
+    body: (summary) => ({
+      type: 'context_compaction',
+      compaction_id: transcriptSessionId,
+      model_call_id: transcriptSessionId,
+      through_position: '1',
+      summary_entry_id: transcriptSessionId,
+      result_frontier_id: transcriptSessionId,
+      summary,
+    }),
+  },
+  {
+    kind: 'delegation_update',
+    field: 'delegation_content',
+    body: (content) => ({
+      type: 'delegation',
+      detail: {
+        type: 'session_message',
+        relationship_id: transcriptSessionId,
+        message_id: transcriptSessionId,
+        sender_session_id: '00000000-0000-0000-0000-000000000992',
+        recipient_session_id: transcriptSessionId,
+        delivery_sequence: '1',
+        message_ordinal: '1',
+        content,
+      },
+    }),
+  },
+  {
+    kind: 'tool_approval_decided',
+    field: 'approval_rationale',
+    body: (rationale) => ({
+      type: 'tool_approval_decision',
+      turn_id: transcriptSessionId,
+      request_id: transcriptSessionId,
+      tool_name: 'exec_command',
+      decision: 'approve',
+      actor: { type: 'user', command_id: transcriptSessionId },
+      approval_judge_escalated: false,
+      rationale,
+    }),
+  },
+]
+for (const hidden of hiddenDetailCases) {
+  test(`retains a readable continuation for hidden ${hidden.kind} details`, async ({
+    page,
+  }, testInfo) => {
+    const reads: (string | null)[] = []
+    const problems: string[] = []
+    page.on('pageerror', (error) => problems.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') problems.push(message.text())
+    })
+    const suffix = 'Continued metadata text'
+    const cursor = {
+      address: { event_sequence: '2' },
+      field: hidden.field,
+      member_index: 0,
+      offset_bytes: '6',
+    }
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url, 2)
+      if (url.pathname === '/api/bootstrap') {
+        const bootstrap =
+          payload as typeof import('../src/product.fixture').webContractBootstrapFixture
+        return route.fulfill({
+          json: { ...bootstrap, limits: { ...bootstrap.limits, max_timeline_detail_items: 1 } },
+        })
+      }
+      if (url.pathname.endsWith('/timeline')) {
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        const items = window.items.map((item) =>
+          item.address.event_sequence === '2'
+            ? { ...item, kind: hidden.kind, projected_structured_bytes: 64 + hidden.kind.length }
+            : item,
+        )
+        return route.fulfill({
+          json: {
+            ...window,
+            items,
+            projected_structured_bytes: items.reduce(
+              (sum, item) => sum + item.projected_structured_bytes,
+              0,
+            ),
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline-detail')) {
+        reads.push(url.searchParams.get('cursor_field'))
+        if (url.searchParams.get('first') === '2') {
+          const continued = url.searchParams.has('cursor_field')
+          const text = continued ? suffix : 'Start '
+          return route.fulfill({
+            json: {
+              session_id: transcriptSessionId,
+              projected_body_bytes: 128 + text.length,
+              continuation: continued ? null : { type: 'more_body', body: cursor },
+              items: [
+                {
+                  address: cursor.address,
+                  kind: hidden.kind,
+                  projected_body_bytes: 128 + text.length,
+                  body: hidden.body({
+                    text,
+                    offset_bytes: continued ? '6' : '0',
+                    total_bytes: String(6 + suffix.length),
+                    continuation: continued ? null : cursor,
+                  }),
+                },
+              ],
+            },
+          })
+        }
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const row = transcript.locator('[data-event-sequence="2"]')
+    await expect(row.getByRole('button', { name: 'Read more', exact: true })).toBeVisible()
+    await page.waitForTimeout(200)
+    expect(reads).toEqual([null])
+    await expect(transcript).toHaveAttribute('data-total-loaded', '1')
+    await row.getByRole('button', { name: 'Read more', exact: true }).click()
+    await expect(row.getByRole('region', { name: 'Details', exact: true })).toContainText(suffix)
+    expect(reads).toEqual([null, hidden.field])
+    await expect(row.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('hidden-detail-continuation.png') })
+    expect(problems).toEqual([])
+  })
+}

@@ -565,12 +565,14 @@ edge events share one in-flight page read. Programmatic anchor and measurement
 adjustments do not start page reads. Prepending rows does not trigger selection
 scrolling when the selected row identity stays unchanged; a changed selection
 scrolls into view once its row is available. An empty detail page preserves its
-unreturned-item continuation. Scrolling again starts a fresh bounded scan using
-the timeline continuation. The conversation shows user and assistant text and
-attachment references, tool arguments and output, and unsuccessful turn outcomes
-in event order. Repeated terminal outcomes for the same turn and cause appear
-once. Bookkeeping is hidden until Events is selected. Raw detail pages remain
-available to validate body continuations.
+unreturned-item continuation. Hidden non-tool details with a body continuation
+retain an addressable reading row; opening it shows the requested excerpt.
+Scrolling again starts a fresh bounded scan using the timeline continuation. The
+conversation shows user and assistant text and attachment references, tool
+arguments and output, and unsuccessful turn outcomes in event order. Repeated
+terminal outcomes for the same turn and cause appear once. Bookkeeping is hidden
+until Events is selected. Raw detail pages remain available to validate body
+continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

@@ -19,7 +19,7 @@ import type {
 import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
-import type { SessionWindowAnchor } from './session-timeline/model'
+import { detailExcerptAt, type SessionWindowAnchor } from './session-timeline/model'
 import {
   TRANSCRIPT_RETAINED_WINDOWS,
   TRANSCRIPT_WINDOW_BYTES,
@@ -215,12 +215,11 @@ function TranscriptWindow({
       entries.filter(
         (item, index) =>
           hasConversationContent(item, entries.slice(0, index)) ||
-          (item.body.type === 'tool_batch' &&
-            pages?.some((page) =>
-              page.details.some(
-                (detail) => detail.items.at(-1) === item && detail.continuation !== null,
-              ),
-            )),
+          pages?.some((page) =>
+            page.details.some(
+              (detail) => detail.items.at(-1) === item && detail.continuation !== null,
+            ),
+          ),
       ),
     [entries, pages],
   )
@@ -464,11 +463,21 @@ function ContinuedEvent({
           </button>
         </p>
       )}
-      {detail.data?.items.map((item) => (
-        <div key={conversationEntryKey(item)}>
-          <BodyText body={item.body} />
-        </div>
-      ))}
+      {detail.data?.items.map((item) => {
+        const excerpt =
+          cursor?.type === 'more_body' && !hasConversationContent(item)
+            ? detailExcerptAt(item.body, cursor.body)
+            : null
+        return (
+          <div key={conversationEntryKey(item)}>
+            {excerpt ? (
+              <ToolText label="Details" excerpt={excerpt} />
+            ) : (
+              <BodyText body={item.body} />
+            )}
+          </div>
+        )
+      })}
       {detail.data?.continuation && (
         <button
           type="button"
