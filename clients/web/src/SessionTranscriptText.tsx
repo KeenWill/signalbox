@@ -13,6 +13,7 @@ import type {
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
+import { GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey } from './session-timeline/conversation'
 import type { SessionWindowAnchor } from './session-timeline/model'
 import {
@@ -32,6 +33,13 @@ import {
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import { type DetailMode, store, useAppDispatch, useAppSelector } from './state'
 import { VirtualTranscript } from './Transcript'
+
+type EventContinuationState = {
+  cursor: WebTimelineDetailContinuation | null
+  earlier: { key: string; item: WebSessionTimelineDetail }[]
+  previous?: WebSessionTimelineDetailPage
+  current?: { key: string; page: WebSessionTimelineDetailPage }
+}
 
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
@@ -68,6 +76,9 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
             </div>
           )
         })}
+        {body.goal_events.map((event) => (
+          <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
+        ))}
       </>
     )
   if (body.type === 'reconciliation')
@@ -171,6 +182,9 @@ function TranscriptWindow({
   const detail = useAppSelector((state) => state.app.detail)
   const dispatch = useAppDispatch()
   const [turnModes, setTurnModes] = useState<Record<string, DetailMode>>({})
+  const [eventContinuations, setEventContinuations] = useState<
+    Record<string, EventContinuationState>
+  >({})
   const surface = useRef<HTMLElement>(null)
   const commandContext: CommandContext = {
     dispatch,
@@ -293,7 +307,19 @@ function TranscriptWindow({
         ? Object.fromEntries(Object.entries(current).filter(([id]) => loaded.has(id)))
         : current,
     )
+    const loadedEvents = new Set(entries.map((entry) => entry.address.event_sequence))
+    setEventContinuations((current) =>
+      Object.keys(current).some((sequence) => !loadedEvents.has(sequence))
+        ? Object.fromEntries(
+            Object.entries(current).filter(([sequence]) => loadedEvents.has(sequence)),
+          )
+        : current,
+    )
   }, [entries])
+  useEffect(() => {
+    setTurnModes({})
+    setEventContinuations({})
+  }, [detail])
   useEffect(
     () =>
       registerUnwind?.(() => {
@@ -303,7 +329,8 @@ function TranscriptWindow({
         const turn = turns.find((turn) => turn.id === id)
         if (
           !turn ||
-          (turnModes[turn.turnId ?? turn.id] !== 'full' &&
+          (detail !== 'full' &&
+            turnModes[turn.turnId ?? turn.id] !== 'full' &&
             requestedTurn !== turn.turnId &&
             !turn.events.some((event) => event.address.event_sequence === eventSequence))
         )
@@ -317,6 +344,14 @@ function TranscriptWindow({
           ...current,
           [turn.turnId ?? turn.id]: detail === 'full' ? 'results' : detail,
         }))
+        const sequences = new Set(turn.events.map((event) => event.address.event_sequence))
+        setEventContinuations((current) =>
+          Object.keys(current).some((sequence) => sequences.has(sequence))
+            ? Object.fromEntries(
+                Object.entries(current).filter(([sequence]) => !sequences.has(sequence)),
+              )
+            : current,
+        )
         requestAnimationFrame(() =>
           row.querySelector<HTMLButtonElement>('.session-turn-heading button')?.focus(),
         )
@@ -414,10 +449,7 @@ function TranscriptWindow({
               type="radio"
               name={`transcript-level-${sessionId}`}
               checked={detail === mode}
-              onChange={() => {
-                setTurnModes({})
-                invokeCommand(`detail.${mode}`, commandContext)
-              }}
+              onChange={() => invokeCommand(`detail.${mode}`, commandContext)}
             />
             {label}
           </label>
@@ -521,6 +553,10 @@ function TranscriptWindow({
                 sessionId={sessionId}
                 limits={limits}
                 target={eventSequence}
+                eventContinuations={eventContinuations}
+                onEventContinuation={(sequence, state) =>
+                  setEventContinuations((current) => ({ ...current, [sequence]: state }))
+                }
                 onExpand={(mode) => {
                   const row =
                     surface.current?.querySelectorAll<HTMLElement>('[data-transcript-turn]')
@@ -528,6 +564,20 @@ function TranscriptWindow({
                     (row) => row.dataset.transcriptTurn === turn.id,
                   )
                   setTurnModes((current) => ({ ...current, [turn.turnId ?? turn.id]: mode }))
+                  if (mode !== 'full') {
+                    const sequences = new Set(
+                      turn.events.map((event) => event.address.event_sequence),
+                    )
+                    setEventContinuations((current) =>
+                      Object.keys(current).some((sequence) => sequences.has(sequence))
+                        ? Object.fromEntries(
+                            Object.entries(current).filter(
+                              ([sequence]) => !sequences.has(sequence),
+                            ),
+                          )
+                        : current,
+                    )
+                  }
                   requestAnimationFrame(() =>
                     target
                       ?.querySelector<HTMLButtonElement>('.session-turn-heading button')
@@ -555,6 +605,8 @@ function TurnContent({
   sessionId,
   limits,
   target,
+  eventContinuations,
+  onEventContinuation,
   onExpand,
 }: {
   turn: TranscriptTurn
@@ -565,6 +617,8 @@ function TurnContent({
   sessionId: string
   limits: SessionTranscriptLimits
   target?: string
+  eventContinuations: Readonly<Record<string, EventContinuationState>>
+  onEventContinuation: (sequence: string, state: EventContinuationState) => void
   onExpand: (mode: DetailMode) => void
 }) {
   const [openTool, setOpenTool] = useState<string | null>(null)
@@ -626,6 +680,10 @@ function TurnContent({
             limits={limits}
             renderTool={renderTool}
             target={target === event.address.event_sequence}
+            continuation={eventContinuations[event.address.event_sequence]}
+            onContinuation={(state) =>
+              onEventContinuation(event.address.event_sequence, state)
+            }
           />
         ))}
       </>
@@ -754,6 +812,7 @@ function ToolSummary({
         },
         limits,
         signal,
+        event ? { items: [event] } : undefined,
       ),
     gcTime: 0,
   })
@@ -793,6 +852,8 @@ function EventDetail({
   limits,
   renderTool,
   target,
+  continuation,
+  onContinuation,
 }: {
   event: WebSessionTimelineDetail
   sessionId: string
@@ -800,11 +861,12 @@ function EventDetail({
   limits: SessionTranscriptLimits
   renderTool?: SessionTranscriptTextProps['renderTool']
   target: boolean
+  continuation?: EventContinuationState
+  onContinuation: (state: EventContinuationState) => void
 }) {
   const sequence = event.address.event_sequence
-  const [cursor, setCursor] = useState<WebTimelineDetailContinuation | null>(null)
-  const [earlier, setEarlier] = useState<{ key: string; item: WebSessionTimelineDetail }[]>([])
-  const previous = useRef<WebSessionTimelineDetailPage | undefined>(undefined)
+  const cursor = continuation?.cursor ?? null
+  const earlier = continuation?.earlier ?? []
   const element = useRef<HTMLDivElement>(null)
   const detail = useQuery({
     queryKey: ['production', 'transcript-event', sessionId, turnId, sequence, cursor, limits],
@@ -816,7 +878,7 @@ function EventDetail({
             cursor ?? { type: 'more_at', address: event.address },
             limits,
             signal,
-            previous.current,
+            continuation?.previous,
           )
         : readSessionTranscript(
             sessionId,
@@ -825,14 +887,26 @@ function EventDetail({
             cursor,
             limits,
             signal,
-            previous.current,
+            continuation?.previous,
           ),
     gcTime: 0,
+    initialData: continuation?.current?.page,
+    staleTime: continuation?.current ? Number.POSITIVE_INFINITY : 0,
   })
   const item = detail.data?.items[0]
   const matches = item?.address.event_sequence === sequence && item.kind === event.kind
   const next =
     matches && detail.data?.continuation?.type === 'more_body' ? detail.data.continuation : null
+  useEffect(() => {
+    if (!continuation || !detail.data || !matches || continuation.current?.page === detail.data)
+      return
+    onContinuation({
+      cursor,
+      earlier,
+      previous: continuation?.previous,
+      current: { key: JSON.stringify(cursor), page: detail.data },
+    })
+  }, [detail.data, matches, cursor, earlier, continuation, onContinuation])
   useEffect(() => {
     if (!target || !matches) return
     const frame = requestAnimationFrame(() => {
@@ -852,9 +926,14 @@ function EventDetail({
         ({ key, item }) => (
           <div key={key}>
             {item.body.type === 'tool_batch' && renderTool ? (
-              item.body.tools.map((tool) => (
-                <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
-              ))
+              <>
+                {item.body.tools.map((tool) => (
+                  <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
+                ))}
+                {item.body.goal_events.map((event) => (
+                  <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
+                ))}
+              </>
             ) : (
               <BodyText body={item.body} />
             )}
@@ -878,9 +957,12 @@ function EventDetail({
           <button
             type="button"
             onClick={() => {
-              setEarlier((chunks) => [...chunks, { key: JSON.stringify(cursor), item }])
-              previous.current = detail.data
-              setCursor(next)
+              if (!detail.data) return
+              onContinuation({
+                cursor: next,
+                earlier: [...earlier, { key: JSON.stringify(cursor), item }],
+                previous: detail.data,
+              })
             }}
           >
             Continue reading
