@@ -203,7 +203,7 @@ const useCatalogFixture = async (page: Page) => {
     const request = new URL(route.request().url())
     const response = request.searchParams.has('after_session_id')
       ? secondPage
-      : request.searchParams.has('search')
+      : request.searchParams.get('include_archived') === 'true'
         ? filteredPage
         : firstPage
     return route.fulfill({ json: response })
@@ -221,9 +221,9 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
-  await page.getByRole('textbox', { name: 'Search titles' }).press('Enter')
-  await expect(page).toHaveURL(/q=Release/)
+  await page.getByRole('checkbox', { name: 'Include archived' }).check()
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect(page).toHaveURL(/archived=true/)
   await expect(page.getByRole('heading', { name: '1 session', exact: true })).toBeFocused()
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.focus()
@@ -233,7 +233,7 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   )
   await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
   await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
-  await expect(page).toHaveURL(/q=Release/)
+  await expect(page).toHaveURL(/archived=true/)
   await expect(session).toBeFocused()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -349,26 +349,27 @@ test('shows unavailable timelines after opening a catalog row', async ({ page },
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('preserves meaningful whitespace in exact catalog searches', async ({ page }) => {
+test('searches conversation content with a trimmed query', async ({ page }) => {
   const problems = watchBrowser(page)
+  await useCatalogFixture(page)
   let observedSearch: string | null = null
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
-  await page.route('**/api/sessions?**', (route) => {
-    observedSearch = new URL(route.request().url()).searchParams.get('search')
-    return route.fulfill({
-      json:
-        observedSearch === null
-          ? firstPage
-          : { ...firstPage, continuation: null, summaries: [], total: '0' },
-    })
+  const catalogQueries: (string | null)[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.pathname === '/api/sessions') catalogQueries.push(url.searchParams.get('search'))
+  })
+  await page.route('**/api/search?**', (route) => {
+    observedSearch = new URL(route.request().url()).searchParams.get('q')
+    return route.fulfill({ json: { results: [], continuation: null } })
   })
   await page.goto('/sessions')
-
-  const search = page.getByRole('textbox', { name: 'Search titles' })
+  const search = page.getByRole('textbox', { name: 'Search conversations' })
   await search.fill(' release ')
   await search.press('Enter')
-  await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe(' release ')
-  await expect.poll(() => observedSearch).toBe(' release ')
+  await expect(page).toHaveURL(/\/search\?q=release/)
+  await expect.poll(() => observedSearch).toBe('release')
+  expect(catalogQueries.length).toBeGreaterThan(0)
+  expect(catalogQueries.every((query) => query === null)).toBe(true)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -377,7 +378,7 @@ test('shows a visible focus indicator on catalog search', async ({ page }) => {
   await useCatalogFixture(page)
   await page.goto('/sessions')
 
-  const search = page.getByRole('textbox', { name: 'Search titles' })
+  const search = page.getByRole('textbox', { name: 'Search conversations' })
   await search.focus()
 
   await expect(search).toBeFocused()
@@ -394,31 +395,67 @@ test('shows a visible focus indicator on catalog search', async ({ page }) => {
 test('rejects an over-bound search before changing URL state', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_search_query_bytes: 8 },
+      },
+    }),
+  )
   await page.goto('/sessions')
 
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('é'.repeat(513))
+  await page.getByRole('textbox', { name: 'Search conversations' }).fill('é'.repeat(5))
   await page.getByRole('button', { name: 'Apply' }).click()
 
-  await expect(page.getByRole('alert')).toHaveText(/must fit 1,024 UTF-8 bytes/)
+  await expect(page.getByRole('alert')).toHaveText('Check your search. Try a shorter phrase.')
   await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBeNull()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('preserves the complete admitted title query on submit and reload', async ({ page }) => {
+test('hides conversation search when lexical search is unavailable', async ({ page }) => {
   await useCatalogFixture(page)
-  const queries: string[] = []
-  await page.route('**/api/sessions?**', (route) => {
-    queries.push(new URL(route.request().url()).searchParams.get('search') ?? '')
-    return route.fulfill({ json: { ...filteredPage, summaries: [], total: '0' } })
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: {
+          ...bootstrapFixture.capabilities,
+          bounded_lexical_search: false,
+        },
+      },
+    }),
+  )
+  let searchReads = 0
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/search') searchReads += 1
   })
   await page.goto('/sessions')
-  const q = 'é'.repeat(512)
-  await page.getByRole('textbox', { name: 'Search titles' }).fill(q)
+  await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Search conversations' })).toHaveCount(0)
+  await page.getByRole('checkbox', { name: 'Include archived' }).check()
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect(page).toHaveURL(/archived=true/)
+  expect(searchReads).toBe(0)
+})
+
+test('preserves the complete admitted conversation query on submit and reload', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  const queries: string[] = []
+  await page.route('**/api/search?**', (route) => {
+    queries.push(new URL(route.request().url()).searchParams.get('q') ?? '')
+    return route.fulfill({ json: { results: [], continuation: null } })
+  })
+  await page.goto('/sessions')
+  const q = 'é'.repeat(256)
+  await page.getByRole('textbox', { name: 'Search conversations' }).fill(q)
   await page.getByRole('button', { name: 'Apply' }).click()
   await expect.poll(() => queries.at(-1)).toBe(q)
   await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe(q)
   await page.reload()
-  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue(q)
+  await expect(page.getByRole('textbox', { name: 'Search text', exact: true })).toHaveValue(q)
   await expect.poll(() => queries.at(-1)).toBe(q)
 })
 
@@ -426,7 +463,7 @@ test('restores focus after filters replace the bounded catalog page', async ({ p
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
+  await page.getByRole('checkbox', { name: 'Include archived' }).check()
   await page.getByRole('button', { name: 'Apply' }).click()
   await expect(page.getByRole('heading', { name: `${filteredPage.total} session` })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -457,7 +494,7 @@ test('restores focus after a failed bounded catalog replacement', async ({ page 
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/sessions?**', (route) => {
     const request = new URL(route.request().url())
-    return request.searchParams.has('search')
+    return request.searchParams.get('include_archived') === 'true'
       ? route.fulfill({
           json: { invented: true },
         })
@@ -465,7 +502,7 @@ test('restores focus after a failed bounded catalog replacement', async ({ page 
   })
   await page.goto('/sessions')
 
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
+  await page.getByRole('checkbox', { name: 'Include archived' }).check()
   await page.getByRole('button', { name: 'Apply' }).click()
 
   await expect(page.getByRole('heading', { name: 'Sessions failed to load' })).toBeFocused()
@@ -477,12 +514,17 @@ test('keeps visible search synchronized when history distinguishes absent from u
 }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
+  await page.route('**/api/search?**', (route) =>
+    route.fulfill({ json: { results: [], continuation: null } }),
+  )
   await page.goto('/sessions')
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('undefined')
+  await page.getByRole('textbox', { name: 'Search conversations' }).fill('undefined')
   await page.getByRole('button', { name: 'Apply' }).click()
-  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue('undefined')
+  await expect(page.getByRole('textbox', { name: 'Search text', exact: true })).toHaveValue(
+    'undefined',
+  )
   await page.goBack()
-  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue('')
+  await expect(page.getByRole('textbox', { name: 'Search conversations' })).toHaveValue('')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -734,8 +776,7 @@ test('keeps opened workspace identities in the URL and restores them on reload',
   page,
 }) => {
   await useCatalogFixture(page)
-  await page.goto('/sessions')
-  await page.getByRole('button', { name: 'Open by ID' }).click()
+  await page.goto('/sessions?workspace=true')
   const input = page.getByRole('textbox', { name: 'Session ID' })
   await expect(input).toBeFocused()
   await input.fill(firstSessionId)
