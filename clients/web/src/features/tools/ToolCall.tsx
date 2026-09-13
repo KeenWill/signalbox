@@ -117,6 +117,9 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
       <TextPreview text={command} label="Command" />
+      {typeof args.timeout_seconds === 'number' && (
+        <small>Timeout: {args.timeout_seconds} seconds</small>
+      )}
       {textField(args.working_directory ?? args.workdir) && (
         <small>In {textField(args.working_directory ?? args.workdir)}</small>
       )}
@@ -286,7 +289,10 @@ export function ToolCall({ tool }: ToolCallProps) {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
   const args = excerptFields(tool.arguments)
   const result = excerptFields(evidence?.result)
-  const Renderer = toolRenderers.get(tool.tool_name) ?? Fallback
+  const Renderer =
+    evidence?.cause === 'invalid_arguments'
+      ? Fallback
+      : (toolRenderers.get(tool.tool_name) ?? Fallback)
   return (
     <article className="tool-call" aria-label={`Tool ${tool.tool_name}`}>
       <header>
@@ -329,8 +335,8 @@ export function ToolApproval({
 }) {
   const actors = {
     policy: 'Policy',
-    user: 'You',
-    user_override: 'You (override)',
+    user: 'User',
+    user_override: 'User override',
     delegate: 'Approval reviewer',
   }
   return (

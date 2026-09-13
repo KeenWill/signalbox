@@ -11,6 +11,61 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('retains rejected argument values in the labeled fallback', () => {
+    const [tool] = toolExample('sandboxed_exec', { program: 'cargo', arguments: 42 }, {})
+    if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
+    const markup = renderToStaticMarkup(
+      createElement(ToolCall, {
+        tool: {
+          ...tool,
+          evidence: {
+            ...tool.evidence,
+            state: 'known_failed',
+            cause: 'invalid_arguments',
+            result_present: false,
+            failure_present: true,
+          },
+        },
+      }),
+    )
+    expect(markup).toContain('<dt>Arguments</dt><dd>42</dd>')
+    expect(markup).toContain('<dt>Program</dt><dd>cargo</dd>')
+    expect(markup).toContain('Invalid arguments')
+  })
+
+  it.each(['sandboxed_exec', 'unsandboxed_exec'])('shows the explicit timeout for %s', (name) => {
+    const [tool] = toolExample(name, { program: 'tool', timeout_seconds: 17 }, {})
+    expect(renderToStaticMarkup(createElement(ToolCall, { tool }))).toContain('Timeout: 17 seconds')
+  })
+
+  it.each([
+    ['user', 'User'],
+    ['user_override', 'User override'],
+  ] as const)('labels the %s approval actor without viewer attribution', (type, label) => {
+    const markup = renderToStaticMarkup(
+      createElement(ToolApproval, {
+        approval: {
+          type: 'tool_approval_decision',
+          tool_name: 'unsandboxed_exec',
+          decision: 'approve',
+          actor:
+            type === 'user_override'
+              ? {
+                  type,
+                  command_id: '00000000-0000-7000-8000-000000000003',
+                  denied_request_id: '00000000-0000-7000-8000-000000000004',
+                }
+              : { type, command_id: '00000000-0000-7000-8000-000000000003' },
+          request_id: '00000000-0000-7000-8000-000000000001',
+          turn_id: '00000000-0000-7000-8000-000000000002',
+          approval_judge_escalated: false,
+        },
+      }),
+    )
+    expect(markup).toContain(`<span>${label}</span>`)
+    expect(markup).not.toContain('You')
+  })
+
   it.each([
     ['sandbox_setup_failed', 'Sandbox setup failed'],
     ['filesystem_confined', 'Filesystem confined'],
