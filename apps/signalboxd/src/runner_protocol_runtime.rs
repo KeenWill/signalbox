@@ -1,6 +1,6 @@
 //! Hub-side serial registration and lifecycle runtime for the local runner wire.
 
-use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
+use std::{error::Error, fmt, future::Future, io, pin::Pin, time::Duration};
 
 use rustix::process::geteuid;
 use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge, ToolCatalog as _};
@@ -29,7 +29,7 @@ use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    sync::{Mutex, watch},
+    sync::watch,
     task::{JoinError, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -191,7 +191,6 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
 pub struct PostgresRunnerRegistrationService {
     store: RunnerProtocolStore,
     allowed_classes: Vec<RunnerCapabilityClass>,
-    registration_admission: Arc<Mutex<()>>,
     dispatch: crate::runner_dispatch::RunnerDispatchService,
     eligibility_nudge: Option<InProcessEligibilityNudge>,
 }
@@ -207,7 +206,6 @@ impl PostgresRunnerRegistrationService {
             store,
             dispatch,
             allowed_classes: allowed_classes.into_iter().collect(),
-            registration_admission: Arc::new(Mutex::new(())),
             eligibility_nudge: None,
         }
     }
@@ -325,7 +323,7 @@ impl PostgresRunnerRegistrationService {
         &self,
         request: Enroll,
     ) -> Result<RunnerEnrollmentResponse, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -424,7 +422,7 @@ impl PostgresRunnerRegistrationService {
     }
 
     async fn resume_durably(&self, request: Resume) -> Result<Resumed, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -464,7 +462,6 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
-        let _admission = self.dispatch.lock_admission().await;
         let invalid_inventory = || {
             RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
@@ -704,7 +701,7 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             ));
         }
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Registration(request.registration_revision);
         let observed_epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
             RunnerRegistrationFailure::new(
