@@ -41,6 +41,15 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   })
   await page.mouse.wheel(0, 900)
   await expect.poll(() => reads.filter((anchor) => anchor === 'after').length).toBeGreaterThan(0)
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  // Allow completed-query renders and their scroll adjustments to settle.
+  await page.waitForTimeout(500)
+  expect(reads.filter((anchor) => anchor === 'after')).toHaveLength(1)
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await page.mouse.wheel(0, 900)
+  await expect.poll(() => reads.filter((anchor) => anchor === 'after').length).toBe(2)
   await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('transcript-scroll.png') })
 })

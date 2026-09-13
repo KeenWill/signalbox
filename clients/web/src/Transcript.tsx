@@ -292,9 +292,6 @@ export function VirtualTranscript({
     }
     previousLast.current = ids.at(-1)
   }, [ids, initialEnd, followEnd, selected, virtualizer])
-  useEffect(() => {
-    if (ids.length > 0 && followEnd && atEnd.current) onEdge?.('after')
-  }, [ids, followEnd, onEdge])
   const remember = () => {
     const offset = parent.current?.scrollTop ?? 0
     const row = virtualizer.getVirtualItems().find((item) => item.end > offset)
