@@ -359,7 +359,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn title_recovery_keeps_unadmitted_work_as_identifiers() {
+    async fn title_handoff_and_recovery_keep_unadmitted_work_as_identifiers() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
         pool.close().await;
@@ -381,8 +381,17 @@ mod tests {
             std::path::PathBuf::new(),
             None,
         )
-        .expect("fixture configuration");
-        for _ in 0..3 {
+        .expect("fixture configuration")
+        .with_title_invocation_processes(processes.clone());
+        let queued_session = SessionId::from_uuid(uuid::Uuid::now_v7());
+        let queued_turn = TurnId::from_uuid(uuid::Uuid::now_v7());
+        configuration.start_initial_title(queued_session, queued_turn);
+        assert_eq!(
+            *processes.pending_titles.lock().expect("pending work"),
+            BTreeMap::from([(queued_session, queued_turn)]),
+            "completed-turn handoff queues identifiers without touching persistence"
+        );
+        for _ in 0..2 {
             processes.retain_initial_title(
                 SessionId::from_uuid(uuid::Uuid::now_v7()),
                 TurnId::from_uuid(uuid::Uuid::now_v7()),
