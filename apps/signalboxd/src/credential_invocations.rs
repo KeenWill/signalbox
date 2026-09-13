@@ -178,6 +178,9 @@ impl CredentialInvocationProcesses {
                     .await
                     && let Err(error) = titles.generate_prepared(prepared).await
                 {
+                    if matches!(error, crate::session_titles::TitleError::Database) {
+                        processes.retain_initial_title(session, turn);
+                    }
                     tracing::warn!(?error, "recovered initial session title generation failed");
                 }
             }));
