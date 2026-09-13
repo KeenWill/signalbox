@@ -46,8 +46,8 @@ With `--sibling-full-text-bytes`, each case also supplies `pr` and
 and `text`; thread entries carry `thread_id` and `resolved` alongside the same
 evidence fields. A subject's optional `source_thread_id` excludes its original
 thread. The harness projects these fields before creating the judgment session;
-labels are not projected. The caller supplies the historical snapshot; the
-helper does not fetch or infer comment history.
+labels are not projected. The caller supplies the review snapshot; the helper
+does not fetch or infer comment history.
 
 The harness copies a case's optional `sibling_context_source` into its result
 for caller-side scoring of retained and current-state context separately.
