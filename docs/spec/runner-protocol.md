@@ -160,6 +160,11 @@ daemon-local admissibility while runner lease creation fails `ToolUnavailable`.
 Daemon fallback transfers neither the consumed runner authorization nor the
 credential-profile grant to daemon execution.
 
+An unpinned placement permits daemon-local `echo` execution under its daemon
+permission default, independently of runner permission overrides or credential
+profile selection. That execution leaves the placement unpinned and creates no
+runner grant or lease.
+
 `RunnerToolDeclaration` is the one daemon-authoritative runner-dispatch
 declaration, so every runner-advertisable tool has model-facing description and
 schema authority even when daemon execution is inadmissible. Its permission
