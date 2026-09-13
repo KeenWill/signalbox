@@ -271,26 +271,41 @@ unconfigured repository terminalizes the dispatch as `repository_unconfigured`
 and closes its held session through a parent-only nonsticky lifecycle stop.
 
 Each new rule revision also admits existing open pull requests with a
-conflicting merge, unresolved threads, or failing checks that satisfy its
-current field predicates. Activation retains the candidate set atomically with
-the revision; admission rechecks current state and uses the existing singleton,
-cooldown and dispatch limits. These dispatches and their retries retain their
-observed context and original event provenance without creating GitHub change
-events. Provider event evaluation starts after the active revision's activation
-tail and resumes from its durable cursor. Matching facts acquire the configured
-singleton before commands and evaluation progress commit together. Pull-request
-scope keys the provider number; stack scope keys the root of the open
-base/head-branch component; repository scope keys the repository; rule scope
-spans repositories. Each key belongs to one rule revision. A live dispatch
-suppresses later matching facts. Nonsticky session termination releases its
-action; cooldown begins when the last action releases. A sticky stop keeps
+conflicting merge, unresolved threads, or failing required checks that satisfy
+its current field predicates. Activation retains the candidate set atomically
+with the revision; admission rechecks current state and uses the existing
+singleton, cooldown and dispatch limits. These dispatches and their retries
+retain their observed context and original event provenance without creating
+GitHub change events. Provider event evaluation starts after the active
+revision's activation tail and resumes from its durable cursor. Matching facts
+acquire the configured singleton before commands and evaluation progress commit
+together. Pull-request scope keys the provider number; stack scope keys the root
+of the open base/head-branch component; repository scope keys the repository;
+rule scope spans repositories. Each key belongs to one rule revision. A live
+dispatch suppresses later matching facts. Nonsticky session termination releases
+its action; cooldown begins when the last action releases. A sticky stop keeps
 redispatch suppressed for that key. After the latest dispatch ends nonsticky
 without a durably completed configured push, repository watch retries that rule
 and pull request after its cooldown while the latest observed matching condition
-remains: a conflicting merge, unresolved review threads, or failing checks.
-Retries use the current pull-request context, retain their preceding dispatch
-and evaluated event context, and pass through the existing singleton and
-dispatch admission limits; they do not create GitHub change events.
+remains: a conflicting merge, unresolved review threads, or failing required
+checks. Required-check failures use GitHub’s classification for that pull
+request and observed head. Activation conclusion predicates exclude non-required
+failures and retain the specific conclusions of required checks. Required
+failures also contribute the aggregate `failure` conclusion. Non-required
+failures and checks whose required status has not been observed do not admit
+retries or activation catch-up. Provider events match independently of this
+retry condition. Retries use the current pull-request context, retain their
+preceding dispatch and evaluated event context, and pass through the existing
+singleton and dispatch admission limits; they do not create GitHub change
+events.
+
+For `labeled-review-response`, completed check runs and suites admit at most one
+initial dispatch per provisioned pull-request head within a rule revision, using
+the existing cooldown. Later check completions on that head are consumed without
+dispatch; new review findings and unfinished-work retries remain eligible.
+
+Each rule evaluation pass consumes eligible retained events through its captured
+tail before retries and checkout provisioning.
 
 An ordinary dispatch closes nonsticky after its turn ends and no accepted work
 remains. The closure rechecks that condition under the session lock; a goal,
@@ -488,6 +503,11 @@ stage use persisted validators. Completed stages and budget-limited attempts
 retain accepted transport pages. A completed reconciliation removes untraversed
 resources and terminal pull-request pages; unchanged responses retain their
 traversed pages.
+
+The web session catalog resolves retained creation provenance with one
+module-store batch per page, using core creation references. Catalog and
+timeline provenance include the head and base branches from the dispatched
+pull-request context.
 
 Reading a session's retained dispatch provenance does not wait for
 repository-watch dispatch processing.

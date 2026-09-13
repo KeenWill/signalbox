@@ -44,6 +44,7 @@ impl error::Error for session_metadata::SessionMetadataCorruption {
 pub enum SessionMetadataRepositoryError {
     Database(error::Error),
     CommitAmbiguous(error::Error),
+    InvalidTitleMerge(signalbox_domain::SessionMetadataContentError),
     DifferentCommandKind {
         command_id: signalbox_domain::DurableCommandId,
     },
@@ -73,6 +74,7 @@ pub struct SessionMetadataRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl session_metadata::SessionMetadataRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub const fn for_title_update(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn handle(
         &self,
         command: signalbox_domain::ReplaceSessionMetadata,

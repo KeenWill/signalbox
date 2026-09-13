@@ -299,12 +299,27 @@ impl MediaValidationIdentity {
 }
 ```
 
+## ToolMediaKind
+
+```rust
+pub enum ToolMediaKind {
+    Image,
+    Document,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
 ## ToolMediaReference
 
 ```rust
 pub struct ToolMediaReference {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolMediaReference {
+    pub fn direct_document(
+        identity: MediaValidationIdentity,
+        byte_length: nonzero::NonZeroU64,
+    ) -> option::Option<Self>;
+    pub const fn kind(&self) -> ToolMediaKind;
     pub fn direct_image(
         identity: MediaValidationIdentity,
         byte_length: nonzero::NonZeroU64,

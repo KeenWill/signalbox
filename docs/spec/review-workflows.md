@@ -42,18 +42,27 @@ result. A closed review library of prompt templates, resolved at startup under
 the catalog rules
 [configuration and credentials](configuration-and-credentials.md) states,
 supplies the session templates each stage uses. The example library uses
-`review-judge-strict-v2`: six acceptance categories, explicit decline classes,
-independent 1–5 verdict confidence, and a valid all-declined result. It asks the
-judge to distinguish representable inputs from inputs an existing producer and
-workload supply, while preserving validation and recovery boundaries the change
-commissions. The [process protocol](process-protocol.md) and the terminal client
-expose the primitive and orchestration operations.
+`review-judge-sibling-context-v1`: six acceptance categories, explicit decline
+classes, independent 1–5 verdict confidence, and a valid all-declined result. It
+asks the judge to distinguish representable inputs from inputs an existing
+producer and workload supply, while preserving validation and recovery
+boundaries the change commissions. The [process protocol](process-protocol.md)
+and the terminal client expose the primitive and orchestration operations.
 
 The client-side judgment input helper `scripts/review_citations.py` resolves
 candidate citations against tracked source at the checked-out head before the
 judgment pass. It attaches found locations and current text or explicit absence
 to each candidate without changing its content or the judgment template. This is
 source evidence, not a runtime database catalog or an automatic verdict.
+
+The client-side helper `scripts/review_judge_context.py` projects supplied
+same-head sibling findings and retained review threads into judgment input,
+excluding the subject findings and their source threads. It includes author,
+resolved state, location, and full text when the serialized set fits the
+caller-selected byte budget; otherwise each entry carries its first 300
+characters and a truncation flag. The template asks the judge to decline
+restated defects as `duplicate` and state the decisive evidence in every
+verdict's reason.
 
 The PostgreSQL store in `crates/persistence/src/review_workflow.rs` and
 `crates/persistence/src/review_orchestration.rs` keeps append-only content and
@@ -311,6 +320,42 @@ fence. Operator commands run as argv in their own process groups; timeout kills
 the group and reaps the child. `SIGINT` stops the loop. Reconciliation requires
 a configured policy path and an explicit state path when neither
 `XDG_STATE_HOME` nor `HOME` supplies a default.
+
+## Agentic judgment sessions
+
+The ordinary `review-judgment-agentic` template runs through the daemon's
+existing model/tool loop. Its catalog exposes only `finding_text`,
+`review_thread_text`, and `read_file`. The first two select full text from an
+attached immutable review-context blob retained by the daemon's blob catalog and
+store; they make no code-host request. Their identifiers are
+`sha256:<digest>#<finding_id>` or `sha256:<digest>#<thread_id>`. Each lookup
+uses the existing attachment-visibility proof and 512 KiB blob-read ceiling. A
+missing, ambiguous, or malformed entry fails the tool request.
+
+One judgment occupies one turn. At most eight tool requests can be admitted
+across that turn. After loading the exact prepared call, the application reads
+the remaining allowance for its session and turn; send authorization rejects a
+call that has become stale. The allowance counts all durable requests, including
+rejected proposals and requests outside a compacted frontier. Response decoding
+marks proposals beyond the remaining allowance inadmissible, including a batch
+that crosses the limit. At zero allowance the next call advertises no tools. The
+session also applies the existing automatic-round limit with a ceiling of nine,
+or the configured limit when smaller. Template identity narrows this catalog and
+allowance; it grants no additional authority. Ordinary sessions do not advertise
+the two review-text tools.
+
+`scripts/review_judge_eval.py --template review-judgment-agentic` supplies the
+candidate in full with 160-character, single-line synopses of the other findings
+and threads. Additional case evidence and the prepared patch remain available
+through explicit read paths. The caller supplies the retained snapshot for the
+exact PR and head, including which threads existed then. The adapter excludes
+the subject finding and its source thread, uploads only context fields, and
+takes structured output from the last committed assistant text in the judged
+turn. Each result records the session, turn, terminal frontier, assistant-entry
+witness, wall time, and the existing per-model-call token-usage records. The
+record also sums each token axis across the turn; an unknown component keeps
+that axis unknown. No separate token table is needed. This evaluation path does
+not change publication policy or select a live judgment variant.
 
 ## Planned
 

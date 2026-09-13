@@ -12,7 +12,7 @@ use std::os::{fd::AsFd, unix::fs::MetadataExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fmt,
     future::Future,
     io::{Read, Write},
@@ -132,9 +132,21 @@ pub struct ExecArguments {
 struct SandboxedExecContract;
 
 impl ToolContract for SandboxedExecContract {
-    type Arguments = ExecArguments;
+    type Arguments = SandboxedExecArguments;
     const NAME: &'static str = SANDBOXED_EXEC_NAME;
     const DESCRIPTION: &'static str = "Runs one bounded direct command in a bwrap-confined injected workspace whose network namespace holds only a loopback interface.";
+}
+
+/// One sandboxed task, optionally requesting a configured ambient credential purpose.
+#[derive(Clone, Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SandboxedExecArguments {
+    /// Direct command and ordinary sandbox limits.
+    #[serde(flatten)]
+    pub command: ExecArguments,
+    /// Non-secret ambient profile name, requiring a fresh approval-judge decision.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub credential_purpose: Option<String>,
 }
 
 struct UnsandboxedExecContract;
@@ -369,7 +381,7 @@ fn build_tool<Contract, CommandRunner>(
     timeout_bound: Option<Duration>,
 ) -> Result<(CompiledToolCatalog, ExecExecutor<CommandRunner>), ExecToolConstructionError>
 where
-    Contract: ToolContract<Arguments = ExecArguments>,
+    Contract: ToolContract,
     CommandRunner: CommandExecution,
 {
     let detail = ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
@@ -384,6 +396,7 @@ where
         ExecArgumentValidator {
             detail: detail.clone(),
             timeout_bound,
+            tool_name: Contract::NAME,
         },
     );
     let catalog = CompiledToolCatalog::try_new([compiled])
@@ -393,11 +406,12 @@ where
         ExecExecutor {
             command_runner,
             timeout_bound,
+            tool_name: Contract::NAME,
         },
     ))
 }
 
-fn compile_exec_contract_definition<Contract: ToolContract<Arguments = ExecArguments>>(
+fn compile_exec_contract_definition<Contract: ToolContract>(
     permission: ToolPermissionDefault,
     timeout_bound: Option<Duration>,
 ) -> Result<ToolDefinition, ToolContractCompileError> {
@@ -424,19 +438,25 @@ fn compile_exec_contract_definition<Contract: ToolContract<Arguments = ExecArgum
     }
     let schema = ToolInputSchema::try_new(schema.to_string())
         .map_err(|_| ToolContractCompileError::Schema)?;
-    Ok(ToolDefinition::new(
+    let definition = ToolDefinition::new(
         name,
         String::from(Contract::DESCRIPTION),
         schema,
         permission,
         ToolEffectClass::ExternalEffect,
-    ))
+    );
+    Ok(if Contract::NAME == SANDBOXED_EXEC_NAME {
+        definition.with_judge_required_argument("credential_purpose".to_owned())
+    } else {
+        definition
+    })
 }
 
 #[derive(Clone, Debug)]
 struct ExecArgumentValidator {
     detail: ToolExecutionErrorDetail,
     timeout_bound: Option<Duration>,
+    tool_name: &'static str,
 }
 
 impl ToolArgumentValidator for ExecArgumentValidator {
@@ -444,7 +464,7 @@ impl ToolArgumentValidator for ExecArgumentValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_arguments(arguments, self.timeout_bound)
+        decode_command_arguments(arguments, self.timeout_bound, self.tool_name)
             .map(drop)
             .map_err(|_| self.detail.clone())
     }
@@ -455,6 +475,51 @@ impl ToolArgumentValidator for ExecArgumentValidator {
 /// Direct-command arguments violated a bound or workspace-relative shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidExecArguments;
+
+impl SandboxedExecArguments {
+    /// Decodes a task using the configured timeout default and command bounds.
+    pub fn decode(
+        arguments: &NormalizedToolArguments,
+        timeout_bound: Option<Duration>,
+    ) -> Result<Self, InvalidExecArguments> {
+        let mut value: serde_json::Value =
+            serde_json::from_str(arguments.as_str()).map_err(|_| InvalidExecArguments)?;
+        let purpose = value
+            .as_object_mut()
+            .ok_or(InvalidExecArguments)?
+            .remove("credential_purpose");
+        let credential_purpose = match purpose {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(purpose))
+                if !purpose.is_empty() && !purpose.contains('\0') =>
+            {
+                Some(purpose)
+            }
+            _ => return Err(InvalidExecArguments),
+        };
+        let command = decode_arguments(
+            &NormalizedToolArguments::try_from_provider_text(value.to_string())
+                .map_err(|_| InvalidExecArguments)?,
+            timeout_bound,
+        )?;
+        Ok(Self {
+            command,
+            credential_purpose,
+        })
+    }
+}
+
+fn decode_command_arguments(
+    arguments: &NormalizedToolArguments,
+    timeout_bound: Option<Duration>,
+    tool_name: &str,
+) -> Result<ExecArguments, InvalidExecArguments> {
+    if tool_name == SANDBOXED_EXEC_NAME {
+        SandboxedExecArguments::decode(arguments, timeout_bound).map(|task| task.command)
+    } else {
+        decode_arguments(arguments, timeout_bound)
+    }
+}
 
 fn decode_arguments(
     arguments: &NormalizedToolArguments,
@@ -520,6 +585,24 @@ fn invalid_relative_directory(value: &str) -> bool {
 pub struct ExecExecutor<CommandRunner> {
     command_runner: CommandRunner,
     timeout_bound: Option<Duration>,
+    tool_name: &'static str,
+}
+
+impl<Runner: ProcessRunner> ExecExecutor<SandboxedCommandRunner<Runner>> {
+    /// Runs one authorized task with an operation-local sandbox configuration.
+    pub async fn run_with_configuration(
+        &mut self,
+        arguments: ExecArguments,
+        configuration: SandboxConfiguration,
+    ) -> Result<ExecResult, ExecExecutorError> {
+        validate_arguments(&arguments, self.timeout_bound)
+            .map_err(|_| ExecExecutorError::ArgumentValidationDrift)?;
+        let mut runner = self
+            .command_runner
+            .clone()
+            .with_sandbox_configuration(configuration);
+        Ok(runner.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await)
+    }
 }
 
 #[derive(signalbox_derive::OperatorError)]
@@ -547,8 +630,12 @@ impl<CommandRunner: CommandExecution> ToolExecutor for ExecExecutor<CommandRunne
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
-        let arguments = decode_arguments(invocation.request().arguments(), self.timeout_bound)
-            .map_err(|_| ExecExecutorError::ArgumentValidationDrift)?;
+        let arguments = decode_command_arguments(
+            invocation.request().arguments(),
+            self.timeout_bound,
+            self.tool_name,
+        )
+        .map_err(|_| ExecExecutorError::ArgumentValidationDrift)?;
         let result = self.command_runner.execute(arguments).await;
         let encoded =
             serde_json::to_string(&result).map_err(|_| ExecExecutorError::ResultEncoding)?;
@@ -561,7 +648,7 @@ trait CommandExecution: Clone + Send {
 }
 
 /// Exact bounded request supplied to an injected process runner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProcessRequest {
     /// Executable name or path.
     pub program: OsString,
@@ -579,6 +666,21 @@ pub struct ProcessRequest {
     pub environment_inheritance: ProcessEnvironment,
     /// Trusted status protocol expected from the supervised target.
     pub status_protocol: ProcessStatusProtocol,
+}
+
+impl std::fmt::Debug for ProcessRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessRequest")
+            .field("program", &self.program)
+            .field("arguments", &"[REDACTED]")
+            .field("working_directory", &self.working_directory)
+            .field("timeout", &self.timeout)
+            .field("capture_bytes", &self.capture_bytes)
+            .field("environment", &"[REDACTED]")
+            .field("environment_inheritance", &self.environment_inheritance)
+            .field("status_protocol", &self.status_protocol)
+            .finish()
+    }
 }
 
 /// Ambient-environment posture for an injected process request.
@@ -838,7 +940,7 @@ pub enum SandboxNetwork {
 }
 
 /// Explicit host runtime inputs for sandboxed execution.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct SandboxConfiguration {
     /// Network namespace policy; isolated by default.
     pub network: SandboxNetwork,
@@ -853,6 +955,23 @@ pub struct SandboxConfiguration {
     pub rustup_home: Option<PathBuf>,
     /// Installed rustup toolchain selected without automatic installation.
     pub rustup_toolchain: Option<String>,
+    /// Operation-local environment supplied through the cleared supervisor and bubblewrap environment.
+    pub environment: BTreeMap<OsString, OsString>,
+}
+
+impl fmt::Debug for SandboxConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SandboxConfiguration")
+            .field("network", &self.network)
+            .field("read_only_binds", &self.read_only_binds)
+            .field("read_only_mounts", &self.read_only_mounts)
+            .field("path_prepend", &self.path_prepend)
+            .field("rustup_home", &self.rustup_home)
+            .field("rustup_toolchain", &self.rustup_toolchain)
+            .field("environment", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// One host input exposed at a distinct sandbox path.
@@ -2159,10 +2278,17 @@ fn bwrap_request(
     bwrap_arguments.extend([
         OsString::from("--chdir"),
         OsString::from(&sandbox_directory),
-        OsString::from("--setenv"),
-        OsString::from("HOME"),
-        OsString::from(SANDBOX_WORKSPACE),
     ]);
+    let mut set_default_environment = |name: &str, value: OsString| {
+        if !context
+            .configuration
+            .environment
+            .contains_key(OsStr::new(name))
+        {
+            bwrap_arguments.extend([OsString::from("--setenv"), OsString::from(name), value]);
+        }
+    };
+    set_default_environment("HOME", OsString::from(SANDBOX_WORKSPACE));
     for (name, value) in [
         (
             "CARGO_HOME",
@@ -2175,34 +2301,23 @@ fn bwrap_request(
         ("npm_config_cache", OsString::from("/workspace/.npm")),
         ("RUSTUP_AUTO_INSTALL", OsString::from("0")),
     ] {
-        bwrap_arguments.extend([OsString::from("--setenv"), OsString::from(name), value]);
+        set_default_environment(name, value);
     }
     if let Some(home) = &context.configuration.rustup_home {
-        bwrap_arguments.extend([
-            OsString::from("--setenv"),
-            OsString::from("RUSTUP_HOME"),
-            home.as_os_str().to_owned(),
-        ]);
+        set_default_environment("RUSTUP_HOME", home.as_os_str().to_owned());
     }
     if let Some(toolchain) = &context.configuration.rustup_toolchain {
-        bwrap_arguments.extend([
-            OsString::from("--setenv"),
-            OsString::from("RUSTUP_TOOLCHAIN"),
-            OsString::from(toolchain),
-        ]);
+        set_default_environment("RUSTUP_TOOLCHAIN", OsString::from(toolchain));
     }
     #[cfg(target_os = "linux")]
     if let Some((administration, worktree)) = sandbox_git_directory.zip(context.git_worktree) {
-        bwrap_arguments.extend([
-            OsString::from("--setenv"),
-            OsString::from("GIT_DIR"),
-            administration.into_os_string(),
-            OsString::from("--setenv"),
-            OsString::from("GIT_WORK_TREE"),
+        set_default_environment("GIT_DIR", administration.into_os_string());
+        set_default_environment(
+            "GIT_WORK_TREE",
             Path::new(SANDBOX_WORKSPACE)
                 .join(&worktree.relative_path)
                 .into_os_string(),
-        ]);
+        );
     }
     bwrap_arguments.extend([
         OsString::from("--"),
@@ -2221,7 +2336,10 @@ fn bwrap_request(
             (OsString::from("LANG"), OsString::from("C.UTF-8")),
             (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
             (OsString::from("PATH"), sandbox_path),
-        ]),
+        ])
+        .into_iter()
+        .chain(context.configuration.environment.clone())
+        .collect(),
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
     }
@@ -4818,6 +4936,135 @@ mod tests {
         assert_eq!(
             finite_schema.pointer("/properties/timeout_seconds/default"),
             Some(&serde_json::json!(60))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambient_environment_never_enters_bubblewrap_arguments() -> Result<(), Box<dyn Error>> {
+        const SECRET: &str = "synthetic-environment-credential";
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(b""),
+        );
+        let (_, mut executor) =
+            SandboxedExecTool::try_new(runner.clone(), std::env::current_dir()?, None)?
+                .into_parts();
+        let configuration = SandboxConfiguration {
+            environment: BTreeMap::from([
+                (OsString::from("FIXTURE_TOKEN"), OsString::from(SECRET)),
+                (OsString::from("HOME"), OsString::from(SECRET)),
+            ]),
+            ..Default::default()
+        };
+        executor
+            .run_with_configuration(
+                ExecArguments {
+                    program: "fixture".to_owned(),
+                    arguments: Vec::new(),
+                    working_directory: ".".to_owned(),
+                    timeout_seconds: 1,
+                },
+                configuration,
+            )
+            .await?;
+        for request in runner
+            .recorded_probes()
+            .into_iter()
+            .chain(runner.recorded_requests())
+        {
+            assert_eq!(request.environment_inheritance, ProcessEnvironment::Clear);
+            assert_eq!(
+                request.environment.get(OsStr::new("FIXTURE_TOKEN")),
+                Some(&OsString::from(SECRET))
+            );
+            assert_eq!(
+                request.environment.get(OsStr::new("HOME")),
+                Some(&OsString::from(SECRET))
+            );
+            assert!(
+                request
+                    .arguments
+                    .iter()
+                    .all(|argument| !argument.to_string_lossy().contains(SECRET))
+            );
+            assert!(
+                !request
+                    .arguments
+                    .windows(3)
+                    .any(|arguments| arguments[0] == "--setenv" && arguments[1] == "HOME")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sandboxed_credential_requests_preserve_command_validation_and_timeout_defaults()
+    -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let (catalog, _) = SandboxedExecTool::try_new(
+            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"")),
+            &root,
+            Some(Duration::from_secs(2)),
+        )?
+        .into_parts();
+        let name = ToolName::try_new(SANDBOXED_EXEC_NAME.to_owned()).expect("sandboxed name");
+        let raw = NormalizedToolArguments::try_from_provider_text(
+            r#"{"program":"fixture","credential_purpose":"fixture-authority"}"#.to_owned(),
+        )
+        .expect("JSON arguments");
+        catalog
+            .validate_arguments(&name, &raw)
+            .expect("ambient request is admitted");
+        assert_eq!(
+            SandboxedExecArguments::decode(&raw, Some(Duration::from_secs(2)))?
+                .command
+                .timeout_seconds,
+            2
+        );
+        assert!(
+            catalog
+                .definition(&name)
+                .expect("definition")
+                .requires_approval_judge(&raw)
+        );
+        for raw in [
+            r#"{"program":"fixture","credential_purpose":""}"#,
+            r#"{"program":"fixture","credential_purpose":3}"#,
+            r#"{"program":"fixture","credential_purpose":"fixture-authority","unrecognized":true}"#,
+            r#"{"program":"fixture","credential_purpose":"fixture-authority","timeout_seconds":3}"#,
+        ] {
+            let arguments = NormalizedToolArguments::try_from_provider_text(raw.to_owned())
+                .expect("JSON arguments");
+            assert!(catalog.validate_arguments(&name, &arguments).is_err());
+        }
+        let absent = NormalizedToolArguments::try_from_provider_text(
+            r#"{"program":"fixture","credential_purpose":null}"#.to_owned(),
+        )
+        .expect("JSON arguments");
+        assert!(
+            SandboxedExecArguments::decode(&absent, None)?
+                .credential_purpose
+                .is_none()
+        );
+        assert!(
+            !catalog
+                .definition(&name)
+                .expect("definition")
+                .requires_approval_judge(&absent)
+        );
+        let (unsandboxed, _) = UnsandboxedExecTool::try_new(
+            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"")),
+            root,
+        )?
+        .into_parts();
+        assert!(
+            unsandboxed
+                .validate_arguments(
+                    &ToolName::try_new(UNSANDBOXED_EXEC_NAME.to_owned()).expect("unsandboxed name"),
+                    &raw
+                )
+                .is_err()
         );
         Ok(())
     }

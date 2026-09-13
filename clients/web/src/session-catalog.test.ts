@@ -12,6 +12,7 @@ const summary = {
   judge: { actionable: '0', completed: '3', escalated: '0', failed: '0' },
   last_activity: { kind: 'session' as const, unix_microseconds: '1724200000000000' },
   queued_turn_count: '0',
+  repository_watch: null,
   session_id: sessionId,
   state: 'idle' as const,
   title_summary: 'Release verification',

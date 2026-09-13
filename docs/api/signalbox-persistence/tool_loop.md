@@ -89,6 +89,13 @@ impl tool_loop::PostgresToolLoopRepository {
         option::Option<signalbox_domain::ToolBatch>,
         tool_loop::ToolLoopRepositoryError,
     >;
+    pub async fn load_approval(
+        &self,
+        request: signalbox_domain::ToolRequestId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::ToolApprovalResolution>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
     pub async fn expire_human_approval_wait(
         &self,
         session: signalbox_domain::SessionId,
@@ -408,6 +415,13 @@ impl tool_loop::PostgresToolLoopRepository {
         request: signalbox_domain::ToolRequestId,
     ) -> result::Result<
         option::Option<signalbox_domain::ToolMediaReference>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
+    pub async fn load_media_references(
+        &self,
+        requests: &[signalbox_domain::ToolRequestId],
+    ) -> result::Result<
+        map::BTreeMap<signalbox_domain::ToolRequestId, signalbox_domain::ToolMediaReference>,
         tool_loop::ToolLoopRepositoryError,
     >;
 }

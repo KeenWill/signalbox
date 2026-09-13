@@ -126,6 +126,7 @@ pub struct HubModelConfiguration {
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
     github_credential_profiles: HashMap<String, crate::credential_pools::GithubCredentialProfile>,
     credential_profiles: HashMap<Arc<str>, CredentialProfile>,
+    pub(crate) ambient_task_profiles: HashMap<Arc<str>, CredentialDelivery>,
     credential_pools: HashMap<Arc<str>, CredentialPool>,
     model_capabilities: ModelCapabilityCatalog,
     runtime_model_capabilities: RuntimeModelCapabilityCatalog,
@@ -214,6 +215,9 @@ impl HubModelConfiguration {
             claude_cli_credential_profile,
         } = startup::parse_startup(content, &document)?;
         let github_credential_profiles = crate::credential_pools::parse_github_credential_profiles(
+            document.get("credential_profiles"),
+        )?;
+        let ambient_task_profiles = crate::credential_pools::parse_ambient_task_profiles(
             document.get("credential_profiles"),
         )?;
         let repository_watch = document
@@ -591,12 +595,27 @@ impl HubModelConfiguration {
                                 .unwrap_or(usize::MAX),
                         )
                     });
+                let document = matches!(adapter, Some(ModelAdapter::ClaudeCli)).then(|| {
+                    signalbox_model_runtime_claude_cli::document_presentation_capability()
+                        .limited_by(
+                            numeric_bounds
+                                .integer("max_document_presentation_bytes")
+                                .flatten()
+                                .unwrap_or(u64::MAX),
+                            numeric_bounds
+                                .integer("max_image_request_bytes")
+                                .flatten()
+                                .and_then(|bound| usize::try_from(bound).ok())
+                                .unwrap_or(usize::MAX),
+                        )
+                });
                 signalbox_model_runtime::ModelCapabilityDefinition::new(
                     definition.target().clone(),
                     definition
                         .capabilities()
                         .clone()
-                        .with_image_presentation(image),
+                        .with_image_presentation(image)
+                        .with_document_presentation(document),
                 )
             }),
         )
@@ -626,6 +645,7 @@ impl HubModelConfiguration {
             aliases,
             routes,
             github_credential_profiles,
+            ambient_task_profiles,
             credential_profiles,
             credential_pools,
             model_capabilities,

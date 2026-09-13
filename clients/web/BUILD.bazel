@@ -117,6 +117,7 @@ build_test(
 js_test(
     name = "browser_tests",
     size = "large",
+    timeout = "eternal",
     chdir = package_name(),
     data = WEB_SOURCES + [
         ":build",

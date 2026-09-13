@@ -66,6 +66,11 @@ Do not add version-coupled pins or tests that fail on every dependency bump by
 construction. A bump that changes nothing merges as-is; a bump that breaks
 something gets a fix for the breakage.
 
+## Web client
+
+Web client contributions follow the
+[web client guidelines](clients/web/GUIDELINES.md).
+
 ## Public-source hygiene
 
 Code, documentation, commit messages, pull-request text, and branch names cite

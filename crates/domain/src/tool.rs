@@ -33,7 +33,9 @@ pub use decide::{
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     PreparedDecideToolRequest,
 };
-pub use media::{MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference};
+pub use media::{
+    MediaValidationEvidence, MediaValidationIdentity, ToolMediaKind, ToolMediaReference,
+};
 pub use name::{ToolName, ToolNameError, ToolNameFailure};
 pub use override_denial::{
     OverrideDeniedToolRequest, OverrideDeniedToolRequestAppliedResult,
