@@ -90,6 +90,8 @@ const SessionTitle = ({
 export function SessionCatalogSurface({
   returnSessionId,
   onReturnFocusConsumed,
+  needsAttention,
+  onNeedsAttentionChange,
   lifecycleFilter,
   pageOrder,
   onLifecycleFilterChange,
@@ -100,6 +102,8 @@ export function SessionCatalogSurface({
 }: {
   returnSessionId?: string
   onReturnFocusConsumed: () => void
+  needsAttention: boolean
+  onNeedsAttentionChange: (value: boolean) => void
   lifecycleFilter: string
   pageOrder: string
   onLifecycleFilterChange: (value: string) => void
@@ -109,7 +113,6 @@ export function SessionCatalogSurface({
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
   const navigate = useNavigate()
-  const [needsAttention, setNeedsAttention] = useState(false)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -264,7 +267,7 @@ export function SessionCatalogSurface({
       <input
         type="checkbox"
         checked={needsAttention}
-        onChange={(event) => setNeedsAttention(event.target.checked)}
+        onChange={(event) => onNeedsAttentionChange(event.target.checked)}
       />
       Needs attention
     </label>
@@ -273,7 +276,12 @@ export function SessionCatalogSurface({
     return (
       <div className="surface-body catalog-surface">
         {attentionFilter}
-        <AttentionSessions onTimelineIds={onTimelineIds} />
+        <AttentionSessions
+          returnSessionId={returnSessionId}
+          onReturnFocusConsumed={onReturnFocusConsumed}
+          onSessionOpen={(session) => onStateChange({ ...state, session, workspace: true })}
+          onTimelineIds={onTimelineIds}
+        />
       </div>
     )
 

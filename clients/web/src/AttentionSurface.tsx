@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, Navigate } from '@tanstack/react-router'
+import { Navigate } from '@tanstack/react-router'
 import { ArrowRight, Radio, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
@@ -42,13 +42,20 @@ export function AttentionSurface({
 }
 
 export function AttentionSessions({
+  returnSessionId,
+  onReturnFocusConsumed,
+  onSessionOpen,
   onTimelineIds,
 }: {
+  returnSessionId?: string
+  onReturnFocusConsumed: () => void
+  onSessionOpen: (sessionId: string) => void
   onTimelineIds: (ids: readonly string[]) => void
 }) {
   const dispatch = useAppDispatch()
   const { attentionSync: phase, selectedTimeline, overlay } = useAppSelector(selectApp)
-  const sessionLinks = useRef(new Map<string, HTMLAnchorElement>())
+  const sessionLinks = useRef(new Map<string, HTMLButtonElement>())
+  const pendingReturnFocus = useRef(returnSessionId)
   const queryClient = useQueryClient()
   const [after, setAfter] = useState<string | null>(null)
   const [monitorGeneration, setMonitorGeneration] = useState(0)
@@ -94,6 +101,13 @@ export function AttentionSessions({
   useEffect(() => {
     if (selectedTimeline && overlay === null) sessionLinks.current.get(selectedTimeline)?.focus()
   }, [selectedTimeline, overlay])
+  useEffect(() => {
+    if (!attention.data || overlay !== null || !pendingReturnFocus.current) return
+    const target = sessionLinks.current.get(pendingReturnFocus.current)
+    pendingReturnFocus.current = undefined
+    target?.focus()
+    onReturnFocusConsumed()
+  }, [attention.data, onReturnFocusConsumed, overlay])
 
   useEffect(() => {
     void monitorGeneration
@@ -223,16 +237,15 @@ export function AttentionSessions({
               <ol>
                 {needingAttention.map((summary) => (
                   <li key={summary.session_id} className={`attention-${summary.state}`}>
-                    <Link
+                    <button
+                      type="button"
                       className="attention-session-link"
                       ref={(link) => {
                         if (link) sessionLinks.current.set(summary.session_id, link)
                         else sessionLinks.current.delete(summary.session_id)
                       }}
                       onFocus={() => dispatch(actions.timelineSelected(summary.session_id))}
-                      to="/$surface"
-                      params={{ surface: 'sessions' }}
-                      search={{ session: summary.session_id, workspace: true }}
+                      onClick={() => onSessionOpen(summary.session_id)}
                     >
                       <span className="attention-rail" aria-hidden="true" />
                       <span className="attention-identity">
@@ -244,7 +257,7 @@ export function AttentionSessions({
                       </span>
                       <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
                       <ArrowRight aria-hidden="true" />
-                    </Link>
+                    </button>
                     <section className="attention-judge" aria-label="Approval outcomes">
                       <span>
                         Needs decision <strong>{summary.judge.actionable}</strong>

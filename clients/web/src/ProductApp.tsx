@@ -644,6 +644,7 @@ export function ProductApp({
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
   const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
+  const [catalogNeedsAttention, setCatalogNeedsAttention] = useState(false)
   const catalogReturnSessionId = useRef<string | undefined>(undefined)
   const consumeCatalogReturnFocus = useCallback(() => {
     catalogReturnSessionId.current = undefined
@@ -995,6 +996,8 @@ export function ProductApp({
       <SessionCatalogSurface
         returnSessionId={catalogReturnSessionId.current}
         onReturnFocusConsumed={consumeCatalogReturnFocus}
+        needsAttention={catalogNeedsAttention}
+        onNeedsAttentionChange={setCatalogNeedsAttention}
         lifecycleFilter={catalogLifecycleFilter}
         pageOrder={catalogPageOrder}
         onLifecycleFilterChange={setCatalogLifecycleFilter}

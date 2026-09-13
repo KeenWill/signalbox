@@ -70,8 +70,7 @@ for (const viewport of [
     await expect(page.getByText(idleSession, { exact: true })).toHaveCount(0)
     await expect(page.getByText('Needs decision 2', { exact: true })).toBeVisible()
     await expect(page.getByText('Completed 7', { exact: true })).toBeVisible()
-    const link = page.getByRole('link').filter({ hasText: waitingSession })
-    await expect(link).toHaveAttribute('href', new RegExp(`session=${waitingSession}`))
+    await expect(page.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
     await page.screenshot({
       path: testInfo.outputPath(`attention-filter-${viewport.width}.png`),
       fullPage: true,
@@ -98,11 +97,14 @@ test('keyboard selection follows visible attention rows', async ({ page }) => {
   await page.goto('/sessions')
   await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
   await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
-  const row = page.getByRole('link').filter({ hasText: waitingSession })
+  const row = page.getByRole('button').filter({ hasText: waitingSession })
   await expect(row).toBeVisible()
   await page.getByRole('main').focus()
   await page.keyboard.press('j')
   await expect(row).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`session=${waitingSession}`))
+  await page.goBack()
+  await expect(page.getByRole('checkbox', { name: 'Needs attention', exact: true })).toBeChecked()
+  await expect(row).toBeFocused()
 })
