@@ -77,12 +77,13 @@ async fn await_title_generation(
     + 'static,
 ) -> Result<Option<String>, crate::session_titles::TitleError> {
     let (completed, result) = tokio::sync::oneshot::channel();
-    tasks
-        .send(Box::pin(async move {
-            let _ = completed.send(generation.await);
-        }))
-        .await
-        .map_err(|_| crate::session_titles::TitleError::Generation)?;
+    tokio::spawn(async move {
+        let _ = tasks
+            .send(Box::pin(async move {
+                let _ = completed.send(generation.await);
+            }))
+            .await;
+    });
     result
         .await
         .unwrap_or(Err(crate::session_titles::TitleError::Generation))
@@ -199,6 +200,42 @@ mod tests {
                     .to_string(),
             ))
             .expect("title request")
+    }
+
+    #[tokio::test]
+    async fn cancelled_suggestion_waiting_for_handoff_still_reaches_settlement() {
+        use std::future::Future as _;
+
+        let (tasks, mut pending) = tokio::sync::mpsc::channel::<super::super::SessionTitleTask>(1);
+        tasks.try_send(Box::pin(async {})).expect("full handoff");
+        let (settled, settlement) = tokio::sync::oneshot::channel();
+        let mut request = Box::pin(await_title_generation(tasks, async move {
+            settled.send(()).expect("fixture observes settlement");
+            Ok(None)
+        }));
+        assert!(
+            request
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        drop(request);
+        pending.recv().await.expect("buffered task").await;
+        let mut runtime_tasks = tokio::task::JoinSet::new();
+        runtime_tasks.spawn(
+            tokio::time::timeout(std::time::Duration::from_secs(5), pending.recv())
+                .await
+                .expect("cancelled request retains its handoff")
+                .expect("runtime receives suggestion"),
+        );
+        settlement
+            .await
+            .expect("suggestion settles after cancellation");
+        runtime_tasks
+            .join_next()
+            .await
+            .expect("runtime owns generation")
+            .expect("generation completes");
     }
 
     #[tokio::test]
