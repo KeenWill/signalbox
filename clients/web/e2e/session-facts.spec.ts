@@ -216,3 +216,23 @@ test('a failed cost refresh replaces the retained total with an unavailable indi
   api.grow()
   await expect(cost).toHaveText('Cost unavailable')
 })
+
+test('cost follows durable progress when the timeline extension fails', async ({ page }) => {
+  const api = await sessionApi(page)
+  await page.route('**/api/usage/summary?**', (route) =>
+    route.fulfill({ json: { groups: [group(api.state.grown ? '3.5' : '1.5')], truncated: false } }),
+  )
+  await openSession(page)
+  const cost = page.getByTitle('Session cost', { exact: true })
+  await expect(cost).toHaveText('$1.50')
+  let failedExtensions = 0
+  await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) => {
+    failedExtensions += 1
+    return route.fulfill({ status: 503 })
+  })
+  api.grow()
+  await expect.poll(() => failedExtensions).toBeGreaterThan(0)
+  await expect(cost).toHaveText('$3.50')
+  await page.getByText('Session details', { exact: true }).click()
+  await expect(page.locator('.session-header-detail-content')).toContainText('43')
+})
