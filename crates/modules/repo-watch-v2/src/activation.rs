@@ -89,6 +89,13 @@ impl RepoWatchStore {
         Codec: crate::SessionCommandCodec,
     {
         use crate::dispatch::EvaluationError;
+        if self
+            .observer_evaluation_paused(repository)
+            .await
+            .map_err(EvaluationError::Store)?
+        {
+            return Ok(false);
+        }
         let mut tx = self
             .pool
             .begin()

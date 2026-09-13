@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
-import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { WebSessionTimelineWindow, WebUsageSummary } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
 import './session-polish.css'
@@ -18,6 +18,7 @@ import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
+import type { SearchUsageSource } from './search-usage/model'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
@@ -115,11 +116,42 @@ export const pruneExpandedSessionItems = (
   return next.size === expanded.size ? expanded : next
 }
 
+const sessionCostLabel = (summary: WebUsageSummary): string => {
+  if (summary.truncated) return 'Cost incomplete'
+  const totals = { real: 0n, metered_equivalent: 0n }
+  const labels = new Set<string>()
+  let scale = 0
+  for (const group of summary.groups) {
+    if (group.cost.status === 'unavailable') return 'Cost unavailable'
+    const [whole, fraction = ''] = group.cost.amount_usd.split('.')
+    if (fraction.length > scale) {
+      totals.real *= 10n ** BigInt(fraction.length - scale)
+      totals.metered_equivalent *= 10n ** BigInt(fraction.length - scale)
+      scale = fraction.length
+    }
+    totals[group.cost.label] +=
+      BigInt(`${whole}${fraction}`) * 10n ** BigInt(scale - fraction.length)
+    labels.add(group.cost.label)
+  }
+  const divisor = 10n ** BigInt(Math.max(scale - 2, 0))
+  const dollars = (total: bigint): string => {
+    const cents = scale > 2 ? (total + divisor / 2n) / divisor : total * 10n ** BigInt(2 - scale)
+    return `$${new Intl.NumberFormat('en-US').format(cents / 100n)}.${(cents % 100n).toString().padStart(2, '0')}`
+  }
+  const parts = []
+  if (labels.has('real') || labels.size === 0) parts.push(dollars(totals.real))
+  if (labels.has('metered_equivalent'))
+    parts.push(`${dollars(totals.metered_equivalent)} equivalent`)
+  return parts.join(' + ')
+}
+
 export function SessionWorkspaceSurface({
+  usageSource,
   initialSessionId,
   initialAround,
   onAroundConsumed,
   onReturnToCatalog,
+  registerTranscriptUnwind,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -129,12 +161,14 @@ export function SessionWorkspaceSurface({
   timelineRef,
   windowRequest,
 }: {
+  usageSource: Pick<SearchUsageSource, 'usageSummary'>
   initialSessionId?: string
   initialAround?: string
   onAroundConsumed: () => void
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
   onReturnToCatalog: () => void
+  registerTranscriptUnwind?: (handler: () => boolean) => () => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -263,6 +297,40 @@ export function SessionWorkspaceSurface({
   }, [dispatch, sessionId, timelineCapability])
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
+  const timelineCostPosition = displayedSession?.descriptor.observed_through
+  const liveCostPosition = synchronization.sessionId === sessionId ? synchronization.cursor : null
+  const costPosition =
+    timelineCostPosition !== undefined &&
+    liveCostPosition !== null &&
+    BigInt(liveCostPosition) > BigInt(timelineCostPosition)
+      ? liveCostPosition
+      : timelineCostPosition
+  const observedCostPosition = useRef<string | undefined>(undefined)
+  const cost = useQuery({
+    queryKey: ['production', 'session-cost', sessionId],
+    queryFn: async ({ signal }) => {
+      observedCostPosition.current = costPosition
+      return usageSource.usageSummary({ sessionId: sessionId ?? '' }, signal)
+    },
+    enabled: displayedSession !== undefined,
+    gcTime: 0,
+  })
+  const costLabel = cost.isError
+    ? 'Cost unavailable'
+    : cost.data
+      ? sessionCostLabel(cost.data)
+      : 'Cost loading…'
+  const refetchCost = cost.refetch
+  useEffect(() => {
+    if (
+      costPosition !== undefined &&
+      !cost.isFetching &&
+      observedCostPosition.current !== costPosition
+    ) {
+      void refetchCost({ cancelRefetch: false })
+    }
+  }, [costPosition, cost.isFetching, refetchCost])
+  const origin = displayedSession?.descriptor.repository_watch
   const items = useMemo(
     () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail, initialAround),
     [app.detail, displayedSession?.window.items, initialAround],
@@ -443,7 +511,13 @@ export function SessionWorkspaceSurface({
       aria-label="Session workspace"
       className="surface-body session-workspace-surface"
       onKeyDown={(event) => {
-        if (event.key !== 'Escape' || !detailsRef.current?.open) return
+        if (
+          event.key !== 'Escape' ||
+          !detailsRef.current?.open ||
+          !(event.target instanceof Node) ||
+          !detailsRef.current.contains(event.target)
+        )
+          return
         const nearest =
           event.target instanceof Element ? event.target.closest('details[open]') : null
         const details = nearest instanceof HTMLDetailsElement ? nearest : detailsRef.current
@@ -488,6 +562,9 @@ export function SessionWorkspaceSurface({
                     ? 'Active'
                     : 'Inactive'}
               </p>
+              <span className="session-header-cost" data-testid="session-cost" title={costLabel}>
+                {costLabel}
+              </span>
               <div
                 className="session-header-actions"
                 role="toolbar"
@@ -512,6 +589,25 @@ export function SessionWorkspaceSurface({
               </div>
             </div>
             <div className="session-header-line session-header-secondary">
+              {origin && (
+                <div className="session-header-context">
+                  <a
+                    href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}`}
+                  >
+                    {origin.repository}
+                  </a>
+                  {origin.pull_request !== null && (
+                    <a
+                      href={`https://github.com/${origin.repository.split('/').map(encodeURIComponent).join('/')}/pull/${encodeURIComponent(origin.pull_request)}`}
+                    >
+                      #{origin.pull_request}
+                    </a>
+                  )}
+                  <span title={`Rule ${origin.rule_id} · ${enumLabel(origin.event_kind)}`}>
+                    Rule {origin.rule_id} · {enumLabel(origin.event_kind)}
+                  </span>
+                </div>
+              )}
               <span role="status">
                 {followFailed
                   ? 'Live updates unavailable.'
@@ -533,6 +629,7 @@ export function SessionWorkspaceSurface({
                 <summary>Session details</summary>
                 <div className="session-header-detail-content">
                   <p>Session {sessionId}</p>
+                  <p>Cost: {costLabel}</p>
                   <dl className="session-telemetry">
                     <div>
                       <dt>Items</dt>
@@ -620,13 +717,16 @@ export function SessionWorkspaceSurface({
             </div>
           </header>
           <section
-            ref={showEvents ? undefined : timelineRef}
-            tabIndex={showEvents ? -1 : 0}
+            ref={!showEvents && !transcriptAvailable ? timelineRef : undefined}
+            tabIndex={!showEvents && !transcriptAvailable ? 0 : undefined}
             aria-label="Conversation"
             className="session-conversation"
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
+                registerUnwind={registerTranscriptUnwind}
+                scrollRef={showEvents ? undefined : timelineRef}
+                anchor={displayedSession.anchor}
                 sessionId={sessionId ?? ''}
                 first={
                   displayedSession.window.items[0]?.address.event_sequence ??
