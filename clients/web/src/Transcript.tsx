@@ -204,6 +204,7 @@ export function VirtualTranscript({
   ids,
   renderRow,
   selectedId,
+  pinnedId,
   estimateSize = 100,
   className = 'session-transcript-scroll',
   autoFocus = false,
@@ -225,6 +226,7 @@ export function VirtualTranscript({
     style: React.CSSProperties,
   ) => ReactNode
   selectedId?: string | null
+  pinnedId?: string | null
   estimateSize?: number
   className?: string
   autoFocus?: boolean
@@ -242,6 +244,7 @@ export function VirtualTranscript({
   const localParent = useRef<HTMLDivElement>(null)
   const parent = scrollRef ?? localParent
   const selected = selectedId ? ids.indexOf(selectedId) : -1
+  const pinned = pinnedId ? ids.indexOf(pinnedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
   const atEnd = useRef(initialEnd)
@@ -261,9 +264,9 @@ export function VirtualTranscript({
     getItemKey: (index) => ids[index] ?? index,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range)
-      return selected < 0 || indexes.includes(selected)
-        ? indexes
-        : [...indexes, selected].sort((a, b) => a - b)
+      for (const index of [selected, pinned])
+        if (index >= 0 && !indexes.includes(index)) indexes.push(index)
+      return indexes.sort((a, b) => a - b)
     },
   })
   const rows = virtualizer.getVirtualItems()

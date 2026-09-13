@@ -13,6 +13,7 @@ import type { CommandContext } from './commands'
 import type {
   WebSessionTimelineDetailBody,
   WebSessionTimelineDetailPage,
+  WebTimelineDetailContinuation,
   WebTimelineTextExcerpt,
   WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
@@ -40,6 +41,12 @@ import {
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
 import type { DetailMode } from './state'
 import { VirtualTranscript } from './Transcript'
+
+type ContinuedEventState = {
+  cursor: WebTimelineDetailContinuation | null
+  previous: WebSessionTimelineDetailPage
+  current?: WebSessionTimelineDetailPage
+}
 
 function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
   let content = excerpt.text
@@ -160,6 +167,10 @@ function TranscriptWindow({
   renderTool,
   anchor,
 }: SessionTranscriptTextProps) {
+  const [continuedEvents, setContinuedEvents] = useState<
+    Record<string, ContinuedEventState & { rowId: string }>
+  >({})
+  const [focusedRow, setFocusedRow] = useState<string | null>(null)
   const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
   const initialAnchor = useMemo<TranscriptReadAnchor>(
     () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
@@ -360,6 +371,49 @@ function TranscriptWindow({
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
   useEffect(() => {
+    setContinuedEvents((current) =>
+      Object.values(current).some((state) => !ids.includes(state.rowId))
+        ? Object.fromEntries(
+            Object.entries(current).filter(([, state]) => ids.includes(state.rowId)),
+          )
+        : current,
+    )
+  }, [ids])
+  const renderContinuation = (
+    id: string,
+    page: WebSessionTimelineDetailPage,
+    adoptPage?: AdoptToolPage,
+  ) => {
+    const key = JSON.stringify([id, page.continuation])
+    return (
+      <ContinuedEvent
+        key={key}
+        adoptToolPage={adoptPage}
+        sessionId={sessionId}
+        page={page}
+        limits={limits}
+        headerKind={
+          pages
+            ?.flatMap((window) => window.window.items)
+            .find(
+              (item) =>
+                item.address.event_sequence ===
+                (page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)),
+            )?.kind
+        }
+        state={continuedEvents[key]}
+        onChange={(state) =>
+          setContinuedEvents((current) => {
+            if (state) return { ...current, [key]: { ...state, rowId: id } }
+            const next = { ...current }
+            delete next[key]
+            return next
+          })
+        }
+      />
+    )
+  }
+  useEffect(() => {
     if (readerAtEnd.current && pages && !pages.at(-1)?.window.continuation_after)
       followLatest.current = true
   }, [pages])
@@ -437,14 +491,24 @@ function TranscriptWindow({
       {transcript.isError && (
         <p role="alert">
           Transcript failed to load.{' '}
-          <button type="button" onClick={() => void transcript.refetch()}>
+          <button
+            type="button"
+            onClick={() => {
+              if (transcript.isFetchPreviousPageError) readPage('before')
+              else if (transcript.isFetchNextPageError) readPage('after')
+              else void transcript.refetch()
+            }}
+          >
             Retry transcript
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && rows.length === 0 && (
-        <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
-      )}
+      {!transcript.isPending &&
+        !transcript.isFetching &&
+        !transcript.isError &&
+        rows.length === 0 && (
+          <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
+        )}
       <VirtualTranscript
         scrollRef={scrollRef}
         ids={ids}
@@ -468,6 +532,7 @@ function TranscriptWindow({
           )
         }
         selectedId={selectedId}
+        pinnedId={focusedRow}
         onEdge={(direction) => {
           if (pageRead.current || transcript.isFetching || transcript.isError) return
           if (!(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage))
@@ -489,8 +554,12 @@ function TranscriptWindow({
                 style={style}
                 className="session-message-entry"
                 data-event-sequence={row.sequence}
+                onFocusCapture={() => setFocusedRow(row.id)}
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
+                }}
               >
-                <ContinuedEvent sessionId={sessionId} page={row.pending} limits={limits} />
+                {renderContinuation(row.id, row.pending)}
               </div>
             )
           const turn = row.turn
@@ -502,9 +571,16 @@ function TranscriptWindow({
               style={style}
               className="session-message-entry session-turn"
               data-turn-id={turn.turnId}
+              onFocusCapture={() => setFocusedRow(row.id)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
+              }}
             >
               <TurnSummary
                 turn={turn}
+                renderContinuation={(page, adoptPage) =>
+                  renderContinuation(row.id, page, adoptPage)
+                }
                 renderTool={renderTool}
                 detailPages={detailPages}
                 adoptToolPage={adoptToolPage}
@@ -523,6 +599,7 @@ function TranscriptWindow({
 }
 
 function TurnSummary({
+  renderContinuation,
   adoptToolPage,
   turn,
   renderTool,
@@ -530,6 +607,7 @@ function TurnSummary({
   sessionId,
   limits,
 }: {
+  renderContinuation: (page: WebSessionTimelineDetailPage, adoptPage?: AdoptToolPage) => ReactNode
   adoptToolPage: AdoptToolPage
   turn: TranscriptTurn
   renderTool?: SessionTranscriptTextProps['renderTool']
@@ -551,9 +629,7 @@ function TurnSummary({
   const tool = turn.tools.find((entry) => disclosureKey(entry) === openTool)
   const more = (sequence: string) => {
     const page = detailPages.find((page) => page.items.at(-1)?.address.event_sequence === sequence)
-    return page?.continuation ? (
-      <ContinuedEvent sessionId={sessionId} page={page} limits={limits} />
-    ) : null
+    return page?.continuation ? renderContinuation(page) : null
   }
   return (
     <>
@@ -610,15 +686,7 @@ function TurnSummary({
                           ))
                       )
                     })
-                    .map((page) => (
-                      <ContinuedEvent
-                        key={JSON.stringify(page.continuation)}
-                        adoptToolPage={adoptToolPage}
-                        sessionId={sessionId}
-                        page={page}
-                        limits={limits}
-                      />
-                    ))}
+                    .map((page) => renderContinuation(page, adoptToolPage))}
                 </div>
               )}
             {detailPages
@@ -738,35 +806,95 @@ function ContinuedEvent({
   sessionId,
   page,
   limits,
+  headerKind,
+  state,
+  onChange,
 }: {
   adoptToolPage?: AdoptToolPage
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
+  headerKind: string | undefined
+  state?: ContinuedEventState
+  onChange: (state?: ContinuedEventState) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [cursor, setCursor] = useState(page.continuation ?? null)
-  const previous = useRef(page)
+  const opener = useRef<HTMLButtonElement>(null)
+  if (!state)
+    return (
+      <button
+        ref={opener}
+        type="button"
+        onClick={() => onChange({ cursor: page.continuation ?? null, previous: page })}
+      >
+        Read more
+      </button>
+    )
+  return (
+    <ContinuedEventReader
+      adoptToolPage={adoptToolPage}
+      sessionId={sessionId}
+      page={page}
+      limits={limits}
+      headerKind={headerKind}
+      state={state}
+      onChange={onChange}
+      onClose={() => {
+        onChange(undefined)
+        requestAnimationFrame(() => opener.current?.focus())
+      }}
+    />
+  )
+}
+
+function ContinuedEventReader({
+  adoptToolPage,
+  sessionId,
+  page,
+  limits,
+  headerKind,
+  state,
+  onChange,
+  onClose,
+}: {
+  adoptToolPage?: AdoptToolPage
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+  headerKind: string | undefined
+  state: ContinuedEventState
+  onChange: (state: ContinuedEventState) => void
+  onClose: () => void
+}) {
+  const cursor = state.cursor
   const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
     queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
-    enabled: open,
-    queryFn: ({ signal }) =>
-      readSessionTranscript(
+    queryFn: async ({ signal }) => {
+      if (!headerKind) throw new TypeError('Transcript detail has no retained timeline header')
+      const detail = await readSessionTranscript(
         sessionId,
         sequence,
         sequence,
         cursor,
         limits,
         signal,
-        previous.current,
-      ),
+        state.previous,
+      )
+      if (detail.items.some((item) => item.kind !== headerKind))
+        throw new TypeError('Transcript detail kind contradicts its timeline header')
+      return detail
+    },
     gcTime: 0,
+    initialData: state.current,
+    staleTime: state.current ? Number.POSITIVE_INFINITY : 0,
   })
   useEffect(() => {
+    if (detail.data && state.current !== detail.data) onChange({ ...state, current: detail.data })
+  }, [detail.data, state, onChange])
+  useEffect(() => {
     if (adoptToolPage && detail.data && advancesToolMember(detail.data))
-      adoptToolPage(previous.current, detail.data, false)
-  }, [detail.data, adoptToolPage])
+      adoptToolPage(state.previous, detail.data, false)
+  }, [detail.data, adoptToolPage, state.previous])
   const next = detail.data?.continuation
   const canContinue =
     detail.data &&
@@ -775,12 +903,6 @@ function ContinuedEvent({
       (next.type === 'more_body' &&
         isToolBodyContinuation(next.body) &&
         !advancesToolMember(detail.data)))
-  if (!open)
-    return (
-      <button type="button" onClick={() => setOpen(true)}>
-        Read more
-      </button>
-    )
   return (
     <section aria-label="More message text">
       {detail.isPending && <p role="status">Loading details…</p>}
@@ -812,22 +934,14 @@ function ContinuedEvent({
           type="button"
           onClick={() => {
             if (detail.data) {
-              previous.current = detail.data
-              setCursor(detail.data.continuation ?? null)
+              onChange({ previous: detail.data, cursor: detail.data.continuation ?? null })
             }
           }}
         >
           Continue reading
         </button>
       )}
-      <button
-        type="button"
-        onClick={() => {
-          setOpen(false)
-          setCursor(page.continuation ?? null)
-          previous.current = page
-        }}
-      >
+      <button type="button" onClick={onClose}>
         Close details
       </button>
     </section>
