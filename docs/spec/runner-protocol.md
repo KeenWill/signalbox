@@ -23,9 +23,9 @@ tool as a combined-locus pure declaration with the identical model definition
 and permission default. The runner advertises configured availability for those
 entries, credential profiles, and repositories, with no workspace capability. It
 derives its empty reconnect inventory from a versioned, fsynced, atomically
-published private journal and executes nothing. An initialized state root without
-that journal fails startup. Leases, dispatch, runner workspace execution, and
-sandbox supervision are listed under Planned.
+published private journal and executes nothing. An initialized state root
+without that journal fails startup. Leases, dispatch, runner workspace
+execution, and sandbox supervision are listed under Planned.
 
 The three process-wire creation commands retain optional runner placement and
 initialize its unpinned status in the creation transaction. Creation validates
