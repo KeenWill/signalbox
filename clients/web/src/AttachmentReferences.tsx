@@ -3,9 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from 'react-redux'
 import {
   ArtifactInspector,
+  type ArtifactRequest,
   artifactResolutionId,
-  attachmentTypeLabel,
-  emptyArtifactInspectorState,
   inspectedArtifact,
   nextResolutionSequence,
 } from './ArtifactInspector'
@@ -18,6 +17,7 @@ import type {
   WebSessionTimelineDetailBody,
   WebTimelineBlobReference,
 } from './generated/web-contract.mjs'
+import { attachmentTypeLabel } from './labels'
 import { actions, type store as appStore } from './state'
 import './features/artifacts/artifacts.css'
 
@@ -51,7 +51,7 @@ function AttachmentReference({
   }, [])
   const store = useAttachmentStore()
   const [sequence] = useState(nextResolutionSequence)
-  const [state, setState] = useState(emptyArtifactInspectorState)
+  const [request, setRequest] = useState<ArtifactRequest | null>(null)
   const input = useMemo(
     () => ({
       digest: attachment.blob_id,
@@ -59,7 +59,7 @@ function AttachmentReference({
     }),
     [attachment.blob_id, attachment.media_type],
   )
-  const active = visible || focused || state.request !== null
+  const active = visible || focused || request !== null
   const descriptor = useArtifactDescriptor(
     available && active ? input : null,
     attachment.length_bytes,
@@ -69,7 +69,7 @@ function AttachmentReference({
     [descriptor.data, sequence],
   )
   const inlineId = artifact?.id
-  const detailId = state.request ? artifactResolutionId(state.request) : undefined
+  const detailId = request ? artifactResolutionId(request) : undefined
   useEffect(() => {
     if (!inlineId) return
     return () => {
@@ -96,18 +96,12 @@ function AttachmentReference({
         ? [artifact.id]
         : [],
     focusTimeline: () => {},
-    openArtifactInspector: () =>
-      setState({
-        digest: input.digest,
-        mediaType: input.mediaType,
-        displayFilename: '',
-        request: { ...input, sequence: nextResolutionSequence() },
-      }),
+    openArtifactInspector: () => setRequest({ ...input, sequence: nextResolutionSequence() }),
   }
-  const close = () => setState(emptyArtifactInspectorState)
+  const close = () => setRequest(null)
   return (
     <Dialog.Root
-      open={state.request !== null}
+      open={request !== null}
       onOpenChange={(open) => {
         if (!open) close()
       }}
@@ -215,8 +209,7 @@ function AttachmentReference({
             expectedByteLength={attachment.length_bytes}
             available={available}
             commandContext={context}
-            state={state}
-            onStateChange={setState}
+            request={request}
             onClose={close}
           />
         </Dialog.Content>
