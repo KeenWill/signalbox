@@ -1014,15 +1014,22 @@ test('keeps a terminal result reachable when its repeated arguments are hidden',
   )
 })
 
-for (const [itemLimit, byteLimit, expectedReads] of [
-  [1, 65536, 1],
-  [10, 65536, 10],
-  [128, 1024, 7],
+for (const [itemLimit, byteLimit, expectedReads, retry] of [
+  [1, 65536, 1, false],
+  [10, 65536, 10, false],
+  [128, 1024, 7, false],
+  [9, 65536, 9, true],
+  [9, 65536, 9, 'gesture'],
+  [9, 65536, 9, 'retry-gesture'],
+  [128, 1024, 7, true],
 ] as const) {
-  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget`, async ({
+  test(`charges discarded details to the ${itemLimit}-item / ${byteLimit}-byte automatic scan budget${typeof retry === 'string' ? ` with a fresh ${retry} after failure` : retry ? ' across failed retries' : ''}`, async ({
     page,
   }) => {
     const reads: URL[] = []
+    const headers: URL[] = []
+    const failed: string[] = []
+    let minDetailBytes = 0
     await page.route('**/api/**', (route) => {
       const url = new URL(route.request().url())
       if (url.pathname.endsWith('/follow'))
@@ -1035,6 +1042,7 @@ for (const [itemLimit, byteLimit, expectedReads] of [
       if (url.pathname === '/api/bootstrap') {
         const bootstrap =
           payload as typeof import('../src/product.fixture').webContractBootstrapFixture
+        minDetailBytes = bootstrap.limits.min_timeline_detail_bytes
         return route.fulfill({
           json: {
             ...bootstrap,
@@ -1047,6 +1055,16 @@ for (const [itemLimit, byteLimit, expectedReads] of [
         })
       }
       if (url.pathname.endsWith('/timeline')) {
+        headers.push(url)
+        if (
+          retry &&
+          failed.length < (retry === 'gesture' ? 1 : 2) &&
+          url.searchParams.get('anchor') === 'before' &&
+          url.searchParams.get('max_items') === '1'
+        ) {
+          failed.push(url.search)
+          return route.abort('failed')
+        }
         const window =
           payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
         const kind = 'turn_completed'
@@ -1087,8 +1105,46 @@ for (const [itemLimit, byteLimit, expectedReads] of [
       return route.fulfill({ json: payload })
     })
     await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
-    await expect.poll(() => reads.length).toBe(expectedReads)
     const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+    if (typeof retry === 'string') {
+      await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+      expect(reads).toHaveLength(expectedReads - 1)
+      if (retry === 'retry-gesture') {
+        await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
+        await expect.poll(() => failed.length).toBe(2)
+        await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+        expect(failed[1]).toBe(failed[0])
+      }
+      const beforeGesture = headers.length
+      const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+      await transcript.hover()
+      await page.mouse.wheel(0, -900)
+      await expect.poll(() => reads.length).toBe(expectedReads - 1 + itemLimit)
+      await expect(surface).toHaveAttribute('aria-busy', 'false')
+      await expect(surface.getByRole('alert')).toHaveCount(0)
+      expect(headers[beforeGesture]?.searchParams.get('max_items')).toBe('8')
+      expect(failed).toHaveLength(retry === 'gesture' ? 1 : 2)
+      return
+    }
+    if (retry) {
+      for (const count of [1, 2]) {
+        await expect(surface.getByRole('alert')).toContainText('Transcript failed to load.')
+        expect(failed).toHaveLength(count)
+        expect(reads).toHaveLength(expectedReads - 1)
+        await surface.getByRole('button', { name: 'Retry transcript', exact: true }).click()
+        if (count === 1) await expect.poll(() => failed.length).toBe(2)
+      }
+      expect(failed[1]).toBe(failed[0])
+    }
+    await expect.poll(() => reads.length).toBe(expectedReads)
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    await expect(surface.getByRole('alert')).toHaveCount(0)
+    if (retry) {
+      expect(headers.at(-1)?.search).toBe(failed[0])
+      expect(reads.at(-1)?.searchParams.get('max_bytes')).toBe(
+        String(byteLimit - (expectedReads - 1) * 128),
+      )
+    }
     await expect(
       surface.getByText(
         'No messages in this part of the conversation. Keep scrolling to look for messages.',
@@ -1097,9 +1153,13 @@ for (const [itemLimit, byteLimit, expectedReads] of [
     expect(reads).toHaveLength(expectedReads)
     expect(reads.length * 128).toBeLessThanOrEqual(byteLimit)
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const beforeGesture = headers.length
     await transcript.hover()
     await page.mouse.wheel(0, -900)
     await expect.poll(() => reads.length).toBeGreaterThan(expectedReads)
+    expect(headers[beforeGesture]?.searchParams.get('max_items')).toBe(
+      String(Math.min(8, itemLimit, Math.floor(byteLimit / minDetailBytes))),
+    )
   })
 }
 

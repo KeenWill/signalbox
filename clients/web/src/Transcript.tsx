@@ -348,6 +348,8 @@ export function VirtualTranscript({
       element.scrollHeight - element.scrollTop - element.clientHeight <= 1
     onEndChange?.(atEnd.current)
     if (restored) return
+    // An explicit edge gesture already handled a queued scroll at this same offset.
+    if (direction !== undefined) restoredOffset.current = element.scrollTop
     if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
     else if (
       element.scrollHeight - element.scrollTop - element.clientHeight < estimateSize &&

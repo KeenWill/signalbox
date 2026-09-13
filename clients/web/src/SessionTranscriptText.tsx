@@ -218,10 +218,13 @@ function TranscriptWindow({
       pageRead.current = true
       const fetchPage =
         direction === 'before' ? transcript.fetchPreviousPage : transcript.fetchNextPage
-      void fetchPage().finally(() => {
-        pageRead.current = false
-        automaticLimits.current = undefined
-      })
+      void fetchPage()
+        .then((result) => {
+          if (!result.isError) automaticLimits.current = undefined
+        })
+        .finally(() => {
+          pageRead.current = false
+        })
     },
     [transcript.fetchPreviousPage, transcript.fetchNextPage],
   )
@@ -534,12 +537,20 @@ function TranscriptWindow({
         selectedId={selectedId}
         pinnedId={focusedRow}
         onEdge={(direction) => {
-          if (pageRead.current || transcript.isFetching || transcript.isError) return
+          if (pageRead.current || transcript.isFetching) return
+          if (
+            transcript.isError &&
+            !(direction === 'before'
+              ? transcript.isFetchPreviousPageError
+              : transcript.isFetchNextPageError)
+          )
+            return
           if (!(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage))
             return
           if (direction === 'before') followLatest.current = false
           scanDirection.current = direction
           emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
+          automaticLimits.current = undefined
           readPage(direction)
         }}
         renderRow={(index, measure, style) => {
@@ -658,6 +669,8 @@ function TurnSummary({
                 }
               >
                 {entry.tool_name}
+                {entry.evidence.type === 'physical_attempt' &&
+                  ` · ${enumLabel(entry.evidence.state)}`}
               </button>
             ))}
             {tool &&

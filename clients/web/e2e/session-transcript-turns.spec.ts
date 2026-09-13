@@ -125,7 +125,7 @@ for (const interleaved of [false, true]) {
       transcript.getByText('Inspect the release status and retain the result.'),
     ).toHaveCount(1)
     await expect(transcript.getByText('Turn completed', { exact: true })).toHaveCount(0)
-    const chip = transcript.getByRole('button', { name: 'exec_command', exact: true })
+    const chip = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
     await expect(chip).toHaveAttribute('aria-expanded', 'false')
     await chip.click()
     await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
@@ -175,7 +175,7 @@ test('preserves assistant text before its tool without treating it as the final 
   await expect(transcript.locator('.session-message-text, .session-tool-chips')).toHaveText([
     'Inspect the release status and retain the result.',
     'I will inspect the release status now.',
-    'exec_command',
+    'exec_command · Completed',
     'The release checks passed. Publishing remains unapproved.',
   ])
 })
@@ -259,8 +259,12 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   })
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  const chips = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
   await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveText('exec_command · Failed')
+  await expect(chips.first()).toHaveAccessibleName('exec_command · Failed')
+  await expect(chips.last()).toHaveText('exec_command · Completed')
+  await expect(chips.last()).toHaveAccessibleName('exec_command · Completed')
   await chips.first().click()
   await chips.last().click()
   const slots = transcript.locator('.session-tool-slot')
@@ -425,7 +429,7 @@ test('keeps an open request disclosure and its continued text when physical atte
   })
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  const chips = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
   await chips.click()
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
   const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
@@ -528,7 +532,7 @@ test('keeps the retained tool in its original row when its earlier proposal is p
   })
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  const chip = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  const chip = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
   await chip.click()
   await expect(transcript.locator('[data-turn-id]')).toHaveCount(1)
   const row = await transcript.locator('[data-turn-id]').first().elementHandle()
@@ -639,10 +643,10 @@ for (const afterOutput of [false, true]) {
     await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     const chips = transcript.getByRole('region', { name: 'Tools used' })
-    await expect(chips.getByRole('button', { name: 'exec_command', exact: true })).toBeVisible()
+    await expect(chips.getByRole('button', { name: /^exec_command(?: · .+)?$/ })).toBeVisible()
     expect(reads).toEqual([])
     if (afterOutput) {
-      await chips.getByRole('button', { name: 'exec_command', exact: true }).click()
+      await chips.getByRole('button', { name: /^exec_command(?: · .+)?$/ }).click()
       await chips.getByRole('button', { name: 'Read more', exact: true }).click()
       await expect(chips.getByText('First tool output', { exact: true })).toBeVisible()
     }
@@ -650,18 +654,18 @@ for (const afterOutput of [false, true]) {
     await expect(chips.getByRole('alert')).toHaveText('More tools could not be loaded.')
     unavailable = false
     await chips.getByRole('button', { name: 'Retry more tools', exact: true }).click()
-    const second = chips.getByRole('button', { name: 'read_file', exact: true })
+    const second = chips.getByRole('button', { name: /^read_file(?: · .+)?$/ })
     await expect(second).toBeVisible()
     await second.click()
     await expect(
       chips.getByRole('region', { name: 'read_file details', exact: true }),
     ).toContainText('Arguments for tool 1')
-    await expect(chips.getByRole('button', { name: 'exec_command', exact: true })).toHaveAttribute(
+    await expect(chips.getByRole('button', { name: /^exec_command(?: · .+)?$/ })).toHaveAttribute(
       'aria-expanded',
       'false',
     )
     await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
-    const third = chips.getByRole('button', { name: 'apply_patch', exact: true })
+    const third = chips.getByRole('button', { name: /^apply_patch(?: · .+)?$/ })
     await expect(third).toBeVisible()
     await third.click()
     await expect(
@@ -766,7 +770,7 @@ test('does not offer a goal-text continuation inside a tool disclosure', async (
   })
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ }).click()
   await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
     'release status',
   )
@@ -838,7 +842,7 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const chips = transcript.getByRole('region', { name: 'Tools used' })
-  await chips.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await chips.getByRole('button', { name: /^exec_command(?: · .+)?$/ }).click()
   await chips.getByRole('button', { name: 'Read more', exact: true }).click()
   await expect(chips.getByText('tool', { exact: true })).toBeVisible()
   await chips.getByRole('button', { name: 'Continue reading', exact: true }).click()
@@ -930,8 +934,12 @@ test('identifies payload-free physical attempt states after a successful retry',
   })
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+  const chips = transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ })
   await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveText('exec_command · Failed')
+  await expect(chips.first()).toHaveAccessibleName('exec_command · Failed')
+  await expect(chips.last()).toHaveText('exec_command · Completed')
+  await expect(chips.last()).toHaveAccessibleName('exec_command · Completed')
   await chips.first().click()
   await chips.last().click()
   const slots = transcript.locator('.session-tool-slot')
@@ -991,7 +999,7 @@ for (const [state, label] of [
     })
     await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-    await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+    await transcript.getByRole('button', { name: /^exec_command(?: · .+)?$/ }).click()
     const details = transcript.getByRole('region', { name: 'exec_command details', exact: true })
     await expect(details.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
       'check status',
