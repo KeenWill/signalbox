@@ -78,3 +78,33 @@ test('rejection remains visible when another turn starts', async ({ page }) => {
     'Keep this draft',
   )
 })
+
+test('held Enter does not retry an unconfirmed message', async ({ page }) => {
+  await sessionApi(page)
+  let attempts = 0
+  let release = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(`**/api/sessions/${sessionId}/input`, async (route) => {
+    attempts += 1
+    if (attempts === 1) return route.abort()
+    await held
+    return route.fulfill({ status: 204 })
+  })
+  await openSession(page)
+  const message = page.getByRole('textbox', { name: 'Message', exact: true })
+  await message.fill('Send once, then wait for an explicit retry')
+  await message.press('Enter')
+  const retry = page.getByRole('button', { name: 'Retry message', exact: true })
+  await expect(retry).toBeEnabled()
+  await message.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', repeat: true })
+  await expect(retry).toBeEnabled()
+  expect(attempts).toBe(1)
+  await retry.click()
+  await expect.poll(() => attempts).toBe(2)
+  release()
+  await expect(
+    page.getByRole('form', { name: 'Message composer' }).getByRole('status'),
+  ).toContainText('Message accepted')
+})

@@ -150,7 +150,7 @@ export function SessionComposer({
           ) {
             event.preventDefault()
             event.stopPropagation()
-            invokeSend()
+            if (!event.repeat) invokeSend()
             return
           }
           if (event.key !== 'Escape') return
