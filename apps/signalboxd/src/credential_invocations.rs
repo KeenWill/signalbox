@@ -18,6 +18,7 @@ pub use capacity::CodexCapacityRefresh;
 
 // Process-group absence is polled once per second until shutdown.
 const PROCESS_GROUP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+const TITLE_RECOVERY_PAGE_SIZE: u32 = 64;
 
 #[derive(Clone)]
 pub struct CredentialInvocationProcesses {
@@ -25,6 +26,7 @@ pub struct CredentialInvocationProcesses {
     eligibility_nudge: InProcessEligibilityNudge,
     observed: Arc<Mutex<BTreeMap<ModelCallId, ObservedInvocation>>>,
     pending_titles: Arc<Mutex<BTreeMap<SessionId, TurnId>>>,
+    title_scan_after: Arc<tokio::sync::Mutex<Option<SessionId>>>,
     title_tasks: Option<tokio::sync::mpsc::Sender<crate::web_http::SessionTitleTask>>,
 }
 
@@ -41,6 +43,7 @@ impl CredentialInvocationProcesses {
             observed: Arc::default(),
             pending_titles: Arc::default(),
             title_tasks: None,
+            title_scan_after: Arc::default(),
         }
     }
 
@@ -74,6 +77,11 @@ impl CredentialInvocationProcesses {
                     if let Err(error) = self.recover().await {
                         tracing::error!(%error, "invocation reservation reconciliation failed");
                         continue;
+                    }
+                    if configuration.catalogs().models.session_title_selection().is_some()
+                        && let Err(error) = self.refill_pending_titles().await
+                    {
+                        tracing::warn!(%error, "initial session title recovery scan failed");
                     }
                     self.submit_pending_titles(&configuration, &mut last_title_session);
                 }
@@ -122,18 +130,32 @@ impl CredentialInvocationProcesses {
     }
 
     pub(crate) async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
-        let repository =
-            signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone());
-        let mut after = None;
-        loop {
-            let page = repository.unclaimed_initial_turns(after).await?;
-            let Some((last_session, _)) = page.last().copied() else {
-                break;
-            };
-            for (session, turn) in page {
-                self.retain_initial_title(session, turn);
-            }
-            after = Some(last_session);
+        *self.title_scan_after.lock().await = None;
+        self.refill_pending_titles().await
+    }
+
+    async fn refill_pending_titles(&self) -> Result<(), sqlx::Error> {
+        let mut after = self.title_scan_after.lock().await;
+        let available = (TITLE_RECOVERY_PAGE_SIZE as usize).saturating_sub(
+            self.pending_titles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+        ) as u32;
+        if available == 0 {
+            return Ok(());
+        }
+        let rows =
+            signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone())
+                .unclaimed_initial_turns(*after, available)
+                .await?;
+        *after = if rows.len() < available as usize {
+            None
+        } else {
+            rows.last().map(|(session, _)| *session)
+        };
+        for (session, turn) in rows {
+            self.retain_initial_title(session, turn);
         }
         Ok(())
     }
@@ -486,6 +508,137 @@ mod tests {
             ended.await.is_err(),
             "runtime drain drops automatic generation"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn initial_title_recovery_refills_a_bounded_page_from_the_last_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use signalbox_application::{
+            InProcessAttemptDispatchGate, StartEligibleTurnOutcome, StartEligibleTurnService,
+            SubmitInputRequest, SubmitInputService,
+        };
+        use signalbox_domain::{
+            AssistantText, DeliveryRequest, ModelSelectionOverride, PerInputConfigurationChoices,
+            SessionConfigurationDefaultsVersion, UserContent,
+        };
+        use signalbox_persistence::{
+            model_execution::PostgresModelCallRepository,
+            start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+        };
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(6).await?;
+        let models = Arc::new(crate::HubModelConfiguration::parse(&format!(
+            "{}\n[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\n",
+            crate::configuration::tests::CONFIGURATION,
+        ))?);
+        let mut completed = BTreeMap::new();
+        for _ in 0..=TITLE_RECOVERY_PAGE_SIZE {
+            let session = SessionId::from_uuid(uuid::Uuid::now_v7());
+            let selection = DirectModelSelection::from_uuid(uuid::uuid!(
+                "10000000-0000-4000-8000-000000000001"
+            ));
+            let creation = CreateSession::new(
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                SessionCreationProvenance::new(
+                    SessionCreationCause::Interactive,
+                    TranscriptAncestry::None,
+                ),
+                SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+            )
+            .prepare(session)
+            .map_err(|_| "session creation rejected")?;
+            CreateSessionRepository::new(pool.clone(), models.session_credential_pin())
+                .handle(creation)
+                .await?;
+            let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+                PostgresEligibilitySweep::new(pool.clone()),
+            );
+            SubmitInputService::new(
+                signalbox_application::UuidV7SubmitInputIdGenerator,
+                SubmitInputRepository::new(pool.clone()),
+                nudge.clone(),
+                signalbox_application::InProcessToolDispatchGate::default(),
+            )
+            .execute(SubmitInputRequest::try_new(
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+                session,
+                UserContent::try_text("Describe database indexes".to_owned())
+                    .expect("fixture input"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+            )?)
+            .await?;
+            let StartEligibleTurnOutcome::Activated(activated) = StartEligibleTurnService::new(
+                signalbox_application::UuidV7StartEligibleTurnIdGenerator,
+                StartEligibleTurnRepository::new(pool.clone()),
+            )
+            .execute(session)
+            .await?
+            else {
+                panic!("fixture turn activates")
+            };
+            let turn = activated.turn();
+            crate::workspace_instruction_runtime::WorkspaceInstructionRuntime::new(
+                pool.clone(),
+                None,
+                Vec::new(),
+            )
+            .prepare(session, turn)
+            .await?;
+            let route = models
+                .resolve_direct_model(selection)
+                .expect("fixture route");
+            let profile = route.credential_profile().to_owned();
+            crate::PostgresScriptedModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    models.target_catalog(),
+                    signalbox_application::ModelCallCredentialReference::new(&profile),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                AssistantText::try_new("Database indexes accelerate queries".to_owned())
+                    .expect("fixture reply"),
+            )
+            .execute_all(activated)
+            .await?;
+            completed.insert(session, turn);
+        }
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let processes = CredentialInvocationProcesses::new(pool, nudge);
+        processes.restore_pending_titles().await?;
+        let expected = completed
+            .iter()
+            .take(TITLE_RECOVERY_PAGE_SIZE as usize)
+            .map(|(session, turn)| (*session, *turn))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            *processes.pending_titles.lock().expect("first page"),
+            expected
+        );
+        processes.refill_pending_titles().await?;
+        assert_eq!(
+            *processes.pending_titles.lock().expect("full page"),
+            expected
+        );
+        processes
+            .pending_titles
+            .lock()
+            .expect("admitted page")
+            .clear();
+        processes.refill_pending_titles().await?;
+        let (&session, &turn) = completed.last_key_value().expect("last session");
+        assert_eq!(
+            *processes.pending_titles.lock().expect("remaining page"),
+            BTreeMap::from([(session, turn)])
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -905,7 +1058,12 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(repository.unclaimed_initial_turns(None).await?.is_empty());
+        assert!(
+            repository
+                .unclaimed_initial_turns(None, TITLE_RECOVERY_PAGE_SIZE)
+                .await?
+                .is_empty()
+        );
         let recovered: uuid::Uuid = sqlx::query_scalar("SELECT model_call_id FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn = $2 AND NOT abandoned")
             .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
         let recovered_target: uuid::Uuid = sqlx::query_scalar(
