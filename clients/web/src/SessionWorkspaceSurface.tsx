@@ -654,6 +654,7 @@ export function SessionWorkspaceSurface({
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
+                anchor={displayedSession.anchor}
                 sessionId={sessionId ?? ''}
                 first={
                   displayedSession.window.items[0]?.address.event_sequence ??

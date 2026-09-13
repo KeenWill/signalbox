@@ -62,19 +62,6 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
       item.body.state.disposition === 'completed'
     )
       group.result = item
-    if (item.body.type === 'tool_batch') {
-      for (const tool of item.body.tools) {
-        const index = group.tools.findIndex((known) => known.request_id === tool.request_id)
-        const previous = group.tools[index]
-        if (!previous) group.tools.push(tool)
-        else
-          group.tools[index] = {
-            ...tool,
-            arguments: tool.arguments ?? previous.arguments,
-            evidence: tool.evidence.type === 'request_only' ? previous.evidence : tool.evidence,
-          }
-      }
-    }
   }
   for (const group of groups.values()) {
     if (
@@ -100,7 +87,46 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
         group.result = undefined
     }
   }
-  return [...groups.values()]
+  const segments: TranscriptTurn[] = []
+  for (const item of items) {
+    const turnId = detailTurnId(item)
+    const group = groups.get(turnId ?? `event-${item.address.event_sequence}`)
+    if (!group) continue
+    let segment = segments.at(-1)
+    if (
+      !segment ||
+      segment.turnId !== turnId ||
+      (turnId === null && segment.events[0]?.address.event_sequence !== item.address.event_sequence)
+    ) {
+      segment = {
+        id: `${group.id}:${item.address.event_sequence}`,
+        turnId,
+        events: [],
+        messages: [],
+        result: undefined,
+        tools: [],
+      }
+      segments.push(segment)
+    }
+    segment.events.push(item)
+    if (group.messages.includes(item)) segment.messages.push(item)
+    if (group.result === item) segment.result = item
+    if (group.outcome === item) segment.outcome = item
+    if (item.body.type === 'tool_batch') {
+      for (const tool of item.body.tools) {
+        const index = segment.tools.findIndex((known) => known.request_id === tool.request_id)
+        const previous = segment.tools[index]
+        if (!previous) segment.tools.push(tool)
+        else
+          segment.tools[index] = {
+            ...tool,
+            arguments: tool.arguments ?? previous.arguments,
+            evidence: tool.evidence.type === 'request_only' ? previous.evidence : tool.evidence,
+          }
+      }
+    }
+  }
+  return segments
 }
 
 export type TurnSummaryPart =
