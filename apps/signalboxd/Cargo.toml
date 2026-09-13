@@ -159,6 +159,7 @@ uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] 
 libc = "0.2.186"
 
 [dev-dependencies]
+signalbox-runner = { path = "../signalbox-runner" }
 # The composed daemon tests read drain dispositions through persistence's
 # test-support surface; carrying the feature here keeps a plain
 # `cargo test -p signalboxd` compiling without an explicit feature flag.
