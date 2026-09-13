@@ -134,11 +134,12 @@ provider cause, and goal disposition for up to 32 listed sessions.
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command
 service. It loads and preserves tags, attributes, and the archive flag under the
-session lock in the replacement transaction. A 204 response acknowledges the
-committed replacement; equal replay returns the recorded result without
-reinstalling it. Title-only intent is retained with the receipt; reusing a
-full-replacement command ID for a title request, or the reverse, is conflicting
-reuse.
+session lock in the replacement transaction. A title that exceeds the complete
+metadata size limit after merging returns 400 without changing metadata. A 204
+response acknowledges the committed replacement; equal replay returns the
+recorded result without reinstalling it. Title-only intent is retained with the
+receipt; reusing a full-replacement command ID for a title request, or the
+reverse, is conflicting reuse.
 
 ## Design decisions
 

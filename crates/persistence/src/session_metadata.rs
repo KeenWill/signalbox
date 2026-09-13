@@ -84,7 +84,7 @@ pub enum SessionMetadataCorruption {
 }
 
 #[derive(signalbox_derive::OperatorError)]
-/// A database failure, ambiguous commit, wrong load purpose, or corruption.
+/// A database failure, ambiguous commit, invalid title merge, wrong load purpose, or corruption.
 #[derive(Debug)]
 pub enum SessionMetadataRepositoryError {
     #[error("session metadata database failure: {field_0}")]
@@ -93,6 +93,9 @@ pub enum SessionMetadataRepositoryError {
     #[error("session metadata commit outcome is ambiguous: {field_0}")]
     /// PostgreSQL did not reveal whether the final commit took effect.
     CommitAmbiguous(#[source] sqlx::Error),
+    #[error("invalid title-only metadata merge: {field_0:?}")]
+    /// The requested title cannot combine with the current preserved fields.
+    InvalidTitleMerge(SessionMetadataContentError),
     #[error(
         "durable command {command_id:?} does not name the requested metadata replacement shape"
     )]
@@ -227,7 +230,7 @@ impl SessionMetadataRepository {
                     .collect(),
                 current.content().archived(),
             )
-            .map_err(SessionMetadataCorruption::InvalidContent)?;
+            .map_err(SessionMetadataRepositoryError::InvalidTitleMerge)?;
             match command.actor() {
                 Actor::User => ReplaceSessionMetadata::new(
                     command.command_id(),
