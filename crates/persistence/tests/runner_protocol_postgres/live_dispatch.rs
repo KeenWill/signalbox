@@ -1,10 +1,10 @@
 //! Committed claim and result boundaries fence every dispatch correlation member.
 
 use super::*;
-use signalbox_persistence::runner_protocol::RunnerConnectionTransitionOutcome;
 use signalbox_domain::{
     RunnerLeaseState, ToolAttemptObservation, ToolResultContent, ToolResultText,
 };
+use signalbox_persistence::runner_protocol::RunnerConnectionTransitionOutcome;
 
 fn mismatches(correlation: &RunnerLeaseCorrelation) -> Vec<RunnerLeaseCorrelation> {
     let mut changed = Vec::new();

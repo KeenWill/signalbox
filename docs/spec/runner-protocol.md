@@ -239,8 +239,8 @@ from inventory, is durably lost under the effect-class ambiguity law, including
 when inventory names a different historical lease. An equal recorded result is
 acknowledged; an unequal duplicate is fatal. The runner discards its journal
 entry only on the exact recorded or stale directive and never invokes a started
-lease again. Fresh offers wait until reconnect establishes the resumed connection;
-prior physical connections cannot issue authority after a new epoch.
+lease again. Fresh offers wait until reconnect establishes the resumed
+connection; prior physical connections cannot issue authority after a new epoch.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
