@@ -140,6 +140,7 @@ const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
 struct WebHttpState {
+    pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     blob_read_budget: Arc<Semaphore>,
 }
@@ -532,6 +533,7 @@ fn production_router_with_budget(
     eligibility_nudge: Option<signalbox_application::InProcessEligibilityNudge>,
 ) -> Router {
     let http_state = WebHttpState {
+        pool: pool.clone(),
         blobs,
         blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
     };

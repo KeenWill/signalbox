@@ -809,11 +809,16 @@ const schemas = {
           "same_origin_json_mutations": {
             "description": "JSON mutations validate a supplied browser origin against authority.",
             "type": "boolean"
+          },
+          "session_title_generation": {
+            "description": "This runtime has configured model-backed session name generation.",
+            "type": "boolean"
           }
         },
         "required": [
           "bounded_json",
           "same_origin_json_mutations",
+          "session_title_generation",
           "ndjson_streaming",
           "immutable_blob_content",
           "blob_derivations",

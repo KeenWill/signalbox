@@ -51,6 +51,8 @@ pub struct WebContractCapabilities {
     pub bounded_json: bool,
     /// JSON mutations validate a supplied browser origin against authority.
     pub same_origin_json_mutations: bool,
+    /// This runtime has configured model-backed session name generation.
+    pub session_title_generation: bool,
     /// Incremental response items use newline-delimited JSON.
     pub ndjson_streaming: bool,
     /// Immutable same-origin blob descriptors and byte delivery are available.
@@ -137,6 +139,7 @@ impl WebContractBootstrap {
             capabilities: WebContractCapabilities {
                 bounded_json: true,
                 same_origin_json_mutations: true,
+                session_title_generation: false,
                 ndjson_streaming: true,
                 immutable_blob_content,
                 blob_derivations: image_derivatives,

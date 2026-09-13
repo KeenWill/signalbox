@@ -2524,3 +2524,54 @@ async fn api_admits_absent_fetch_metadata() {
         .expect("router responds");
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn session_title_bootstrap_reports_configured_runtime_availability() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@localhost/unused")
+        .expect("lazy fixture pool");
+    for configured in [false, true] {
+        let source = if configured {
+            format!(
+                "{}\n[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\n",
+                crate::configuration::tests::CONFIGURATION
+            )
+        } else {
+            crate::configuration::tests::CONFIGURATION.to_owned()
+        };
+        let models = crate::HubModelConfiguration::parse(&source).expect("fixture models");
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let reload = crate::configuration_reload::ConfigurationReload::new(
+            pool.clone(),
+            models.clone(),
+            crate::SessionTemplateConfiguration::default(),
+            PathBuf::from("unused-models.toml"),
+            PathBuf::from("unused-templates.toml"),
+            None,
+        )
+        .expect("reload fixture")
+        .with_runtime_factory(crate::model_catalog_runtime::ModelRuntimeFactory::new(
+            None, None, None,
+        ))
+        .with_title_invocation_processes(
+            crate::credential_invocations::CredentialInvocationProcesses::new(pool.clone(), nudge),
+        );
+        let response = production_router(None, Some(pool.clone()), None, Some(models), None)
+            .layer(axum::Extension(reload))
+            .oneshot(
+                Request::get("/api/bootstrap")
+                    .header(header::HOST, "localhost")
+                    .body(Body::empty())
+                    .expect("bootstrap request"),
+            )
+            .await
+            .expect("bootstrap response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bootstrap: WebContractBootstrap =
+            serde_json::from_slice(&response_body(response).await).expect("bootstrap DTO");
+        assert_eq!(bootstrap.capabilities.session_title_generation, configured);
+    }
+    pool.close().await;
+}

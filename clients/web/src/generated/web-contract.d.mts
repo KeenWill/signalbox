@@ -97,6 +97,7 @@ export type WebContractCapabilities = {
   readonly imported_continuations: boolean;
   readonly ndjson_streaming: boolean;
   readonly same_origin_json_mutations: boolean;
+  readonly session_title_generation: boolean;
 };
 
 export type WebContractIdentity = {
