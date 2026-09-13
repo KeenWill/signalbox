@@ -14,6 +14,7 @@ test('approving a pending request confirms once inline', async ({ page }, testIn
     return route.fulfill({ status: 204 })
   })
   await openSession(page)
+  await expect(page.getByRole('button', { name: 'Cancel turn', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: 'Approve', exact: true }).click()
   expect(requests).toHaveLength(0)
   await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -145,7 +146,7 @@ for (const viewport of [
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     )
-    for (const name of ['Approve', 'Deny', 'Cancel turn', 'Set goal', 'Clear goal']) {
+    for (const name of ['Approve', 'Deny', 'Set goal', 'Clear goal']) {
       const control = header.getByRole('button', { name, exact: true })
       await expect(control).toBeVisible()
       const bounds = await control.boundingBox()
@@ -166,5 +167,34 @@ for (const viewport of [
     await expect(page.getByRole('textbox', { name: 'Note (optional)' })).toBeVisible()
     await expect(header.getByRole('button', { name: 'Confirm', exact: true })).toHaveCount(0)
     if (viewport.width >= 390) expect((await header.boundingBox())?.height).toBeLessThanOrEqual(70)
+  })
+}
+
+for (const action of [
+  { button: 'Set goal', field: 'Goal' },
+  { button: 'Deny', field: 'Note (optional)' },
+  { button: 'Cancel turn', field: 'Message to continue with' },
+]) {
+  test(`Escape closes ${action.button} editing and restores its opener`, async ({ page }) => {
+    const api = await sessionApi(page, true)
+    if (action.button === 'Deny') {
+      api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    }
+    const submissions: string[] = []
+    page.on('request', (request) => {
+      if (['POST', 'PUT', 'DELETE'].includes(request.method())) submissions.push(request.url())
+    })
+    await openSession(page)
+    const opener = page.getByRole('button', { name: action.button, exact: true })
+    await opener.click()
+    const field = page.getByRole('textbox', { name: action.field, exact: true })
+    await field.fill('Unsubmitted text')
+    await field.press('Escape')
+    await expect(field).toHaveCount(0)
+    await expect(opener).toBeFocused()
+    await expect(page).toHaveURL(new RegExp(`session=${sessionId}`))
+    expect(submissions).toEqual([])
+    await opener.press('Enter')
+    await expect(field).toHaveValue('')
   })
 }

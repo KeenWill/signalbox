@@ -18,6 +18,7 @@ import {
 } from 'react'
 import { type SessionAction, submitSessionAction } from './attention'
 import { invokeCommand } from './commands'
+import { Field } from './Field'
 import type { WebSessionTimelineWindow, WebUsageSummary } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import './session-header.css'
@@ -67,6 +68,7 @@ function SessionActions({
   const [chosenRequest, setChosenRequest] = useState<string | null>(null)
   const [chosenTurn, setChosenTurn] = useState<string | null>(null)
   const inFlight = useRef(false)
+  const actionOpener = useRef<HTMLButtonElement>(null)
   const queryClient = useQueryClient()
   const pendingActions = useMutationState({
     filters: { mutationKey: ['session-action'] },
@@ -126,13 +128,18 @@ function SessionActions({
     },
   })
   const error = pending?.error ?? mutation.error
-  const choose = (next: typeof choice) => {
+  const choose = (next: typeof choice, opener?: HTMLButtonElement) => {
+    if (opener) actionOpener.current = opener
     setChoice(next)
     setChosenRequest(pendingRequest)
     setChosenTurn(activeTurn)
     setText('')
     setNotice('')
     mutation.reset()
+  }
+  const dismiss = () => {
+    choose(null)
+    actionOpener.current?.focus()
   }
   const confirm = () => {
     if (inFlight.current || sending || capacityReached) return
@@ -179,14 +186,14 @@ function SessionActions({
               <button
                 type="button"
                 disabled={retained !== null || capacityReached}
-                onClick={() => choose('approve')}
+                onClick={(event) => choose('approve', event.currentTarget)}
               >
                 Approve
               </button>
               <button
                 type="button"
                 disabled={retained !== null || capacityReached}
-                onClick={() => choose('deny')}
+                onClick={(event) => choose('deny', event.currentTarget)}
               >
                 Deny
               </button>
@@ -196,7 +203,7 @@ function SessionActions({
             <button
               type="button"
               disabled={retained !== null || capacityReached}
-              onClick={() => choose('cancel')}
+              onClick={(event) => choose('cancel', event.currentTarget)}
             >
               Cancel turn
             </button>
@@ -204,14 +211,14 @@ function SessionActions({
           <button
             type="button"
             disabled={retained !== null || capacityReached}
-            onClick={() => choose('set-goal')}
+            onClick={(event) => choose('set-goal', event.currentTarget)}
           >
             Set goal
           </button>
           <button
             type="button"
             disabled={retained !== null || capacityReached}
-            onClick={() => choose('clear-goal')}
+            onClick={(event) => choose('clear-goal', event.currentTarget)}
           >
             Clear goal
           </button>
@@ -220,26 +227,36 @@ function SessionActions({
       {choice && (
         <form
           className="session-action-confirmation"
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape' || retained || inFlight.current) return
+            event.preventDefault()
+            event.stopPropagation()
+            dismiss()
+          }}
           onSubmit={(event) => {
             event.preventDefault()
             confirm()
           }}
         >
           {choice === 'set-goal' || choice === 'deny' || choice === 'cancel' ? (
-            <label>
-              {choice === 'set-goal'
-                ? 'Goal'
-                : choice === 'cancel'
-                  ? 'Message to continue with'
-                  : 'Note (optional)'}
-              {choice === 'cancel' && <span>Cancel this turn and continue with your message.</span>}
-              <textarea
+            <div className="session-action-entry">
+              <Field
+                as="textarea"
+                label={
+                  choice === 'set-goal'
+                    ? 'Goal'
+                    : choice === 'cancel'
+                      ? 'Message to continue with'
+                      : 'Note (optional)'
+                }
+                rows={3}
                 value={retained ? retainedText : text}
                 onChange={(event) => setText(event.target.value)}
                 disabled={retained !== null || capacityReached}
                 required={choice === 'set-goal' || choice === 'cancel'}
               />
-            </label>
+              {choice === 'cancel' && <p>Cancel this turn and continue with your message.</p>}
+            </div>
           ) : (
             <span>
               {choice === 'approve'
@@ -258,7 +275,7 @@ function SessionActions({
             {sending ? 'Sending…' : retained ? 'Retry same action' : 'Confirm'}
           </button>
           {!retained && (
-            <button type="button" onClick={() => choose(null)}>
+            <button type="button" onClick={dismiss}>
               Keep unchanged
             </button>
           )}
@@ -804,7 +821,11 @@ export function SessionWorkspaceSurface({
                 ? live.active.state.tool_request_id
                 : null
             }
-            activeTurn={live?.active?.turn_id ?? null}
+            activeTurn={
+              live?.active?.state.kind === 'awaiting_tool_approval'
+                ? null
+                : (live?.active?.turn_id ?? null)
+            }
             onAccepted={refetchSession}
             renderHeader={(controls) => (
               <header className="session-compact-header">

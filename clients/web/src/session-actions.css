@@ -13,15 +13,9 @@
   gap: var(--product-space);
 }
 
-.session-action-confirmation label {
-  display: grid;
-  gap: var(--product-space);
+.session-action-entry {
   flex: 1 1 16rem;
-}
-
-.session-action-confirmation textarea {
-  width: 100%;
-  min-height: 4rem;
+  min-width: 0;
 }
 
 .session-actions p {
@@ -40,21 +34,13 @@
   border-color: var(--border-strong);
 }
 
-.session-actions button:focus-visible,
-.session-actions textarea:focus-visible {
+.session-actions button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
 .session-actions button:disabled {
   opacity: 0.5;
-}
-
-.session-actions textarea {
-  border: 1px solid var(--border);
-  background: var(--surface-1);
-  color: var(--text);
-  padding: var(--product-space);
 }
 
 .session-actions small {
