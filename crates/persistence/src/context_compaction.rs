@@ -830,12 +830,12 @@ impl PreparedContextCompaction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompactionSource {
-    frontier: ContextFrontierId,
+pub(crate) struct CompactionSource {
+    pub(crate) frontier: ContextFrontierId,
     member_count: u64,
 }
 
-async fn load_compaction_source(
+pub(crate) async fn load_compaction_source(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
 ) -> Result<Option<CompactionSource>, ContextCompactionRepositoryError> {

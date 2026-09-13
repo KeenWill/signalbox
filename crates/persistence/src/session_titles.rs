@@ -4,8 +4,7 @@ use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
 use signalbox_application::UsageTokenAxes;
 use signalbox_domain::{
-    DirectModelSelection, ImportedSourceAttestation, ImportedTranscriptContent, ModelCallId,
-    ResolvedProviderTarget, SessionId, TurnId,
+    DirectModelSelection, ModelCallId, ResolvedProviderTarget, SessionId, TurnId,
 };
 use sqlx::{PgPool, Row};
 
@@ -92,21 +91,31 @@ impl SessionTitleRepository {
         Ok(true)
     }
 
+    /// Closes abandoned title calls at daemon startup without retrying generation.
+    /// Registered processes retain capacity until their existing observer confirms cleanup.
+    pub async fn abandon_incomplete(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE session_title_model_call SET state_kind = 'terminal', terminal_at = statement_timestamp()
+            WHERE state_kind IN ('prepared', 'in_flight')").execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Reads recent conversation text within the caller's configured model budget.
     pub async fn conversation(
         &self,
         session: SessionId,
         max_chars: i32,
     ) -> Result<String, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let Some(source) = crate::context_compaction::load_compaction_source(&mut tx, session)
+            .await
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?
+        else {
+            return Ok(String::new());
+        };
         let mut rows = sqlx::query(
-            "WITH frontier AS (
-                SELECT context_frontier_id FROM context_frontier WHERE owning_session_id = $1
-                ORDER BY member_count DESC LIMIT 1
-             )
-             SELECT LEFT(COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value), $2) AS value,
-                    imported.content_encoding
-             FROM frontier JOIN context_frontier_member AS member
-               ON member.owning_session_id = $1 AND member.context_frontier_id = frontier.context_frontier_id
+            "SELECT LEFT(COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value), $2) AS value,
+                    substring(imported.content_encoding FROM 1 FOR $3) AS content_encoding
+             FROM context_frontier_member AS member
              JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
              LEFT JOIN accepted_input_content_part AS part
                ON part.accepted_input_id = entry.origin_accepted_input_id AND part.part_kind = 'text'
@@ -114,10 +123,13 @@ impl SessionTitleRepository {
                ON imported.imported_conversation_id = entry.imported_conversation_id
               AND imported.imported_transcript_entry_id = entry.imported_transcript_entry_id
               AND imported.content_kind = 1
-             WHERE COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value) IS NOT NULL
-                OR imported.content_encoding IS NOT NULL
+             WHERE member.owning_session_id = $1 AND member.context_frontier_id = $4
+               AND (COALESCE(entry.assistant_text_value, entry.context_summary_value, part.text_value) IS NOT NULL
+                OR imported.content_encoding IS NOT NULL)
              ORDER BY member.member_position DESC, part.position DESC NULLS LAST")
-            .bind(session.into_uuid()).bind(max_chars).fetch(&self.pool);
+            .bind(session.into_uuid()).bind(max_chars)
+            .bind(max_chars.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
+            .bind(source.frontier.into_uuid()).fetch(&mut *tx);
         let mut remaining = usize::try_from(max_chars).unwrap_or_default();
         let mut parts = Vec::new();
         while remaining > 0 {
@@ -128,13 +140,11 @@ impl SessionTitleRepository {
                 Some(text) => text,
                 None => {
                     let encoded: Vec<u8> = row.try_get("content_encoding")?;
-                    match crate::conversation_import_codec::decode_content(&encoded)
+                    match crate::conversation_import_codec::decode_text_prefix(&encoded)
                         .map_err(|_| sqlx::Error::Decode("invalid imported title context".into()))?
                     {
-                        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
-                            text,
-                        )) => text.as_str().to_owned(),
-                        _ => continue,
+                        Some(text) => text.to_owned(),
+                        None => continue,
                     }
                 }
             };

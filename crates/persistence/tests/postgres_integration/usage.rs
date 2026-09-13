@@ -303,6 +303,20 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         credential_invocations::process_group(&pool, contended.call).await?,
         None
     );
+    for in_flight in [false, true] {
+        let mut abandoned = SessionTitleCall {
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            ..contended.clone()
+        };
+        assert!(titles.prepare(&mut abandoned, &pools).await?);
+        if in_flight {
+            titles.authorize(abandoned.call).await?;
+        }
+        titles.abandon_incomplete().await?;
+        let retained: (String, bool) = sqlx::query_as("SELECT title.state_kind, reservation.released_at IS NOT NULL FROM session_title_model_call title JOIN credential_invocation_reservation reservation USING (model_call_id) WHERE model_call_id = $1")
+            .bind(abandoned.call.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(retained, ("terminal".to_owned(), true));
+    }
     pool.close().await;
     drop(container);
     Ok(())
