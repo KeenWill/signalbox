@@ -44,7 +44,7 @@ for (const viewport of [
       })
     })
     await openSession(page)
-    await expect(page.getByTitle('Session cost', { exact: true })).toHaveText('$1.50')
+    await expect(page.getByTestId('session-cost')).toHaveText('$1.50')
     await expect(
       page.getByRole('link', { name: 'signalbox/example', exact: true }),
     ).toHaveAttribute('href', 'https://github.com/signalbox/example')
@@ -67,7 +67,7 @@ for (const viewport of [
       fullPage: true,
     })
     api.grow()
-    await expect(page.getByTitle('Session cost', { exact: true })).toHaveText('$3.50')
+    await expect(page.getByTestId('session-cost')).toHaveText('$3.50')
     expect(reads.every((id) => id === sessionId)).toBe(true)
   })
 }
@@ -114,7 +114,7 @@ for (const example of [
       route.fulfill({ json: { groups: example.groups, truncated: example.truncated } }),
     )
     await openSession(page)
-    await expect(page.getByTitle('Session cost', { exact: true })).toHaveText(example.text)
+    await expect(page.getByTestId('session-cost')).toHaveText(example.text)
   })
 
 test('leaving a session cancels its pending cost summary', async ({ page }) => {
@@ -123,7 +123,7 @@ test('leaving a session cancels its pending cost summary', async ({ page }) => {
     route.fulfill({ json: { groups: [], truncated: false } }),
   )
   await openSession(page)
-  await expect(page.getByTitle('Session cost', { exact: true })).toHaveText('$0.00')
+  await expect(page.getByTestId('session-cost')).toHaveText('$0.00')
   let blocked: Request | null = null
   let release = () => {}
   const waiting = new Promise<void>((resolve) => {
@@ -152,8 +152,14 @@ test('wide costs keep the phone header and timeline controls in view', async ({
     }),
   )
   await openSession(page)
-  const cost = page.getByTitle('Session cost', { exact: true })
+  const cost = page.getByTestId('session-cost')
   await expect(cost).toHaveText('$12,345,678,901,234,567,890,123,456,789.00')
+  await expect(cost).toHaveAttribute('title', '$12,345,678,901,234,567,890,123,456,789.00')
+  await page.getByText('Session details', { exact: true }).click()
+  await expect(
+    page.getByText('Cost: $12,345,678,901,234,567,890,123,456,789.00', { exact: true }),
+  ).toBeVisible()
+  await page.getByText('Session details', { exact: true }).click()
   await expect(cost).toBeInViewport({ ratio: 1 })
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'First', exact: true })).toBeInViewport({
@@ -192,7 +198,7 @@ test('cost refresh completes during session growth and catches up without hiding
   await page.getByText('Session details', { exact: true }).click()
   await expect(page.locator('.session-header-detail-content')).toContainText('44')
   releaseFirst()
-  const cost = page.getByTitle('Session cost', { exact: true })
+  const cost = page.getByTestId('session-cost')
   await expect(cost).toHaveText('$1.50')
   await expect.poll(() => requests.length).toBe(2)
   expect(requests[0]!.failure()).toBeNull()
@@ -211,7 +217,7 @@ test('a failed cost refresh replaces the retained total with an unavailable indi
       : route.fulfill({ json: { groups: [group('1.5')], truncated: false } }),
   )
   await openSession(page)
-  const cost = page.getByTitle('Session cost', { exact: true })
+  const cost = page.getByTestId('session-cost')
   await expect(cost).toHaveText('$1.50')
   api.grow()
   await expect(cost).toHaveText('Cost unavailable')
@@ -223,7 +229,7 @@ test('cost follows durable progress when the timeline extension fails', async ({
     route.fulfill({ json: { groups: [group(api.state.grown ? '3.5' : '1.5')], truncated: false } }),
   )
   await openSession(page)
-  const cost = page.getByTitle('Session cost', { exact: true })
+  const cost = page.getByTestId('session-cost')
   await expect(cost).toHaveText('$1.50')
   let failedExtensions = 0
   await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) => {

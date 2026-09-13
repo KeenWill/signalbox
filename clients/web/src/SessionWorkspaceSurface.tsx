@@ -277,6 +277,11 @@ export function SessionWorkspaceSurface({
     enabled: displayedSession !== undefined,
     gcTime: 0,
   })
+  const costLabel = cost.isError
+    ? 'Cost unavailable'
+    : cost.data
+      ? sessionCostLabel(cost.data)
+      : 'Cost loading…'
   const refetchCost = cost.refetch
   useEffect(() => {
     if (
@@ -488,12 +493,8 @@ export function SessionWorkspaceSurface({
                     ? 'Active'
                     : 'Inactive'}
               </p>
-              <span className="session-header-cost" title="Session cost">
-                {cost.isError
-                  ? 'Cost unavailable'
-                  : cost.data
-                    ? sessionCostLabel(cost.data)
-                    : 'Cost loading…'}
+              <span className="session-header-cost" data-testid="session-cost" title={costLabel}>
+                {costLabel}
               </span>
               <div
                 className="session-header-actions"
@@ -563,6 +564,7 @@ export function SessionWorkspaceSurface({
                 <summary>Session details</summary>
                 <div className="session-header-detail-content">
                   <p>Session {sessionId}</p>
+                  <p>Cost: {costLabel}</p>
                   <dl className="session-telemetry">
                     <div>
                       <dt>Items</dt>
