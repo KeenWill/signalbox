@@ -166,6 +166,8 @@ Your confidence measures whether your categorical verdict is correct, not the pr
 [review_library]
 # review-judge-sibling-context-v1
 source_version = 5
+# Omit for review-judgment; select an existing template for the judgment stage.
+judgment_template = "review-judgment"
 concern_set_version = "initial-five-v1"
 alias = "7fde05bc-b4c3-44f7-8a87-748814c80191"
 dangerous_tool_auto_approval = false

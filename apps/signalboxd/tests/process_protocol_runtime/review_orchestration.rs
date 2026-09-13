@@ -62,6 +62,7 @@ pub(crate) struct ReviewRuntimeDriver {
     pub(crate) pool: PgPool,
     pub(crate) target: CanonicalUuid,
     pub(crate) next_request: u64,
+    pub(crate) judgment_template: &'static str,
 }
 
 impl ReviewRuntimeDriver {
@@ -118,6 +119,7 @@ impl ReviewRuntimeDriver {
             pool: runtime.pool.clone(),
             target,
             next_request: 1,
+            judgment_template: REVIEW_JUDGMENT_TEMPLATE,
         })
     }
 
@@ -480,7 +482,7 @@ impl ReviewRuntimeDriver {
             target_id: self.target,
             concern_set_version: String::from(REVIEW_CONCERN_SET_VERSION),
             import_template_name: String::from(REVIEW_IMPORT_TEMPLATE),
-            judgment_template_name: String::from(REVIEW_JUDGMENT_TEMPLATE),
+            judgment_template_name: String::from(self.judgment_template),
             repair_template_name: String::from(REVIEW_REPAIR_TEMPLATE),
             publication_template_name: String::from(REVIEW_PUBLICATION_TEMPLATE),
             concerns: review_concern_inputs(),
@@ -1010,8 +1012,23 @@ pub(crate) async fn read_complete_review_snapshot(
     }
 }
 
-pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start().await?;
+pub(crate) async fn drive_review_orchestration_process_loop(
+    judgment_template: &'static str,
+) -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut source = include_str!("../../../../config/session-templates.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    source["review_library"]["judgment_template"] = toml_edit::value(judgment_template);
+    let catalog = tempfile::NamedTempFile::new()?;
+    std::fs::write(catalog.path(), source.to_string())?;
+    let templates = SessionTemplateConfiguration::read(
+        catalog.path(),
+        || None,
+        &support::parse_model_configuration(MODEL_CONFIGURATION)?,
+    )?;
+    runtime
+        .restart_with_templates(MODEL_CONFIGURATION, templates)
+        .await?;
     let target = review_identity(0xa000);
     let attempt = review_identity(0xa100);
     let findings = ReviewFindingFixtures {
@@ -1027,6 +1044,7 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
         publication_published_count: CanonicalU64::new(1),
     };
     let mut driver = ReviewRuntimeDriver::connect(&runtime, target).await?;
+    driver.judgment_template = judgment_template;
     driver.create_target().await?;
     driver.start_attempt(attempt).await?;
 
@@ -1181,11 +1199,7 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
         .await?;
 
     let analysis = driver
-        .create_completed_turn_pass(
-            REVIEW_JUDGMENT_TEMPLATE,
-            ReviewWorkflow::JudgeFindings,
-            0xc600,
-        )
+        .create_completed_turn_pass(judgment_template, ReviewWorkflow::JudgeFindings, 0xc600)
         .await?;
     driver.complete_result_free_pass(analysis).await?;
     driver
@@ -1224,11 +1238,7 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
     .await?;
 
     let accepted_fixed = driver
-        .create_completed_turn_pass(
-            REVIEW_JUDGMENT_TEMPLATE,
-            ReviewWorkflow::JudgeFindings,
-            0xc700,
-        )
+        .create_completed_turn_pass(judgment_template, ReviewWorkflow::JudgeFindings, 0xc700)
         .await?;
     driver
         .record_finding_event(
@@ -1250,11 +1260,7 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
         )
         .await?;
     let duplicate = driver
-        .create_completed_turn_pass(
-            REVIEW_JUDGMENT_TEMPLATE,
-            ReviewWorkflow::DedupeFindings,
-            0xc800,
-        )
+        .create_completed_turn_pass(judgment_template, ReviewWorkflow::DedupeFindings, 0xc800)
         .await?;
     driver
         .record_finding_event(
@@ -1276,11 +1282,7 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
         )
         .await?;
     let accepted_published = driver
-        .create_completed_turn_pass(
-            REVIEW_JUDGMENT_TEMPLATE,
-            ReviewWorkflow::JudgeFindings,
-            0xc900,
-        )
+        .create_completed_turn_pass(judgment_template, ReviewWorkflow::JudgeFindings, 0xc900)
         .await?;
     driver
         .record_finding_event(
@@ -1416,5 +1418,12 @@ pub(crate) async fn drive_review_orchestration_process_loop() -> Result<(), Box<
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn review_orchestration_reaches_complete_through_the_process_protocol()
 -> Result<(), Box<dyn Error>> {
-    drive_review_orchestration_process_loop().await
+    drive_review_orchestration_process_loop(REVIEW_JUDGMENT_TEMPLATE).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn review_orchestration_accepts_the_selected_full_context_judge() -> Result<(), Box<dyn Error>>
+{
+    drive_review_orchestration_process_loop("review-judgment-agentic-full").await
 }

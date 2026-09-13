@@ -161,7 +161,10 @@ daemon defaults. The concern inventory a library may carry belongs to
 
 Session execution evidence and attempt configuration agree through two
 independently checked bindings, the session's copied template provenance and the
-attempt's own digest, rather than through a caller-supplied claim.
+attempt's own digest, rather than through a caller-supplied claim. Judgment
+analysis and effect sessions use the template selected by
+`review_library.judgment_template`. A reload that changes that selection or its
+contents does not rebind an existing attempt.
 
 Concern work carries no repair or publication handle and no other member's
 uncommitted output. Why: a concurrent member holds no more authority than it
