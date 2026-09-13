@@ -1,5 +1,13 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type { CommandContext } from './commands'
 import type {
@@ -122,6 +130,24 @@ export function SessionTranscriptText(props: SessionTranscriptTextProps) {
   )
 }
 
+function advancesToolMember(page: WebSessionTimelineDetailPage): boolean {
+  const item = page.items.at(-1)
+  const cursor = page.continuation
+  return (
+    item?.body.type === 'tool_batch' &&
+    cursor?.type === 'more_body' &&
+    cursor.body.address.event_sequence === item.address.event_sequence &&
+    cursor.body.member_index > (item.body.projected_member_index ?? 0)
+  )
+}
+
+type LoadedToolPage = { page: WebSessionTimelineDetailPage; includeTools: boolean }
+type AdoptToolPage = (
+  source: WebSessionTimelineDetailPage,
+  page: WebSessionTimelineDetailPage,
+  includeTools: boolean,
+) => void
+
 function TranscriptWindow({
   scrollRef,
   sessionId,
@@ -188,9 +214,57 @@ function TranscriptWindow({
       void transcript.refetch()
     }
   }, [observed, transcript.refetch, queries, queryKey, initialAnchor, pages])
-  const entries = useMemo(
+  const [toolPages, setToolPages] = useState<Record<string, LoadedToolPage>>({})
+  const adoptToolPage = useCallback<AdoptToolPage>((source, page, includeTools) => {
+    const key = JSON.stringify(source.continuation)
+    setToolPages((current) =>
+      current[key]?.page === page
+        ? current
+        : {
+            ...current,
+            [key]: { page, includeTools },
+          },
+    )
+  }, [])
+  const retainedEntries = useMemo(
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],
+  )
+  useEffect(() => {
+    const retained = new Set(retainedEntries.map((event) => event.address.event_sequence))
+    setToolPages((current) =>
+      Object.values(current).some(({ page }) =>
+        page.items.some((item) => !retained.has(item.address.event_sequence)),
+      )
+        ? Object.fromEntries(
+            Object.entries(current).filter(([, { page }]) =>
+              page.items.every((item) => retained.has(item.address.event_sequence)),
+            ),
+          )
+        : current,
+    )
+  }, [retainedEntries])
+  const entries = useMemo(
+    () =>
+      retainedEntries.flatMap((event) => [
+        event,
+        ...Object.values(toolPages).flatMap(({ page, includeTools }) =>
+          includeTools
+            ? page.items.filter(
+                (item) => item.address.event_sequence === event.address.event_sequence,
+              )
+            : [],
+        ),
+      ]),
+    [retainedEntries, toolPages],
+  )
+  const detailPages = useMemo(
+    () =>
+      [
+        ...(pages?.flatMap((page) => page.details) ?? []),
+        ...Object.values(toolPages).map(({ page }) => page),
+      ].filter((page) => !toolPages[JSON.stringify(page.continuation)]?.includeTools),
+    [pages, toolPages],
   )
   const windowStarts = useMemo(
     () =>
@@ -396,7 +470,8 @@ function TranscriptWindow({
               <TurnSummary
                 turn={turn}
                 renderTool={renderTool}
-                detailPages={pages?.flatMap((page) => page.details) ?? []}
+                detailPages={detailPages}
+                adoptToolPage={adoptToolPage}
                 sessionId={sessionId}
                 limits={limits}
               />
@@ -412,12 +487,14 @@ function TranscriptWindow({
 }
 
 function TurnSummary({
+  adoptToolPage,
   turn,
   renderTool,
   detailPages,
   sessionId,
   limits,
 }: {
+  adoptToolPage: AdoptToolPage
   turn: TranscriptTurn
   renderTool?: SessionTranscriptTextProps['renderTool']
   detailPages: readonly WebSessionTimelineDetailPage[]
@@ -471,6 +548,7 @@ function TurnSummary({
                       const item = candidate.items.at(-1)
                       return (
                         cursor?.type === 'more_body' &&
+                        !advancesToolMember(candidate) &&
                         ((item?.body.type === 'tool_batch' &&
                           item.body.tools.some(
                             (entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool),
@@ -488,6 +566,7 @@ function TurnSummary({
                     .map((page) => (
                       <ContinuedEvent
                         key={JSON.stringify(page.continuation)}
+                        adoptToolPage={adoptToolPage}
                         sessionId={sessionId}
                         page={page}
                         limits={limits}
@@ -495,6 +574,28 @@ function TurnSummary({
                     ))}
                 </div>
               )}
+            {detailPages
+              .filter(
+                (page) =>
+                  advancesToolMember(page) &&
+                  turn.events.some(
+                    (event) =>
+                      event.address.event_sequence === continuationSequence(page) &&
+                      event.body.type === 'tool_batch' &&
+                      event.body.tools.some((entry) =>
+                        part.tools.some((tool) => toolEvidenceKey(tool) === toolEvidenceKey(entry)),
+                      ),
+                  ),
+              )
+              .map((page) => (
+                <MoreTools
+                  key={JSON.stringify(page.continuation)}
+                  sessionId={sessionId}
+                  page={page}
+                  limits={limits}
+                  adoptToolPage={adoptToolPage}
+                />
+              ))}
           </section>
         ),
       )}
@@ -526,11 +627,65 @@ function continuationSequence(page: WebSessionTimelineDetailPage): string {
     : (cursor?.body.address.event_sequence ?? '')
 }
 
+function MoreTools({
+  sessionId,
+  page,
+  limits,
+  adoptToolPage,
+}: {
+  sessionId: string
+  page: WebSessionTimelineDetailPage
+  limits: SessionTranscriptLimits
+  adoptToolPage: AdoptToolPage
+}) {
+  const [open, setOpen] = useState(false)
+  const sequence = continuationSequence(page)
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-batch-member', sessionId, page.continuation, limits],
+    enabled: open,
+    queryFn: ({ signal }) =>
+      readSessionTranscript(
+        sessionId,
+        sequence,
+        sequence,
+        page.continuation ?? null,
+        limits,
+        signal,
+        page,
+      ),
+    gcTime: 0,
+  })
+  useEffect(() => {
+    if (detail.data) adoptToolPage(page, detail.data, true)
+  }, [detail.data, page, adoptToolPage])
+  return (
+    <>
+      {detail.isError && <p role="alert">More tools could not be loaded.</p>}
+      <button
+        type="button"
+        disabled={detail.isFetching}
+        onClick={() => {
+          if (open) void detail.refetch()
+          else setOpen(true)
+        }}
+      >
+        {detail.isFetching
+          ? 'Loading tools…'
+          : detail.isError
+            ? 'Retry more tools'
+            : 'Show more tools'}
+      </button>
+    </>
+  )
+}
+
 function ContinuedEvent({
+  adoptToolPage,
   sessionId,
   page,
   limits,
 }: {
+  adoptToolPage?: AdoptToolPage
   sessionId: string
   page: WebSessionTimelineDetailPage
   limits: SessionTranscriptLimits
@@ -554,6 +709,10 @@ function ContinuedEvent({
       ),
     gcTime: 0,
   })
+  useEffect(() => {
+    if (adoptToolPage && detail.data && advancesToolMember(detail.data))
+      adoptToolPage(previous.current, detail.data, false)
+  }, [detail.data, adoptToolPage])
   if (!open)
     return (
       <button type="button" onClick={() => setOpen(true)}>
@@ -576,7 +735,7 @@ function ContinuedEvent({
           <BodyText body={item.body} />
         </div>
       ))}
-      {detail.data?.continuation && (
+      {detail.data?.continuation && !(adoptToolPage && advancesToolMember(detail.data)) && (
         <button
           type="button"
           onClick={() => {

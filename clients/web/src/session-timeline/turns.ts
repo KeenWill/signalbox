@@ -155,7 +155,8 @@ export function groupTranscriptTurns(
     let segment = segments.at(-1)
     if (
       !segment ||
-      windowStarts?.has(item.address.event_sequence) ||
+      (windowStarts?.has(item.address.event_sequence) &&
+        segment.events.at(-1)?.address.event_sequence !== item.address.event_sequence) ||
       segment.turnId !== turnId ||
       (turnId === null && segment.events[0]?.address.event_sequence !== item.address.event_sequence)
     ) {
