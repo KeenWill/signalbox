@@ -581,8 +581,8 @@ Refreshes continue retaining current text through a failed reread. The
 session-scoped reader rejects detail kinds that contradict their timeline
 headers and compares immutable detail facts, including identities, attachment
 references and excerpt byte totals and overlapping excerpt content, across
-initial reads and expanded event rereads. Continuation reads reject detail kinds that contradict
-the retained timeline header. It retains facts for at most 24
+initial reads and expanded event rereads. Continuation reads reject detail kinds
+that contradict the retained timeline header. It retains facts for at most 24
 recently read event addresses; changed excerpt lengths under different read
 budgets preserve compatible prefixes and retain the longest checked excerpt.
 
@@ -603,14 +603,14 @@ readers retain their cursor, current page and validation predecessor above
 virtual rows until closed or evicted from the retained windows. A row containing
 the focused control stays mounted. Failed loads show the failure without an
 empty-conversation message. Retrying a failed edge read repeats that earlier or
-later request; other failures retry the retained read.
-Scrolling again starts a fresh bounded scan using the timeline continuation.
-Turn segments retain window boundaries so prepending history preserves existing
-rows and their disclosures. Retained tool chips stay in their assigned window
-segment when earlier proposal evidence is loaded; evicted assignments are
-discarded. An open request-only tool keeps its disclosure and continued text
-when its first physical attempt arrives. Later physical attempts retain separate
-disclosure identities. Turn-wide classification uses all loaded events.
+later request; other failures retry the retained read. Scrolling again starts a
+fresh bounded scan using the timeline continuation. Turn segments retain window
+boundaries so prepending history preserves existing rows and their disclosures.
+Retained tool chips stay in their assigned window segment when earlier proposal
+evidence is loaded; evicted assignments are discarded. An open request-only tool
+keeps its disclosure and continued text when its first physical attempt arrives.
+Later physical attempts retain separate disclosure identities. Turn-wide
+classification uses all loaded events.
 
 The transcript groups contiguous events by turn while preserving interleaved
 chronology. Summary shows user messages, assistant text accompanying tool calls,
@@ -635,23 +635,26 @@ profiles start in Summary; stored level choices are preserved. Applying a level
 command clears local turn overrides and opened continuation readers even when
 that level is already selected. Tools shows tool chips with argument and output
 summaries. All details exposes every loaded event, including bookkeeping,
-independently of the Events control. Typed facts and text render by default; raw
-event and setting JSON requires an explicit disclosure. Tool-produced goal
-events show their status and bounded text alongside tools. Turn details use the
-bounded per-turn detail route. Explicit continuation reads retain earlier opened
-chunks until the detail view closes or leaves the retained transcript. The last
-bounded raw detail page remains available to validate each body continuation.
-Individual turns can expand independently of the persisted level. Escape inside
-a continuation reader closes that reader and restores its Read more control.
-Otherwise, Escape collapses the focused expanded turn and reveals and focuses a
-surviving heading for that turn, including a retained segment outside the
-virtual range, before a subsequent Escape closes the workspace. Header
-disclosures handle Escape only while focus is inside them. The scrolling
-transcript owns the conversation focus entry and command target; the enclosing
-section adds no focus stop. Invalid event-link addresses outside the unsigned
-64-bit range are ignored. When a turn is opened, retained events without a turn
-identity are associated only by an exact per-turn route match with unchanged
-immutable facts; events skipped by that route remain outside the selected turn.
+independently of the Events control. Model identity, call state, token usage,
+and tool attempt state, approval and failure cause remain visible even without
+payload text. Continued chunks retain one set of event facts. Typed facts and
+text render by default; raw event and setting JSON requires an explicit
+disclosure. Tool-produced goal events show their status and bounded text
+alongside tools. Turn details use the bounded per-turn detail route. Explicit
+continuation reads retain earlier opened chunks until the detail view closes or
+leaves the retained transcript. The last bounded raw detail page remains
+available to validate each body continuation. Individual turns can expand
+independently of the persisted level. Escape inside a continuation reader closes
+that reader and restores its Read more control. Otherwise, Escape collapses the
+focused expanded turn and reveals and focuses a surviving heading for that turn,
+including a retained segment outside the virtual range, before a subsequent
+Escape closes the workspace. Header disclosures handle Escape only while focus
+is inside them. The scrolling transcript owns the conversation focus entry and
+command target; the enclosing section adds no focus stop. Invalid event-link
+addresses outside the unsigned 64-bit range are ignored. When a turn is opened,
+retained events without a turn identity are associated only by an exact per-turn
+route match with unchanged immutable facts; events skipped by that route remain
+outside the selected turn.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

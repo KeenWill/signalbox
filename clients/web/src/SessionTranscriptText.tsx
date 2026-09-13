@@ -558,10 +558,13 @@ function TranscriptWindow({
         page={page}
         limits={limits}
         headerKind={
-          pages?.flatMap((window) => window.window.items).find(
-            (item) => item.address.event_sequence ===
-              (page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)),
-          )?.kind
+          pages
+            ?.flatMap((window) => window.window.items)
+            .find(
+              (item) =>
+                item.address.event_sequence ===
+                (page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)),
+            )?.kind
         }
         state={continuedEvents[key]}
         onChange={(state) =>
@@ -763,6 +766,13 @@ function TranscriptWindow({
       className="session-transcript-text"
       aria-label="Transcript text"
       aria-busy={transcript.isFetching}
+      onFocusCapture={(event) => {
+        if (
+          !(event.target instanceof Element) ||
+          !event.target.closest('[data-transcript-turn], [data-event-sequence]')
+        )
+          setFocusedRow(null)
+      }}
     >
       <fieldset className="session-transcript-levels">
         <legend>Show</legend>
@@ -788,18 +798,24 @@ function TranscriptWindow({
       {transcript.isError && (
         <p role="alert">
           Transcript failed to load.{' '}
-          <button type="button" onClick={() => {
-            if (transcript.isFetchPreviousPageError) readPage('before')
-            else if (transcript.isFetchNextPageError) readPage('after')
-            else void transcript.refetch()
-          }}>
+          <button
+            type="button"
+            onClick={() => {
+              if (transcript.isFetchPreviousPageError) readPage('before')
+              else if (transcript.isFetchNextPageError) readPage('after')
+              else void transcript.refetch()
+            }}
+          >
             Retry transcript
           </button>
         </p>
       )}
-      {!transcript.isPending && !transcript.isFetching && !transcript.isError && rows.length === 0 && (
-        <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
-      )}
+      {!transcript.isPending &&
+        !transcript.isFetching &&
+        !transcript.isError &&
+        rows.length === 0 && (
+          <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
+        )}
       {associations.retries.length > 0 && (
         <p role="alert">
           Turn details could not be loaded.{' '}
@@ -1282,6 +1298,23 @@ function EventDetail({
     })
     return () => cancelAnimationFrame(frame)
   }, [target, matches])
+  const chunks = [...earlier, ...(matches ? [{ key: JSON.stringify(cursor), item }] : [])]
+  const latestBody = chunks.at(-1)?.item.body
+  const factsBody =
+    latestBody?.type === 'tool_batch'
+      ? {
+          ...latestBody,
+          tools: Array.from(
+            new Map(
+              chunks.flatMap(({ item }) =>
+                item.body.type === 'tool_batch'
+                  ? item.body.tools.map((tool) => [toolEvidenceKey(tool), tool] as const)
+                  : [],
+              ),
+            ).values(),
+          ),
+        }
+      : latestBody
   return (
     <div ref={element} tabIndex={-1} className="session-turn-event" data-event-sequence={sequence}>
       <header>
@@ -1289,36 +1322,36 @@ function EventDetail({
           {enumLabel(event.kind)}
         </a>
       </header>
-      {[...earlier, ...(matches ? [{ key: JSON.stringify(cursor), item }] : [])].map(
-        ({ key, item }, index) => (
-          <div key={key}>
-            {item.body.type === 'tool_batch' && renderTool ? (
-              <>
-                {item.body.tools.map((tool) => (
-                  <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
-                ))}
-                {item.body.goal_events.length > 0 && (
-                  <section aria-label="Goal events">
-                    {item.body.goal_events.map((event) => (
-                      <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
-                    ))}
-                  </section>
-                )}
-              </>
-            ) : ['user_input', 'model_call', 'tool_batch'].includes(item.body.type) ? (
-              <BodyText body={item.body} showAttachments={index === 0} />
-            ) : (
-              <>
-                {detailContent(item.body)}
-                <details>
-                  <summary>Raw event data</summary>
-                  <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
-                </details>
-              </>
-            )}
-          </div>
-        ),
-      )}
+      {(factsBody?.type === 'model_call' || factsBody?.type === 'tool_batch') &&
+        detailContent(factsBody, false)}
+      {chunks.map(({ key, item }, index) => (
+        <div key={key}>
+          {item.body.type === 'tool_batch' && renderTool ? (
+            <>
+              {item.body.tools.map((tool) => (
+                <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
+              ))}
+              {item.body.goal_events.length > 0 && (
+                <section aria-label="Goal events">
+                  {item.body.goal_events.map((event) => (
+                    <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
+                  ))}
+                </section>
+              )}
+            </>
+          ) : ['user_input', 'model_call', 'tool_batch'].includes(item.body.type) ? (
+            <BodyText body={item.body} showAttachments={index === 0} />
+          ) : (
+            <>
+              {detailContent(item.body)}
+              <details>
+                <summary>Raw event data</summary>
+                <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
+              </details>
+            </>
+          )}
+        </div>
+      ))}
       {detail.isPending ? (
         <p role="status">Loading details…</p>
       ) : detail.isError || !matches ? (
@@ -1493,7 +1526,6 @@ function ContinuedEventReader({
         sequence,
         cursor,
         limits,
-  headerKind,
         signal,
         state?.previous ?? page,
       )

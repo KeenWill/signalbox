@@ -617,6 +617,7 @@ for (const level of ['All details', 'Summary', 'Tools']) {
       'third chunk',
     ])
 
+    await transcript.focus()
     await transcript.evaluate((element) => {
       element.scrollTop = element.scrollHeight
       element.dispatchEvent(new Event('scroll'))
@@ -2310,6 +2311,7 @@ for (const close of ['button', 'Escape']) {
       .filter({ has: page.locator('[data-event-sequence="24"]') })
     const collapse = last.getByRole('button', { name: 'Collapse turn', exact: true })
     await expect(collapse).toBeVisible()
+    await collapse.focus()
     await expect(first).toHaveCount(0)
     if (close === 'Escape') await collapse.press('Escape')
     else await collapse.click()
@@ -2381,4 +2383,131 @@ test('All details renders typed facts and requires explicit raw disclosures', as
   await expect(model.locator('code:visible')).toHaveCount(1)
   await rawSetting.click()
   await expect(transcript.locator('.session-event-facts:visible, code:visible')).toHaveCount(0)
+})
+
+test('All details shows model and failed tool facts without payload text', async ({ page }) => {
+  const input = detailItems[0]
+  const model = detailItems[3]
+  const original = retriedToolItems().find(
+    (item) =>
+      item.body.type === 'tool_batch' &&
+      item.body.tools.some(
+        (tool) =>
+          tool.evidence.type === 'physical_attempt' && tool.evidence.state === 'known_failed',
+      ),
+  )
+  if (!input || model?.body.type !== 'model_call' || original?.body.type !== 'tool_batch')
+    throw new Error('Model and failed-tool fixture missing')
+  const tools = original.body.tools.map((tool) => ({
+    ...tool,
+    arguments: detailExcerpt(''),
+    evidence:
+      tool.evidence.type === 'physical_attempt'
+        ? { ...tool.evidence, failure: null, failure_present: false }
+        : tool.evidence,
+  }))
+  const failed: WebSessionTimelineDetail = {
+    ...original,
+    address: { event_sequence: '2' },
+    projected_body_bytes: 128,
+    body: { ...original.body, tools },
+  }
+  const textless: WebSessionTimelineDetail = {
+    ...model,
+    projected_body_bytes: 128,
+    body: {
+      ...model.body,
+      response: null,
+      usage: {
+        input_tokens: '12',
+        output_tokens: '3',
+        cache_creation_input_tokens: '4',
+        cache_read_input_tokens: '5',
+      },
+    },
+  }
+  const entries = [input, failed, textless]
+  await turnApi(page, undefined, entries)
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    const sequence = url.searchParams.get('cursor_address') ?? url.searchParams.get('first')
+    const item = entries.find((entry) => entry.address.event_sequence === sequence)
+    return item && item !== input ? route.fulfill({ json: detailPage([item]) }) : route.fallback()
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const call = transcript.locator('[data-event-sequence="4"]')
+  const fact = (label: string) =>
+    call
+      .locator('dl > div')
+      .filter({ has: page.getByText(label, { exact: true }) })
+      .locator('dd')
+  await expect(fact('Model')).toHaveText(model.body.model_identity_id)
+  await expect(fact('State')).toHaveText('Finished · Completed')
+  await expect(fact('Input tokens')).toHaveText('12')
+  await expect(fact('Output tokens')).toHaveText('3')
+  await expect(fact('Cache creation input tokens')).toHaveText('4')
+  await expect(fact('Cache read input tokens')).toHaveText('5')
+  const attempt = transcript
+    .locator('[data-event-sequence="2"]')
+    .getByRole('region', { name: 'Tool requests', exact: true })
+  await expect(attempt.getByText('Failed', { exact: true })).toBeVisible()
+  await expect(attempt.getByText('Attempt lost on restart', { exact: true })).toBeVisible()
+  await expect(attempt.getByText('Approval', { exact: true })).toBeVisible()
+  await expect(attempt.getByText('Effect', { exact: true })).toBeVisible()
+  await expect(transcript.locator('.session-event-facts:visible')).toHaveCount(0)
+})
+
+test('All details retains every response chunk with one set of model facts', async ({ page }) => {
+  const input = detailItems[0]
+  const model = detailItems[3]
+  if (!input || model?.body.type !== 'model_call') throw new Error('Model fixture missing')
+  const body = model.body
+  const chunk = (offset: number) => {
+    const continuation =
+      offset < 2
+        ? {
+            address: model.address,
+            field: 'model_response' as const,
+            member_index: 0,
+            offset_bytes: String(offset + 1),
+          }
+        : null
+    return {
+      ...model,
+      projected_body_bytes: 129,
+      body: {
+        ...body,
+        response: {
+          text: 'abc'[offset] ?? '',
+          offset_bytes: String(offset),
+          total_bytes: '3',
+          continuation,
+        },
+      },
+    }
+  }
+  await turnApi(page, undefined, [input, chunk(0)])
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '4')
+      return route.fallback()
+    const item = chunk(Number(url.searchParams.get('cursor_offset') ?? '0'))
+    const continuation = item.body.response.continuation
+    return route.fulfill({
+      json: detailPage([item], continuation ? { type: 'more_body', body: continuation } : null),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const call = page
+    .getByRole('region', { name: 'Session transcript', exact: true })
+    .locator('[data-event-sequence="4"]')
+  await expect(call.locator('.session-message-text')).toHaveText(['a'])
+  await call.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await call.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(call.locator('.session-message-text')).toHaveText(['a', 'b', 'c'])
+  await expect(call.getByText('Model', { exact: true })).toHaveCount(1)
+  await expect(call.getByText('Input tokens', { exact: true })).toHaveCount(1)
 })

@@ -152,7 +152,13 @@ export const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
   </article>
 )
 
-const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
+const ToolAttemptDetail = ({
+  tool,
+  includeText = true,
+}: {
+  tool: ToolAttempt
+  includeText?: boolean
+}) => {
   const evidence = tool.evidence
   const physical = evidence.type === 'physical_attempt' ? evidence : null
   return (
@@ -170,9 +176,15 @@ const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
           ['Cause', enumLabel(physical?.cause ?? 'Not recorded')],
         ]}
       />
-      {tool.arguments && <TextDetail label="Tool arguments" excerpt={tool.arguments} />}
-      {physical?.result && <TextDetail label="Tool result" excerpt={physical.result} />}
-      {physical?.failure && <TextDetail label="Tool failure" excerpt={physical.failure} />}
+      {includeText && tool.arguments && (
+        <TextDetail label="Tool arguments" excerpt={tool.arguments} />
+      )}
+      {includeText && physical?.result && (
+        <TextDetail label="Tool result" excerpt={physical.result} />
+      )}
+      {includeText && physical?.failure && (
+        <TextDetail label="Tool failure" excerpt={physical.failure} />
+      )}
     </article>
   )
 }
@@ -277,7 +289,7 @@ const unreachableBody = (body: never): never => {
   throw new TypeError(`unhandled generated timeline detail body: ${String(body)}`)
 }
 
-export const detailContent = (body: DetailBody): ReactNode => {
+export const detailContent = (body: DetailBody, includeText = true): ReactNode => {
   switch (body.type) {
     case 'session_state':
       return <Facts facts={[['State', enumLabel(body.state)]]} />
@@ -405,11 +417,12 @@ export const detailContent = (body: DetailBody): ReactNode => {
               ['Cache read input tokens', body.usage.cache_read_input_tokens ?? 'Not reported'],
             ]}
           />
-          {body.response ? (
-            <TextDetail label="Model response" excerpt={body.response} />
-          ) : (
-            <p className="session-detail-note">No response text at this checkpoint.</p>
-          )}
+          {includeText &&
+            (body.response ? (
+              <TextDetail label="Model response" excerpt={body.response} />
+            ) : (
+              <p className="session-detail-note">No response text at this checkpoint.</p>
+            ))}
         </>
       )
     case 'tool_batch': {
@@ -440,11 +453,19 @@ export const detailContent = (body: DetailBody): ReactNode => {
           {tools.length > 0 && (
             <section className="session-detail-members" aria-label="Tool requests">
               {tools.map((tool) => (
-                <ToolAttemptDetail key={tool.request_id} tool={tool} />
+                <ToolAttemptDetail
+                  key={
+                    tool.evidence.type === 'physical_attempt'
+                      ? tool.evidence.attempt_id
+                      : tool.request_id
+                  }
+                  tool={tool}
+                  includeText={includeText}
+                />
               ))}
             </section>
           )}
-          {goalEvents.length > 0 && (
+          {includeText && goalEvents.length > 0 && (
             <section className="session-detail-members" aria-label="Goal events">
               {goalEvents[0] && <GoalEventDetail event={goalEvents[0]} />}
             </section>
