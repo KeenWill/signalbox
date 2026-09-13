@@ -46,10 +46,10 @@ pub(crate) fn text(
         });
     let instruction = match rule {
         "labeled-review-response" if no_threads => {
-            "No unresolved review threads were present at dispatch time. Use change_request_thread_inventory to confirm the current head, then perform a one-turn convergence check of mergeability and gating checks, using change_request_checks_status for check results. Post a plain reply on the pull request with the result and finish cleanly."
+            "No unresolved review threads were present at dispatch time. Use change_request_thread_inventory to confirm the current head, then perform a one-turn convergence check of mergeability and gating checks, using change_request_checks_status for check results. If no thread was fixed and the head is unchanged, finish without a pull request comment or review submission."
         }
         "labeled-review-response" => {
-            "Use change_request_thread_inventory to inspect the current head and fix every unresolved review thread with the smallest correct change. Validate the fix and report the addressed thread ids. Check mergeability and use change_request_checks_status for gating checks, then finish with a short summary."
+            "Use change_request_thread_inventory to inspect the current head and fix every unresolved review thread with the smallest correct change. Validate the fix and report the addressed thread ids. Check mergeability and use change_request_checks_status for gating checks, then finish with a short summary. Do not submit a pull request review. If no thread was fixed and the head is unchanged, do not post a completion comment."
         }
         "renovate-merge-forward" => {
             "Read current mergeability first. If no merge-forward is needed, finish without a pull request comment. Otherwise merge the target pull request's base branch forward into its head branch, resolve conflicts and integration errors caused by combining the branches, and validate the result. For each conflict hunk, report which side was retained or how both sides were combined. Verify that the pull request's intended change survives the merge. Check mergeability and use change_request_checks_status for gating checks and report the exact changes made."

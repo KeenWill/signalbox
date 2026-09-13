@@ -5,7 +5,13 @@ import type {
 } from '../src/generated/web-contract.mjs'
 import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
 import { expect, test } from './fontTest'
-import { detailItems, detailPage, resultCursor, toolResultItem } from './session-detail-fixture'
+import {
+  detailItems,
+  detailLive,
+  detailPage,
+  resultCursor,
+  toolResultItem,
+} from './session-detail-fixture'
 
 test('rejects contradictory detail kinds and recovers after a corrected retry', async ({
   page,
@@ -1599,5 +1605,149 @@ for (const hidden of hiddenDetailCases) {
     await expect(row.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
     await page.screenshot({ path: testInfo.outputPath('hidden-detail-continuation.png') })
     expect(problems).toEqual([])
+  })
+}
+
+for (const [completeRefresh, hidden] of [
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const) {
+  test(`retains an open reader when observation refresh ${completeRefresh ? 'completes the excerpt' : 'moves its cursor'}${hidden ? ' for a hidden detail' : ''}`, async ({
+    page,
+  }) => {
+    let total = 1
+    let initialReads = 0
+    const continuedOffsets: string[] = []
+    let release = () => {}
+    const growth = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route('**/api/**', async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow')) {
+        await growth
+        return route.fulfill({
+          contentType: 'application/x-ndjson',
+          body:
+            [
+              {
+                kind: 'snapshot',
+                snapshot: { ...detailLive, session_id: transcriptSessionId, observed_through: '1' },
+              },
+              {
+                kind: 'durable',
+                cursor: '2',
+                address: { event_sequence: '2' },
+                event_kind: 'input_accepted',
+              },
+            ]
+              .map((event) => JSON.stringify(event))
+              .join('\n') + '\n',
+        })
+      }
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url, total)
+      if (hidden && url.pathname.endsWith('/timeline')) {
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        const items = window.items.map((item) => {
+          const kind = item.address.event_sequence === '1' ? 'goal_changed' : item.kind
+          return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+        })
+        return route.fulfill({
+          json: {
+            ...window,
+            items,
+            projected_structured_bytes: items.reduce(
+              (sum, item) => sum + item.projected_structured_bytes,
+              0,
+            ),
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline-detail') && url.searchParams.get('first') === '1') {
+        const page =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+        const cursor = url.searchParams.get('cursor_offset')
+        if (cursor) continuedOffsets.push(cursor)
+        else initialReads++
+        const offset = Number(cursor ?? '0')
+        const end = cursor ? Math.min(6, offset + 2) : total === 1 ? 2 : completeRefresh ? 6 : 1
+        const continuation =
+          end < 6
+            ? {
+                address: { event_sequence: '1' },
+                field: hidden ? ('goal_text' as const) : ('input_text' as const),
+                member_index: 0,
+                offset_bytes: String(end),
+              }
+            : null
+        return route.fulfill({
+          json: {
+            ...page,
+            projected_body_bytes: 128 + end - offset,
+            continuation: continuation ? { type: 'more_body', body: continuation } : null,
+            items: page.items.map((item) => ({
+              ...item,
+              kind: hidden ? 'goal_changed' : item.kind,
+              projected_body_bytes: 128 + end - offset,
+              body: hidden
+                ? {
+                    type: 'goal_event',
+                    session_id: transcriptSessionId,
+                    event: {
+                      type: 'blocked',
+                      generation: '1',
+                      reason: 'user_input_required',
+                      text: {
+                        text: 'abcdef'.slice(offset, end),
+                        offset_bytes: String(offset),
+                        total_bytes: '6',
+                        continuation,
+                      },
+                    },
+                  }
+                : {
+                    ...item.body,
+                    text: {
+                      text: 'abcdef'.slice(offset, end),
+                      offset_bytes: String(offset),
+                      total_bytes: '6',
+                      continuation,
+                    },
+                  },
+            })),
+          },
+        })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
+    const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
+    await expect(reader.getByText('cd', { exact: true })).toBeVisible()
+    const before = initialReads
+    total = 2
+    release()
+    await expect.poll(() => initialReads).toBeGreaterThan(before)
+    await expect(
+      page.getByRole('region', { name: 'Transcript text', exact: true }),
+    ).toHaveAttribute('aria-busy', 'false')
+    await expect(reader.getByText('cd', { exact: true })).toBeVisible()
+    expect(continuedOffsets).toEqual(['2'])
+    await reader.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(reader.getByText('ef', { exact: true })).toBeVisible()
+    expect(continuedOffsets).toEqual(['2', '4'])
+    await reader.getByRole('button', { name: 'Close details', exact: true }).click()
+    await expect(reader).toHaveCount(0)
+    await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(
+      completeRefresh ? 0 : 1,
+    )
   })
 }
