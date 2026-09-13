@@ -221,7 +221,9 @@ carry the same complete correlation. It fsyncs `dispatch_received` before
 acknowledging the frame internally and `execution_may_have_started` immediately
 before it invokes the executor. The runner retains one terminal evidence
 envelope and resends it until the daemon commits the matching attempt and lease
-transition and replies `result_recorded`, then discards it.
+transition and replies `result_recorded`, then discards it. Local runner
+shutdown waits for admitted execution and its result acknowledgement before
+sending the shutdown frame.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
