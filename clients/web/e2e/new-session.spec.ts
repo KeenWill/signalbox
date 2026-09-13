@@ -20,7 +20,9 @@ test('creates a session from the template picker with the keyboard', async ({ pa
     await route.fulfill({ status: 201, json: createdSessionFixture })
   })
   await page.goto('/settings')
-  const opener = page.getByRole('button', { name: 'New session', exact: true })
+  const opener = page
+    .getByRole('navigation', { name: 'Product' })
+    .getByRole('button', { name: 'New session', exact: true })
   await opener.focus()
   await page.keyboard.press('Enter')
   const dialog = page.getByRole('dialog', { name: 'New session', exact: true })
@@ -34,6 +36,9 @@ test('creates a session from the template picker with the keyboard', async ({ pa
     new RegExp(`/sessions\\?.*session=${createdSessionFixture.session_id}`),
   )
   await expect(dialog).toBeHidden()
+  await expect(
+    page.getByRole('main').getByRole('button', { name: 'New session', exact: true }),
+  ).toHaveCount(0)
   expect(requests).toEqual([
     { command_id: expect.any(String), template_name: templateFixture.name, first_input: null },
   ])
@@ -106,4 +111,32 @@ test('offers New session in the palette and restores focus when cancelled on a p
   await page.screenshot({ path: testInfo.outputPath('new-session-phone.png') })
   await page.keyboard.press('Escape')
   await expect(palette).toBeFocused()
+})
+
+test('opens creation from the sidebar rail and phone navigation with focus recovery', async ({
+  page,
+}, testInfo) => {
+  await setup(page)
+  await page.goto('/settings')
+  await page.getByRole('button', { name: 'Collapse sidebar' }).click()
+  const railOpener = page
+    .getByRole('navigation', { name: 'Product' })
+    .getByRole('button', { name: 'New session', exact: true })
+  await railOpener.click()
+  const dialog = page.getByRole('dialog', { name: 'New session', exact: true })
+  await expect(dialog.getByLabel('Template')).toHaveValue(templateFixture.name)
+  await page.keyboard.press('Escape')
+  await expect(railOpener).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('new-session-navigation-rail.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  const navigationOpener = page.getByRole('button', { name: 'Open navigation', exact: true })
+  await navigationOpener.click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation', exact: true })
+  await page.screenshot({ path: testInfo.outputPath('new-session-navigation-phone.png') })
+  await navigation.getByRole('button', { name: 'New session', exact: true }).click()
+  await expect(navigation).toBeHidden()
+  await expect(dialog.getByLabel('Template')).toHaveValue(templateFixture.name)
+  await expect(dialog.getByRole('button', { name: 'Close new session' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(navigationOpener).toBeFocused()
 })

@@ -17,6 +17,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Search,
   Settings,
   Sun,
@@ -118,12 +119,14 @@ export function ProductNavigation({
   active,
   context,
   onActivate,
+  onNewSession,
   collapsed,
 }: {
   collapsed?: boolean
   active: ProductRouteId
   context: ProductCommandContext
   onActivate?: () => void
+  onNewSession: (opener: HTMLButtonElement) => void
 }) {
   return (
     <div className={`product-navigation ${collapsed ? 'navigation-collapsed' : ''}`}>
@@ -169,6 +172,16 @@ export function ProductNavigation({
         )}
       </div>
       <nav aria-label="Product">
+        <button
+          type="button"
+          className="product-link new-session-button"
+          aria-label="New session"
+          title={collapsed ? 'New session' : undefined}
+          disabled={context.navigationLocked}
+          onClick={(event) => onNewSession(event.currentTarget)}
+        >
+          {collapsed ? <Plus aria-hidden="true" /> : <span>New session</span>}
+        </button>
         {productRoutes.map((route) => {
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
           const Icon = productNavigationIcons[route.id]
@@ -1090,24 +1103,21 @@ export function ProductApp({
       style={shellStyle}
     >
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} context={context} collapsed={app.navigationCollapsed} />
+        <ProductNavigation
+          active={surface}
+          context={context}
+          collapsed={app.navigationCollapsed}
+          onNewSession={(opener) => {
+            paletteOpenerRef.current = opener
+            invokeProductCommand('session.new', context)
+          }}
+        />
       </aside>
       <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">
           <h1>{title}</h1>
           <div className="product-header-actions">
             <div className="surface-header-actions" ref={setHeaderTarget} />
-            <button
-              type="button"
-              className="new-session-button"
-              disabled={context.navigationLocked}
-              onClick={(event) => {
-                paletteOpenerRef.current = event.currentTarget
-                invokeProductCommand('session.new', context)
-              }}
-            >
-              New session
-            </button>
             {surface !== 'settings' && !bootstrap.isSuccess && (
               <div className="product-connection">
                 <span
@@ -1203,6 +1213,10 @@ export function ProductApp({
             onCloseAutoFocus={(event) => {
               const opener = navigationOpenerRef.current
               navigationOpenerRef.current = null
+              if (app.overlay === 'new-session') {
+                event.preventDefault()
+                return
+              }
               if (opener?.isConnected && opener.getClientRects().length > 0) {
                 event.preventDefault()
                 opener.focus()
@@ -1226,6 +1240,10 @@ export function ProductApp({
               active={surface}
               context={context}
               onActivate={() => dispatch(actions.overlaySet(null))}
+              onNewSession={() => {
+                paletteOpenerRef.current = navigationOpenerRef.current
+                invokeProductCommand('session.new', context)
+              }}
             />
           </Dialog.Content>
         </Dialog.Portal>
