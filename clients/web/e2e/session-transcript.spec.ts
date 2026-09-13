@@ -828,3 +828,65 @@ for (const budget of [8, 128]) {
     expect(problems).toEqual([])
   })
 }
+
+test('preserves the reading offset when older rows move the selected row index', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  let requestedBefore = false
+  let releaseBefore = () => {}
+  const before = new Promise<void>((resolve) => {
+    releaseBefore = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'before') {
+      requestedBefore = true
+      await before
+    }
+    return route.fulfill({ json: transcriptFixture(url) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(transcript.getByText('Message 100000', { exact: true })).toBeVisible()
+  await page.evaluate((sessionId) => {
+    const preferences = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
+    preferences.lastLogicalPositions = { ...preferences.lastLogicalPositions, [sessionId]: '500' }
+    localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify(preferences))
+  }, transcriptSessionId)
+  await page.reload()
+  // Keep row measurements fixed so this regression isolates selection-driven scrolling.
+  await page.addStyleTag({ content: '.session-message-entry { height: 100px; }' })
+  await expect(transcript.getByText('Message 500', { exact: true })).toBeVisible()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await transcript.evaluate((element) => {
+    element.scrollTop = 0
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -900, bubbles: true }))
+  })
+  await expect.poll(() => requestedBefore).toBe(true)
+  const anchor = transcript.getByText('Message 496', { exact: true })
+  await expect(anchor).toBeVisible()
+  const top = await anchor.evaluate((element) => element.getBoundingClientRect().top)
+  releaseBefore()
+  await expect(transcript).toHaveAttribute('data-total-loaded', '16')
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await page.waitForTimeout(500)
+  expect(
+    Math.abs((await anchor.evaluate((element) => element.getBoundingClientRect().top)) - top),
+  ).toBeLessThan(2)
+  await page.screenshot({ path: testInfo.outputPath('selected-row-prepend.png') })
+  await page.getByRole('button', { name: /^First/ }).click()
+  await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+  expect(problems).toEqual([])
+})

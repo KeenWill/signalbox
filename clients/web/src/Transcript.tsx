@@ -279,9 +279,23 @@ export function VirtualTranscript({
   useEffect(() => {
     if (autoFocus) parent.current?.focus()
   }, [autoFocus, parent])
+  const scrolledSelection = useRef<{
+    id: typeof selectedId
+    virtualizer: typeof virtualizer
+  } | null>(null)
   useEffect(() => {
-    if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })
-  }, [selected, virtualizer])
+    if (selected < 0) {
+      scrolledSelection.current = null
+      return
+    }
+    if (
+      scrolledSelection.current?.id === selectedId &&
+      scrolledSelection.current?.virtualizer === virtualizer
+    )
+      return
+    virtualizer.scrollToIndex(selected, { align: 'auto' })
+    scrolledSelection.current = { id: selectedId, virtualizer }
+  }, [selected, selectedId, virtualizer])
   const reportEnd = useEffectEvent((value: boolean) => onEndChange?.(value))
   useLayoutEffect(() => {
     if (loadingLater) {

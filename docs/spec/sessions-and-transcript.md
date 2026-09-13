@@ -560,7 +560,9 @@ discarded records. The scan item budget is clamped to the advertised detail
 limit; each automatic read uses only the remaining scan allowance. Scanning
 stops at a visible item, a detail continuation, or an exhausted budget. Rapid
 edge events share one in-flight page read. Programmatic anchor and measurement
-adjustments do not start page reads. An empty detail page preserves its
+adjustments do not start page reads. Prepending rows does not trigger selection
+scrolling when the selected row identity stays unchanged; a changed selection
+scrolls into view once its row is available. An empty detail page preserves its
 unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. The conversation shows user and assistant text and
 attachment references, tool arguments and output, and unsuccessful turn outcomes
