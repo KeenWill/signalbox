@@ -396,3 +396,27 @@ test('labels parameterized PDF attachments in chips and details', async ({ page 
   await expect(pane.getByRole('article', { name: 'Artifact PDF', exact: true })).toBeVisible()
   await expect(pane.getByText('Found PDF', { exact: true })).toBeVisible()
 })
+
+for (const label of ['image/', 'image/png extra']) {
+  test(`labels invalid MIME text ${label} as a file before and after resolution failure`, async ({
+    page,
+  }) => {
+    const pending = Promise.withResolvers<void>()
+    const requested = Promise.withResolvers<string | null>()
+    await page.route('**/api/bootstrap', (route) =>
+      route.fulfill({ json: webContractBootstrapFixture }),
+    )
+    await page.route('**/api/blobs/**/descriptor?*', async (route) => {
+      requested.resolve(new URL(route.request().url()).searchParams.get('media_type'))
+      await pending.promise
+      return route.fulfill({ json: { invalid: true } })
+    })
+    await page.goto(`/src/features/artifacts/scenario.html?label=${encodeURIComponent(label)}`)
+    expect(await requested.promise).toBe('application/octet-stream')
+    const chip = page.getByRole('button', { name: `File · ${label} · 4,096 bytes`, exact: true })
+    await expect(chip).toBeVisible()
+    pending.resolve()
+    await expect(page.getByRole('button', { name: 'Retry attachment' })).toBeVisible()
+    await expect(chip).toBeVisible()
+  })
+}

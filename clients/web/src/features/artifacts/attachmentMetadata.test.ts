@@ -16,6 +16,7 @@ describe('attachment descriptor media types', () => {
     undefined,
   ])('uses binary delivery for %s', (label) => {
     expect(attachmentDescriptorMediaType(label)).toBe('application/octet-stream')
+    expect(attachmentTypeLabel(label)).toBe('File')
   })
   it.each([
     'image/png',

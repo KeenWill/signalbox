@@ -4,6 +4,7 @@ import type { CommandContext } from './commands'
 import { ArtifactRenderer, selectImageView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
+import { attachmentDescriptorMediaType } from './features/artifacts/attachmentMetadata'
 import { useArtifactDescriptor } from './features/artifacts/descriptorService'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
 import {
@@ -52,7 +53,9 @@ export const nextResolutionSequence = (): number => {
 }
 
 export const attachmentTypeLabel = (mediaType?: string | null): string => {
-  const normalizedMediaType = mediaType?.split(';', 1)[0]?.trim().toLowerCase()
+  const normalizedMediaType = attachmentDescriptorMediaType(mediaType)
+    .split(';', 1)[0]
+    ?.toLowerCase()
   if (normalizedMediaType?.startsWith('image/')) return 'Image'
   if (normalizedMediaType?.startsWith('audio/')) return 'Audio'
   if (normalizedMediaType?.startsWith('video/')) return 'Video'
