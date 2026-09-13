@@ -58,18 +58,12 @@ export function useTurnCosts(sessionId: string) {
 }
 
 export function CostChip({
-  sessionId,
-  turnId,
   cost,
   status,
 }: {
-  sessionId: string
-  turnId?: string
   cost?: CostTotal
   status: 'pending' | 'error' | 'success'
 }) {
-  const query = new URLSearchParams({ session: sessionId })
-  if (turnId) query.set('turn', turnId)
   const text =
     status === 'error'
       ? 'Cost unavailable'
@@ -86,22 +80,21 @@ export function CostChip({
               .join(' · ')
           : 'Cost not loaded'
   return (
-    <a
+    <span
       className="cost-chip"
-      href={`/usage?${query}`}
       title={cost ? [costTotalText(cost), ...cost.rates].join(' · ') : text}
     >
       {text}
-    </a>
+    </span>
   )
 }
 
 export function SessionCostChip({ sessionId }: { sessionId: string }) {
   const cost = useSessionCost(sessionId)
-  return <CostChip sessionId={sessionId} cost={cost.data} status={cost.status} />
+  return <CostChip cost={cost.data} status={cost.status} />
 }
 
 export function TurnCostChip({ sessionId, turnId }: { sessionId: string; turnId: string }) {
   const cost = useSummaryCost(sessionId, turnId)
-  return <CostChip sessionId={sessionId} turnId={turnId} cost={cost.data} status={cost.status} />
+  return <CostChip cost={cost.data} status={cost.status} />
 }

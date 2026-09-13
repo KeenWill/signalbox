@@ -41,29 +41,27 @@ test('loads session and turn chips through the HTTP usage client', async ({ page
   await page.goto(
     `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&turn=${turnId}`,
   )
-  await expect(
-    page.getByRole('region', { name: 'Session cost', exact: true }).getByRole('link'),
-  ).toContainText('unpriced')
-  await expect(
-    page.getByRole('region', { name: 'Turn cost', exact: true }).getByRole('link'),
-  ).toHaveAttribute('href', `/usage?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}&turn=${turnId}`)
-  await expect(
-    page.getByRole('region', { name: 'Recent turn costs' }).getByRole('link').first(),
-  ).toContainText('partial')
-  const attention = page.getByRole('region', { name: 'Attention row' })
-  await expect(attention.getByRole('link', { name: /unpriced/ })).toHaveAttribute(
-    'href',
-    `/usage?session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toContainText(
+    'unpriced',
   )
+  await expect(page.getByRole('region', { name: 'Turn cost', exact: true })).toContainText(
+    'unpriced',
+  )
+  await expect(page.getByRole('region', { name: 'Recent turn costs' })).toContainText('partial')
+  await expect(page.getByRole('link')).toHaveCount(0)
+  const attention = page.getByRole('region', { name: 'Attention row' })
+  await expect(attention.getByTitle(/unpriced/)).toBeVisible()
   await expect(attention.getByRole('button', { name: 'Example session' })).toBeEnabled()
+
   await page.screenshot({ path: testInfo.outputPath('cost-chips.png') })
   for (const width of [761, 390]) {
     await page.setViewportSize({ width, height: 844 })
     const sessionBox = await attention
       .getByRole('button', { name: 'Example session' })
       .boundingBox()
-    const costBox = await attention.getByRole('link', { name: /unpriced/ }).boundingBox()
-    if (!sessionBox || !costBox) throw new Error('Both Attention destinations must be visible')
+    const costBox = await attention.getByTitle(/unpriced/).boundingBox()
+    if (!sessionBox || !costBox)
+      throw new Error('The session action and cost display must be visible')
     expect(costBox.y).toBeGreaterThanOrEqual(sessionBox.y + sessionBox.height)
     expect(await attention.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
       true,
@@ -103,8 +101,8 @@ test('retries the connection when a session cost refresh follows bootstrap failu
     `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
   )
   const session = page.getByRole('region', { name: 'Session cost', exact: true })
-  await expect(session.getByRole('link')).toHaveText('Cost unavailable')
+  await expect(session).toHaveText('Cost unavailable')
   unavailable = false
   await page.getByRole('button', { name: 'Refresh costs' }).click()
-  await expect(session.getByRole('link')).toHaveText('$0')
+  await expect(session).toHaveText('$0')
 })
