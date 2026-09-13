@@ -648,7 +648,7 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
       {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
       {evidence?.result && <ToolText label="Output" excerpt={evidence.result} />}
       {evidence?.failure && <ToolText label="Failure" excerpt={evidence.failure} />}
-      {evidence?.failure_present && !evidence.failure && (
+      {evidence && (evidence.state === 'known_failed' || evidence.failure_present) && !evidence.failure && (
         <p className="session-turn-outcome">
           Failure · {enumLabel(evidence.cause ?? evidence.state)}
         </p>

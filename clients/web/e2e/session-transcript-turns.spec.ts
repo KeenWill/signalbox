@@ -849,3 +849,47 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   await page.screenshot({ path: testInfo.outputPath('tool-stops-before-goal.png') })
   expect(problems).toEqual([])
 })
+
+
+for (const cause of ['crash_lost', null] as const) {
+  test(`identifies a failed physical attempt without detail text ${cause ? 'with a cause' : 'without a cause'}`, async ({ page }, testInfo) => {
+    const problems: string[] = []
+    page.on('pageerror', (error) => problems.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') problems.push(message.text())
+    })
+    const items = retriedToolItems().map((item) => {
+      if (item.body.type !== 'tool_batch') return item
+      const tool = item.body.tools[0]
+      if (tool?.evidence.type !== 'physical_attempt' || tool.evidence.state !== 'known_failed') return item
+      return {
+        ...item,
+        projected_body_bytes: 128 + Number(tool.arguments?.total_bytes ?? '0'),
+        body: { ...item.body, tools: [{ ...tool, evidence: {
+          ...tool.evidence, cause, failure_present: false, failure: null,
+        } }] },
+      }
+    })
+    await turnApi(page, undefined, items)
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      const item = items.find((item) => item.address.event_sequence === url.searchParams.get('first'))
+      return item ? route.fulfill({ json: detailPage([item]) }) : route.fallback()
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const chips = transcript.getByRole('button', { name: 'exec_command', exact: true })
+    await expect(chips).toHaveCount(2)
+    await chips.first().click()
+    await chips.last().click()
+    const slots = transcript.locator('.session-tool-slot')
+    await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
+      cause ? 'Failure · Attempt lost on restart' : 'Failure · Failed',
+    )
+    await expect(slots.first().getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+    await expect(slots.last().getByRole('region', { name: 'Output', exact: true })).toContainText('passed')
+    await expect(slots.last().locator('.session-turn-outcome')).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
+    expect(problems).toEqual([])
+  })
+}
