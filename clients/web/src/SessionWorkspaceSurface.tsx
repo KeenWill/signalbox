@@ -249,14 +249,11 @@ export function SessionWorkspaceSurface({
   }, [dispatch, sessionId, timelineCapability])
   const displayedSession =
     session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
+  const observedCostPosition = useRef<string | undefined>(undefined)
   const cost = useQuery({
-    queryKey: [
-      'production',
-      'session-cost',
-      sessionId,
-      displayedSession?.descriptor.observed_through,
-    ],
+    queryKey: ['production', 'session-cost', sessionId],
     queryFn: async ({ signal }) => {
+      observedCostPosition.current = displayedSession?.descriptor.observed_through
       const source = await HttpSearchUsageSource.connect((input, init) =>
         window.fetch(input, { ...init, signal }),
       )
@@ -265,6 +262,17 @@ export function SessionWorkspaceSurface({
     enabled: displayedSession !== undefined,
     gcTime: 0,
   })
+  const costPosition = displayedSession?.descriptor.observed_through
+  const refetchCost = cost.refetch
+  useEffect(() => {
+    if (
+      costPosition !== undefined &&
+      !cost.isFetching &&
+      observedCostPosition.current !== costPosition
+    ) {
+      void refetchCost({ cancelRefetch: false })
+    }
+  }, [costPosition, cost.isFetching, refetchCost])
   const origin = displayedSession?.descriptor.repository_watch
   const items = useMemo(
     () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail),

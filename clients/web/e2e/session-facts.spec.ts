@@ -161,3 +161,37 @@ test('wide costs keep the phone header and timeline controls in view', async ({
   expect(header!.x + header!.width).toBeLessThanOrEqual(390)
   await page.screenshot({ path: testInfo.outputPath('facts-wide-cost-phone.png'), fullPage: true })
 })
+
+test('cost refresh completes during session growth and catches up without hiding its total', async ({
+  page,
+}) => {
+  const api = await sessionApi(page)
+  const requests: Request[] = []
+  let releaseFirst = () => {}
+  let releaseSecond = () => {}
+  const first = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  const second = new Promise<void>((resolve) => {
+    releaseSecond = resolve
+  })
+  await page.route('**/api/usage/summary?**', async (route) => {
+    requests.push(route.request())
+    const initial = requests.length === 1
+    await (initial ? first : second)
+    await route.fulfill({ json: { groups: [group(initial ? '1.5' : '3.5')], truncated: false } })
+  })
+  await openSession(page)
+  await expect.poll(() => requests.length).toBe(1)
+  api.grow()
+  await page.getByText('Session details', { exact: true }).click()
+  await expect(page.locator('.session-header-detail-content')).toContainText('44')
+  releaseFirst()
+  const cost = page.getByTitle('Session cost', { exact: true })
+  await expect(cost).toHaveText('$1.50')
+  await expect.poll(() => requests.length).toBe(2)
+  expect(requests[0]!.failure()).toBeNull()
+  releaseSecond()
+  await expect(cost).toHaveText('$3.50')
+  expect(requests).toHaveLength(2)
+})
