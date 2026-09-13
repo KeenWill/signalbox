@@ -869,6 +869,12 @@ pub struct SessionRunnerPlacementRequest {
     pub permission_overrides: RunnerToolPermissionOverrides,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl SessionRunnerPlacementRequest {
+    pub fn validate_registration(
+        &self,
+        registration: &ValidatedRunnerRegistration,
+    ) -> result::Result<(), RunnerDomainError>;
+}
 ```
 
 ## RunnerCredentialGrantLineage

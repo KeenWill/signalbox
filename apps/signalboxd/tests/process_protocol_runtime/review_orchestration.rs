@@ -249,6 +249,7 @@ impl ReviewRuntimeDriver {
             .request(
                 request_id,
                 ClientRequest::CreateSessionFromTemplate {
+                    runner_placement: None,
                     command_id: command()?,
                     template_name: String::from(template_name),
                     placement: SessionPlacement::Pathless {},
