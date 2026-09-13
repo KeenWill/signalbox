@@ -4,7 +4,12 @@ import type {
 } from '../generated/web-contract.mjs'
 import { readSessionTranscript, type SessionTranscriptLimits } from '../product'
 import { SESSION_WINDOW_BYTES } from '../session-workspace'
-import { BoundedSessionHistory, HttpSessionTimelineSource, type SessionWindowAnchor } from './model'
+import {
+  BoundedSessionHistory,
+  HttpSessionTimelineSource,
+  MAX_RETAINED_SESSION_ITEMS,
+  type SessionWindowAnchor,
+} from './model'
 
 // Share one detail budget across each window; keep three neighboring windows.
 export const TRANSCRIPT_WINDOW_ITEMS = 8
@@ -22,6 +27,7 @@ export type TranscriptReadAnchor = SessionWindowAnchor & {
 
 export class TranscriptWindowReader {
   private history: BoundedSessionHistory | undefined
+  private readonly retainedDetails = new Map<string, WebSessionTimelineDetailPage>()
 
   constructor(private readonly sessionId: string) {}
 
@@ -58,9 +64,21 @@ export class TranscriptWindowReader {
             max_timeline_detail_bytes: Math.floor(maxBytes / window.items.length),
           },
           signal,
+          this.retainedDetails.get(item.address.event_sequence),
         ),
       ),
     )
+    for (const detail of details) {
+      const address = detail.items[0]?.address.event_sequence
+      if (!address) continue
+      this.retainedDetails.delete(address)
+      this.retainedDetails.set(address, detail)
+    }
+    while (this.retainedDetails.size > MAX_RETAINED_SESSION_ITEMS) {
+      const oldest = this.retainedDetails.keys().next().value
+      if (oldest === undefined) break
+      this.retainedDetails.delete(oldest)
+    }
     return { window, details }
   }
 }

@@ -541,7 +541,8 @@ an equal share of the detail budget; unread body continuations remain available
 on demand. Attachment references are included in the response bound. Scrolling
 loads earlier or later windows. Session and anchor changes reset the view;
 observation refreshes retain visible text while rereading loaded windows, or
-refresh from latest when following the live end.
+refresh from latest when following the live end, retaining current text through
+a failed reread.
 
 Windows advance past metadata-only detail records automatically within the
 workspace record budget and projected-byte budget. All returned headers, detail
@@ -554,7 +555,8 @@ the timeline continuation. The conversation shows user and assistant text and
 attachment references, tool arguments and output, and unsuccessful turn outcomes
 in event order. Repeated terminal outcomes for the same turn and cause appear
 once. Bookkeeping is hidden until Events is selected. Raw detail pages remain
-available to validate body continuations.
+available to validate body continuations and immutable facts across overlapping
+window reads.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

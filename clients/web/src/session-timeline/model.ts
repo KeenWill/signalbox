@@ -735,12 +735,13 @@ export const detailExcerptAt = (body: DetailBody, cursor: BodyCursor) => {
   }
 }
 
-// Excerpt contents advance by page; their immutable byte totals are checked separately.
+// Excerpt contents and offsets advance by page; their immutable byte totals remain comparable.
 const immutableDetailFacts = (value: unknown): string | undefined =>
   JSON.stringify(value, (_key, child: unknown) => {
     if (child == null) return undefined
     if (typeof child !== 'object' || Array.isArray(child)) return child
-    if ('text' in child && 'offset_bytes' in child && 'total_bytes' in child) return undefined
+    if ('text' in child && 'offset_bytes' in child && 'total_bytes' in child)
+      return { total_bytes: child.total_bytes }
     return Object.fromEntries(
       Object.entries(child).sort(([left], [right]) => left.localeCompare(right)),
     )
@@ -752,6 +753,22 @@ const bodyFacts = (body: DetailBody) =>
       ? { ...body, projected_member_index: undefined, tools: undefined, goal_events: undefined }
       : body,
   )
+
+export const validateRetainedDetailFacts = (
+  page: Pick<WebSessionTimelineDetailPage, 'items'>,
+  previous: Pick<WebSessionTimelineDetailPage, 'items'>,
+): void => {
+  const addresses = new Set(page.items.map((item) => item.address.event_sequence))
+  for (const address of addresses) {
+    const current = page.items.filter((item) => item.address.event_sequence === address)
+    const retained = previous.items.filter((item) => item.address.event_sequence === address)
+    if (
+      retained.length > 0 &&
+      immutableDetailFacts(current) !== immutableDetailFacts(retained)
+    )
+      throw new TypeError('Transcript detail changed its retained immutable facts')
+  }
+}
 
 export const validateDetailContinuation = (
   page: WebSessionTimelineDetailPage,
@@ -818,7 +835,10 @@ export const validateDetailContinuation = (
       }
     }
   }
-  if (continuation === null) return
+  if (continuation === null) {
+    if (previous) validateRetainedDetailFacts(page, previous)
+    return
+  }
   const initial = page.items[0]
   const address = continuation.type === 'more_at' ? continuation.address : continuation.body.address
   if (

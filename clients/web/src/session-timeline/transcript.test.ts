@@ -130,3 +130,35 @@ it('reserves a valid detail read for every header under small advertised budgets
   expect(page.window.continuation_before).toEqual({ event_sequence: '100000' })
   expect(reads.filter((url) => url.pathname.endsWith('/timeline-detail'))).toHaveLength(1)
 })
+
+it('rejects changed immutable detail facts on overlapping transcript reads', async () => {
+  let conflict = false
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string) => {
+      const url = new URL(path, 'http://localhost')
+      const payload = transcriptFixture(url)
+      if (conflict && url.pathname.endsWith('/timeline-detail')) {
+        const page = payload as import('../generated/web-contract.mjs').WebSessionTimelineDetailPage
+        return Response.json({
+          ...page,
+          items: page.items.map((item) => ({
+            ...item,
+            body:
+              item.body.type === 'user_input'
+                ? { ...item.body, turn_id: transcriptSessionId }
+                : item.body,
+          })),
+        })
+      }
+      return Response.json(payload)
+    }),
+  )
+  const reader = new TranscriptWindowReader(transcriptSessionId)
+  const signal = new AbortController().signal
+  await reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal)
+  conflict = true
+  await expect(
+    reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
+  ).rejects.toThrow('changed its retained immutable facts')
+})
