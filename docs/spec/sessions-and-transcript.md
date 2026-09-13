@@ -560,7 +560,8 @@ expanded event rereads. It retains facts for at most 24 recently read event
 addresses; changed excerpt lengths under different read budgets preserve
 compatible prefixes and retain the longest checked excerpt.
 
-Windows advance past metadata-only detail records automatically within the
+Windows advance past metadata-only detail records, including goal-only tool
+batches hidden by the selected conversation summary, automatically within the
 workspace record budget and projected-byte budget. All returned headers, detail
 items and projected bytes are charged, including discarded records. The scan
 item budget is clamped to the advertised detail limit; each automatic read uses
@@ -568,8 +569,10 @@ only the remaining scan allowance. Scanning stops at a visible item, a detail
 continuation, or an exhausted budget. An empty detail page preserves its
 unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. Turn segments retain window boundaries so prepending
-history preserves existing rows and their disclosures. Turn-wide classification
-uses all loaded events.
+history preserves existing rows and their disclosures. Retained tool chips stay
+in their assigned window segment when earlier proposal evidence is loaded;
+evicted assignments are discarded. Turn-wide classification uses all loaded
+events.
 
 The transcript groups contiguous events by turn while preserving interleaved
 chronology. Summary shows user messages, assistant text accompanying tool calls,

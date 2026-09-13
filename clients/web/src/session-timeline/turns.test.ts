@@ -5,7 +5,13 @@ import {
   detailTurnId,
   toolResultItem,
 } from '../../e2e/session-detail-fixture'
-import { groupTranscriptTurns, toolContinuations, turnSummaryParts } from './turns'
+import {
+  groupTranscriptTurns,
+  isVisibleTurnEvent,
+  toolContinuations,
+  toolEvidenceKey,
+  turnSummaryParts,
+} from './turns'
 import { retriedToolItems } from './turns.fixture'
 
 it('groups final text, user messages, and repeated tool evidence under the durable turn identity', () => {
@@ -313,4 +319,56 @@ it('keeps continued members of a window-first batch in one turn row', () => {
     tool.request_id,
     '00000000-0000-0000-0000-000000000141',
   ])
+})
+
+it('keeps a retained physical tool in its segment when its proposal is prepended', () => {
+  const event = detailItems[1]
+  if (event?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const proposal = {
+    ...event,
+    body: {
+      ...event.body,
+      tools: event.body.tools.map((tool) => ({
+        ...tool,
+        evidence: { type: 'request_only' as const },
+      })),
+    },
+  }
+  const physical = { ...event, address: { event_sequence: '9' } }
+  const initial = groupTranscriptTurns([physical], new Set(['9']))
+  const assignments = new Map(
+    initial.flatMap((turn) => turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const)),
+  )
+  const extended = groupTranscriptTurns([proposal, physical], new Set(['2', '9']), assignments)
+  expect(extended.map((turn) => turn.tools.length)).toEqual([0, 1])
+  expect(extended[1]?.id).toBe(initial[0]?.id)
+  expect(extended[1]?.tools).toEqual(initial[0]?.tools)
+  expect(extended[0] && isVisibleTurnEvent(extended[0], proposal)).toBe(false)
+  const evicted = groupTranscriptTurns([proposal], new Set(['2']), assignments)
+  expect(evicted[0]?.tools).toHaveLength(1)
+})
+
+it('does not treat goal-only batch members as visible tools in a visible turn', () => {
+  const batch = detailItems[1]
+  if (batch?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const goal = {
+    ...batch,
+    body: {
+      ...batch.body,
+      tools: [],
+      goal_events: [
+        {
+          type: 'user_stopped' as const,
+          generation: '1',
+          abandoned_actions: null,
+          settling_turn_id: null,
+        },
+      ],
+    },
+  }
+  const turn = groupTranscriptTurns([detailItems[0], goal].filter((item) => item !== undefined))[0]
+  if (!turn) throw new Error('Turn fixture missing')
+  expect(turn.messages).toHaveLength(1)
+  expect(turnSummaryParts(turn).map((part) => part.kind)).toEqual(['message'])
+  expect(isVisibleTurnEvent(turn, goal)).toBe(false)
 })

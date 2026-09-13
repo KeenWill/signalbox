@@ -43,6 +43,7 @@ import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
   detailTurnId,
   groupTranscriptTurns,
+  isVisibleTurnEvent,
   type TranscriptTurn,
   toolContinuations,
   toolEvidenceKey,
@@ -374,6 +375,7 @@ function TranscriptWindow({
       ),
     [pages],
   )
+  const toolSegments = useRef(new Map<string, string>())
   const knownTurnIds = new Set(
     entries.flatMap((event) => {
       const turnId = detailTurnId(event)
@@ -448,7 +450,7 @@ function TranscriptWindow({
   })
   const allTurns = useMemo(
     () =>
-      groupTranscriptTurns(entries, windowStarts).map((turn) => {
+      groupTranscriptTurns(entries, windowStarts, toolSegments.current).map((turn) => {
         const association = associations.members.find(
           (member) => member.sequence === turn.events[0]?.address.event_sequence,
         )
@@ -472,6 +474,11 @@ function TranscriptWindow({
       ),
     [allTurns, detail, turnModes, eventSequence, requestedTurn],
   )
+  useEffect(() => {
+    toolSegments.current = new Map(
+      turns.flatMap((turn) => turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const)),
+    )
+  }, [turns])
   const pending = useMemo(
     () =>
       pages?.flatMap((page) =>
@@ -668,11 +675,7 @@ function TranscriptWindow({
                   (detail === 'full' ||
                     turnModes[turn.turnId ?? turn.id] === 'full' ||
                     item.address.event_sequence === eventSequence)) ||
-                turn.messages.includes(item) ||
-                turn.result === item ||
-                turn.warnings.includes(item) ||
-                turn.outcome === item ||
-                (item.body.type === 'tool_batch' && turn.events.includes(item)),
+                isVisibleTurnEvent(turn, item),
             ),
           ),
       )
@@ -797,11 +800,7 @@ function TranscriptWindow({
                       (turn) =>
                         (turn.events.includes(item) &&
                           (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
-                        turn.messages.includes(item) ||
-                        turn.result === item ||
-                        turn.warnings.includes(item) ||
-                        turn.outcome === item ||
-                        (item.body.type === 'tool_batch' && turn.events.includes(item)),
+                        isVisibleTurnEvent(turn, item),
                     ),
                   ),
               ),

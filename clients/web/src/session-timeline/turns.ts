@@ -40,6 +40,7 @@ function projectedTool(tools: WebTimelineToolAttempt[], evidence: WebTimelineToo
 export function groupTranscriptTurns(
   items: readonly WebSessionTimelineDetail[],
   windowStarts?: ReadonlySet<string>,
+  toolSegments?: ReadonlyMap<string, string>,
 ): TranscriptTurn[] {
   const groups = new Map<string, TranscriptTurn>()
   for (const item of items) {
@@ -147,7 +148,7 @@ export function groupTranscriptTurns(
     }
   }
   const segments: TranscriptTurn[] = []
-  const assignedTools = new Map<string, Set<string>>()
+  const toolCandidates = new Map<WebTimelineToolAttempt, TranscriptTurn[]>()
   for (const item of items) {
     const turnId = detailTurnId(item)
     const group = groups.get(turnId ?? `event-${item.address.event_sequence}`)
@@ -177,20 +178,33 @@ export function groupTranscriptTurns(
     if (group.warnings.includes(item)) segment.warnings.push(item)
     if (group.outcome === item) segment.outcome = item
     if (item.body.type === 'tool_batch') {
-      let assigned = assignedTools.get(group.id)
-      if (!assigned) {
-        assigned = new Set()
-        assignedTools.set(group.id, assigned)
-      }
       for (const evidence of item.body.tools) {
         const tool = projectedTool(group.tools, evidence)
-        if (!tool || assigned.has(toolEvidenceKey(tool))) continue
-        assigned.add(toolEvidenceKey(tool))
-        segment.tools.push(tool)
+        if (!tool) continue
+        const candidates = toolCandidates.get(tool) ?? []
+        if (candidates.at(-1) !== segment) candidates.push(segment)
+        toolCandidates.set(tool, candidates)
       }
     }
   }
+  for (const [tool, candidates] of toolCandidates) {
+    const retained = toolSegments?.get(toolEvidenceKey(tool)) ?? toolSegments?.get(tool.request_id)
+    const target = candidates.find((segment) => segment.id === retained) ?? candidates[0]
+    target?.tools.push(tool)
+  }
   return segments
+}
+
+export function isVisibleTurnEvent(turn: TranscriptTurn, item: WebSessionTimelineDetail): boolean {
+  return (
+    turn.messages.includes(item) ||
+    turn.result === item ||
+    turn.warnings.includes(item) ||
+    turn.outcome === item ||
+    (turn.events.includes(item) &&
+      item.body.type === 'tool_batch' &&
+      item.body.tools.some((evidence) => projectedTool(turn.tools, evidence) !== undefined))
+  )
 }
 
 export type TurnSummaryPart =
