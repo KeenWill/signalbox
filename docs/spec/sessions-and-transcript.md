@@ -562,10 +562,11 @@ selected effective adapter and sufficient prompt room. The catalog refreshes
 this availability on window focus. Unconfigured title generation clears deferred
 work. Recovery scans unclaimed sessions in pages of 64 by session ID and refills
 as pending entries are admitted. Live completion and retry retention share the
-64-entry ceiling; overflow remains in the durable backlog. Title conversation
-SQL limits projected membership and nonempty payload rows to 64, newest first,
-and each text payload to the input byte budget. Completed-turn dispatch retains
-identifiers; title preparation runs inside an admitted task.
+64-entry ceiling; overflow remains in the durable backlog. An exhausted scan
+waits for retention overflow or startup/reload before restarting. Title
+conversation SQL limits projected membership and nonempty payload rows to 64,
+newest first, and each text payload to the input byte budget. Completed-turn
+dispatch retains identifiers; title preparation runs inside an admitted task.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

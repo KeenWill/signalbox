@@ -7,7 +7,10 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::watch;
@@ -27,6 +30,7 @@ pub struct CredentialInvocationProcesses {
     observed: Arc<Mutex<BTreeMap<ModelCallId, ObservedInvocation>>>,
     pending_titles: Arc<Mutex<BTreeMap<SessionId, TurnId>>>,
     title_scan_after: Arc<tokio::sync::Mutex<Option<SessionId>>>,
+    title_scan_requested: Arc<AtomicBool>,
     title_tasks: Option<tokio::sync::mpsc::Sender<crate::web_http::SessionTitleTask>>,
 }
 
@@ -44,6 +48,7 @@ impl CredentialInvocationProcesses {
             pending_titles: Arc::default(),
             title_tasks: None,
             title_scan_after: Arc::default(),
+            title_scan_requested: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -121,6 +126,8 @@ impl CredentialInvocationProcesses {
             .unwrap_or_else(PoisonError::into_inner);
         if pending.len() < TITLE_RECOVERY_PAGE_SIZE as usize {
             pending.entry(session).or_insert(turn);
+        } else if !pending.contains_key(&session) {
+            self.title_scan_requested.store(true, Ordering::Release);
         }
     }
 
@@ -132,7 +139,11 @@ impl CredentialInvocationProcesses {
     }
 
     pub(crate) async fn restore_pending_titles(&self) -> Result<(), sqlx::Error> {
-        *self.title_scan_after.lock().await = None;
+        {
+            let mut after = self.title_scan_after.lock().await;
+            *after = None;
+            self.title_scan_requested.store(true, Ordering::Release);
+        }
         self.refill_pending_titles().await
     }
 
@@ -147,10 +158,16 @@ impl CredentialInvocationProcesses {
         if available == 0 {
             return Ok(());
         }
+        if after.is_none() && !self.title_scan_requested.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
         let rows =
             signalbox_persistence::session_titles::SessionTitleRepository::new(self.pool.clone())
                 .unclaimed_initial_turns(*after, available)
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    self.title_scan_requested.store(true, Ordering::Release);
+                })?;
         *after = if rows.len() < available as usize {
             None
         } else {
@@ -510,6 +527,50 @@ mod tests {
             ended.await.is_err(),
             "runtime drain drops automatic generation"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn exhausted_title_scan_waits_for_overflow_or_reload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(6).await?;
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let processes = CredentialInvocationProcesses::new(pool.clone(), nudge);
+        processes.restore_pending_titles().await?;
+        let mut unavailable = processes.clone();
+        unavailable.pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(pool.connect_options().as_ref().clone());
+        unavailable.pool.close().await;
+        unavailable.refill_pending_titles().await?;
+        unavailable.refill_pending_titles().await?;
+        assert!(matches!(
+            unavailable.restore_pending_titles().await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        processes.restore_pending_titles().await?;
+        unavailable.refill_pending_titles().await?;
+        for _ in 0..=TITLE_RECOVERY_PAGE_SIZE {
+            processes.retain_initial_title(
+                SessionId::from_uuid(uuid::Uuid::now_v7()),
+                TurnId::from_uuid(uuid::Uuid::now_v7()),
+            );
+        }
+        processes.clear_pending_titles();
+        assert!(matches!(
+            unavailable.refill_pending_titles().await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert!(
+            matches!(
+                unavailable.refill_pending_titles().await,
+                Err(sqlx::Error::PoolClosed)
+            ),
+            "a failed scan remains requested"
+        );
+        Ok(())
     }
 
     #[tokio::test]
