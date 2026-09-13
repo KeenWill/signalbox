@@ -28,6 +28,8 @@
 //! row first.
 //!
 //! Additional row-lock protocols:
+//! - `session_titles::finish_generated`: `session_title_model_call FOR UPDATE` before the
+//!   generated-title metadata path takes `session FOR NO KEY UPDATE`.
 //! - `tool_loop::placement_loss::close_lost_runner_requests_after_observation`: after the
 //!   session scheduler, `tool_request FOR UPDATE` in proposal order.
 //! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
