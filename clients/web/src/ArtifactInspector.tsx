@@ -107,9 +107,11 @@ export function ArtifactInspector({
   onClose,
   state,
   presentationKind,
+  expectedByteLength,
 }: {
   available: boolean
   presentationKind?: 'image' | 'document'
+  expectedByteLength?: string
   commandContext: CommandContext
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
@@ -117,7 +119,7 @@ export function ArtifactInspector({
   onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
   const { request } = state
-  const descriptor = useArtifactDescriptor(available ? request : null)
+  const descriptor = useArtifactDescriptor(available ? request : null, expectedByteLength)
 
   const resolved = descriptor.data
   const sequence = request?.sequence ?? 0
