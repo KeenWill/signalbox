@@ -582,7 +582,10 @@ working_directory = "{}"
     )
 }
 
-fn configuration_with_codex_paths(executable: &Path, working_directory: &Path) -> String {
+pub(crate) fn configuration_with_codex_paths(
+    executable: &Path,
+    working_directory: &Path,
+) -> String {
     format!(
         r#"{CONFIGURATION}
 [[adapter_mappings]]

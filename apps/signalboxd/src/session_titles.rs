@@ -1,7 +1,7 @@
 //! Configured model execution for session titles.
 
 use signalbox_application::UsageTokenAxes;
-use signalbox_domain::{DurableCommandId, ModelCallId, SessionId, SessionMetadataContent, TurnId};
+use signalbox_domain::{DurableCommandId, ModelCallId, SessionId, TurnId};
 use signalbox_model_provider_runtime::{
     InvocationProcessObserver, ProviderTargetRelation, relate_provider_target,
 };
@@ -11,10 +11,7 @@ use signalbox_model_runtime::{
     ObservationSink, PreparationOutcome, ProviderCompactionMode, RequestedTarget, ResolvedTarget,
     TerminalEvidence, TokenUsage,
 };
-use signalbox_persistence::{
-    session_metadata::SessionMetadataRepository,
-    session_titles::{SessionTitleCall, SessionTitleRepository},
-};
+use signalbox_persistence::session_titles::{SessionTitleCall, SessionTitleRepository};
 use std::sync::Arc;
 
 use crate::{HubModelConfiguration, model_catalog_runtime::ModelRuntimeFactory};
@@ -319,26 +316,13 @@ impl SessionTitles {
     ) -> Result<Option<String>, TitleError> {
         let command = DurableCommandId::from_uuid(uuid::Uuid::now_v7());
         let repository = SessionTitleRepository::new(self.pool.clone());
+        let title = text.as_deref().and_then(normalize_title);
         // One immediate retry retains the same settlement identity and provider evidence.
         for _ in 0..2 {
-            let result = async {
-                let title = if let Some(text) = text.as_deref() {
-                    let metadata = SessionMetadataRepository::new(self.pool.clone())
-                        .load_session_metadata(call.session)
-                        .await
-                        .map_err(|_| TitleError::Database)?
-                        .ok_or(TitleError::NotFound)?;
-                    normalize_title(text, metadata.content())
-                } else {
-                    None
-                };
-                repository
-                    .finish_generated(command, call.call, title, usage)
-                    .await
-                    .map_err(|_| TitleError::Database)
-            }
-            .await;
-            if let Ok(title) = result {
+            if let Ok(title) = repository
+                .finish_generated(command, call.call, title.clone(), usage)
+                .await
+            {
                 return Ok(title);
             }
         }
@@ -411,7 +395,7 @@ fn usage_axes(usage: TokenUsage) -> UsageTokenAxes {
     }
 }
 
-fn normalize_title(text: &str, metadata: &SessionMetadataContent) -> Option<String> {
+fn normalize_title(text: &str) -> Option<String> {
     if text.contains('\0') {
         return None;
     }
@@ -424,22 +408,13 @@ fn normalize_title(text: &str, metadata: &SessionMetadataContent) -> Option<Stri
     if title.is_empty() || title.len() > TITLE_MAX_UTF8_BYTES {
         return None;
     }
-    SessionMetadataContent::try_new(
-        Some(title.clone()),
-        metadata.tags().map(str::to_owned).collect(),
-        metadata
-            .attributes()
-            .map(|(key, value)| (key.to_owned(), value.to_owned()))
-            .collect(),
-        metadata.archived(),
-    )
-    .ok()
-    .map(|_| title)
+    Some(title)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_domain::SessionMetadataContent;
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
@@ -666,7 +641,6 @@ mod tests {
 
     #[test]
     fn suggested_titles_are_short_unquoted_and_nonempty() {
-        let metadata = SessionMetadataContent::empty();
         for (response, expected) in [
             (
                 "\"Database indexing work\"\n",
@@ -680,7 +654,7 @@ mod tests {
             ("Invalid\0name", None),
         ] {
             assert_eq!(
-                normalize_title(response, &metadata).as_deref(),
+                normalize_title(response).as_deref(),
                 expected,
                 "{response:?}"
             );
@@ -690,32 +664,13 @@ mod tests {
     #[test]
     fn a_single_word_title_cannot_exceed_the_metadata_byte_limit() {
         let oversized = "界".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES / 3 + 1);
-        assert!(normalize_title(&oversized, &SessionMetadataContent::empty()).is_none());
-    }
-
-    #[test]
-    fn title_must_fit_with_preserved_metadata() {
-        let key = String::from("context");
-        let metadata = SessionMetadataContent::try_new(
-            None,
-            Vec::new(),
-            vec![(
-                key.clone(),
-                "x".repeat(SessionMetadataContent::MAX_TOTAL_UTF8_BYTES - key.len()),
-            )],
-            true,
-        )
-        .expect("preserved metadata fills the aggregate byte allowance");
-
-        assert!(normalize_title("New title", &metadata).is_none());
+        assert!(normalize_title(&oversized).is_none());
     }
 
     #[test]
     fn generated_titles_fit_the_bounded_json_response() {
-        let metadata = SessionMetadataContent::empty();
-        assert!(normalize_title(&"界".repeat(TITLE_MAX_UTF8_BYTES / 3 + 1), &metadata,).is_none());
-        let title = normalize_title(&"\u{1}".repeat(TITLE_MAX_UTF8_BYTES), &metadata)
-            .expect("bounded title");
+        assert!(normalize_title(&"界".repeat(TITLE_MAX_UTF8_BYTES / 3 + 1)).is_none());
+        let title = normalize_title(&"\u{1}".repeat(TITLE_MAX_UTF8_BYTES)).expect("bounded title");
         let response =
             serde_json::to_vec(&signalbox_web_contract::WebSessionTitleSuggestion { title })
                 .expect("title response");
