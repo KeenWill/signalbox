@@ -73,7 +73,7 @@ export class TranscriptWindowReader {
     for (const [sequence, current] of facts) {
       const previous = this.facts.get(sequence)
       if (previous !== undefined && previous !== current)
-        throw new TypeError('Transcript detail changed immutable facts for a retained address')
+        throw new TypeError('Transcript detail changed its retained immutable facts')
     }
     for (const [sequence, current] of facts) {
       this.facts.delete(sequence)

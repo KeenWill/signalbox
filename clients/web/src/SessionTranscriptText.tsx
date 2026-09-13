@@ -159,23 +159,29 @@ function TranscriptWindow({
   useEffect(() => {
     if (transcript.error) console.error('Transcript load failed', transcript.error)
   }, [transcript.error])
+  const pages = transcript.data?.pages
   const previousObservation = useRef(observed)
   useEffect(() => {
     if (previousObservation.current !== observed) {
       previousObservation.current = observed
-      if (readerAtEnd.current && initialAnchor.kind === 'latest')
+      if (
+        readerAtEnd.current &&
+        (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after)
+      )
         queries.setQueryData<typeof transcript.data>(queryKey, (data) =>
           data
             ? {
                 ...data,
-                pageParams: [initialAnchor, ...data.pageParams.slice(1)],
+                pageParams: [
+                  { kind: 'latest' } satisfies SessionWindowAnchor,
+                  ...data.pageParams.slice(1),
+                ],
               }
             : data,
         )
       void transcript.refetch()
     }
-  }, [observed, transcript.refetch, queries, queryKey, initialAnchor])
-  const pages = transcript.data?.pages
+  }, [observed, transcript.refetch, queries, queryKey, initialAnchor, pages])
   const entries = useMemo(
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
     [pages],
@@ -216,10 +222,17 @@ function TranscriptWindow({
           item: undefined,
           pending: page,
         })),
-      ].sort((a, b) => (BigInt(a.sequence) < BigInt(b.sequence) ? -1 : 1)),
+      ].sort((a, b) => {
+        const left = BigInt(a.sequence)
+        const right = BigInt(b.sequence)
+        return left < right ? -1 : left > right ? 1 : 0
+      }),
     [visible, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
+  const selectedSequence =
+    eventSequence ?? (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
+  const selectedId = rows.find((row) => row.sequence === selectedSequence)?.id
   const emptyScanned = useRef({ headers: 0, items: 0, bytes: 0, first: '' })
   useEffect(() => {
     const oldest = pages?.[0]
@@ -297,7 +310,7 @@ function TranscriptWindow({
           readerAtEnd.current = atEnd
         }}
         followEnd={
-          initialAnchor.kind === 'latest' &&
+          (initialAnchor.kind === 'latest' || !pages?.at(-1)?.window.continuation_after) &&
           Boolean(
             pages
               ?.at(-1)
@@ -306,10 +319,7 @@ function TranscriptWindow({
               ),
           )
         }
-        selectedId={
-          eventSequence ??
-          (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
-        }
+        selectedId={selectedId}
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
           if (direction === 'before' && transcript.hasPreviousPage) {

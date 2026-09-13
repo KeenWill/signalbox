@@ -218,7 +218,7 @@ it.each(['turn identity', 'attachments', 'tool request', 'excerpt total'] as con
     conflict = true
     await expect(
       reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
-    ).rejects.toThrow('changed immutable facts')
+    ).rejects.toThrow('retained immutable facts')
     conflict = false
     await expect(
       reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
@@ -294,4 +294,36 @@ it('bounds immutable detail facts while traversing history', async () => {
     )
   }
   expect(reader).toHaveProperty('facts.size', 24)
+})
+
+it('rejects changed immutable detail facts on overlapping transcript reads', async () => {
+  let conflict = false
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string) => {
+      const url = new URL(path, 'http://localhost')
+      const payload = transcriptFixture(url)
+      if (conflict && url.pathname.endsWith('/timeline-detail')) {
+        const page = payload as import('../generated/web-contract.mjs').WebSessionTimelineDetailPage
+        return Response.json({
+          ...page,
+          items: page.items.map((item) => ({
+            ...item,
+            body:
+              item.body.type === 'user_input'
+                ? { ...item.body, turn_id: transcriptSessionId }
+                : item.body,
+          })),
+        })
+      }
+      return Response.json(payload)
+    }),
+  )
+  const reader = new TranscriptWindowReader(transcriptSessionId)
+  const signal = new AbortController().signal
+  await reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal)
+  conflict = true
+  await expect(
+    reader.read({ kind: 'latest' }, webContractBootstrapFixture.limits, signal),
+  ).rejects.toThrow('changed its retained immutable facts')
 })
