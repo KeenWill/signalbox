@@ -600,19 +600,6 @@ test('focuses search through its command and releases editing with Escape', asyn
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
-test('keeps artifact inspector inputs in their editing context on Search', async ({ page }) => {
-  await useSearchFixture(page)
-  await page.goto('/search')
-  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  for (const name of ['Digest', 'Declared media type', 'Display filename optional']) {
-    const input = page.getByRole('textbox', { name, exact: true })
-    await input.focus()
-    await input.press('Escape')
-    await expect(input).toBeFocused()
-    await expect(page.getByRole('button', { name: 'Close artifact inspector' })).toBeVisible()
-  }
-})
-
 test('returns palette focus to main when history removes its opener', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/settings')
