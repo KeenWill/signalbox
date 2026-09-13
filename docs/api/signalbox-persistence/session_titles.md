@@ -35,6 +35,12 @@ pub struct SessionTitleRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl session_titles::SessionTitleRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn unclaimed_initial_turns(
+        &self,
+    ) -> result::Result<
+        vec::Vec<(signalbox_domain::SessionId, signalbox_domain::TurnId)>,
+        error::Error,
+    >;
     pub async fn prepare(
         &self,
         call: &mut session_titles::SessionTitleCall,

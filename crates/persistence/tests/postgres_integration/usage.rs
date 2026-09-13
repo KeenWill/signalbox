@@ -30,6 +30,7 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
     let (fixture, mut model_repository, authorized) =
         authorize_checkpointed_model_call(&pool, seed).await?;
     let titles = SessionTitleRepository::new(pool.clone());
+    assert!(titles.unclaimed_initial_turns().await?.is_empty());
     let mut call = SessionTitleCall {
         call: ModelCallId::from_uuid(Uuid::now_v7()),
         session: fixture.session,
@@ -162,6 +163,10 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
         .await?;
         assert_eq!(retained, (true, fixture.turn.into_uuid()));
     }
+    assert_eq!(
+        titles.unclaimed_initial_turns().await?,
+        vec![(fixture.session, fixture.turn)]
+    );
     call.initial_for_turn = Some(later_turn);
     assert!(
         titles.prepare(&mut call, &Default::default()).await?

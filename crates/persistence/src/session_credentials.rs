@@ -153,7 +153,8 @@ impl ModelCredentialFamilyCatalog {
             .map(|route| route.family.as_ref())
     }
 
-    pub(crate) fn migration_fallback_family_for_call(
+    /// Resolves the migration fallback for the effective serving target.
+    pub fn migration_fallback_family_for_call(
         &self,
         selected: ResolvedProviderTarget,
         fast_mode: FastMode,

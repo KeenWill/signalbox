@@ -441,6 +441,9 @@ impl ConfigurationReload {
                 self.deliver(request, &intent, replacement, true).await?;
             }
         }
+        if let Some(titles) = self.session_titles(self.pool.clone()) {
+            titles.restore_pending().await?;
+        }
         Ok(())
     }
 
