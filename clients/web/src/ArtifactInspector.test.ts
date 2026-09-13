@@ -7,6 +7,23 @@ import {
 } from './features/artifacts/artifactScenario'
 
 describe('artifact inspector resolution identity', () => {
+  it('keeps the retained presentation kind independent of declared MIME', () => {
+    const image = inspectedArtifact(
+      { ...fallbackDescriptor, display_filename: [], declared_media_type: 'application/pdf' },
+      nextResolutionSequence(),
+      'image',
+    )
+    expect(image.kind).toBe('image')
+    expect(image.displayName).toBe('Image')
+    const document = inspectedArtifact(
+      { ...imageArtifact, display_filename: [], declared_media_type: 'image/png' },
+      nextResolutionSequence(),
+      'document',
+    )
+    expect(document.kind).toBe('blob')
+    expect(document.displayName).toBe('Document')
+  })
+
   it('labels MIME types case-insensitively', () => {
     expect(attachmentTypeLabel('IMAGE/PNG')).toBe('Image')
     expect(attachmentTypeLabel('APPLICATION/PDF')).toBe('PDF')

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { fileEvidence, rawFileEvidence } from './toolScenario'
+import { fileEvidence, longEvidence, rawFileEvidence } from './toolScenario'
 
 test('tool summaries expose raw evidence by keyboard', async ({ page }, testInfo) => {
   const errors: string[] = []
@@ -42,4 +42,16 @@ test('tool summaries expose raw evidence by keyboard', async ({ page }, testInfo
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('tool-renderers-phone.png'), fullPage: true })
   expect(errors).toEqual([])
+})
+
+test('raw excerpts expose the complete fetched text on demand', async ({ page }) => {
+  await page.goto('/src/features/tools/scenario.html')
+  const tool = page.getByRole('article', { name: 'Tool long_evidence', exact: true }).last()
+  await tool.getByRole('button', { name: 'Raw', exact: true }).click()
+  const code = tool.getByRole('region', { name: 'Output', exact: true }).locator('code')
+  await expect(code).not.toContainText('Last fetched line')
+  await tool.getByRole('button', { name: 'Show all fetched text' }).click()
+  expect(await code.textContent()).toBe(JSON.stringify({ content: longEvidence }))
+  await tool.getByRole('button', { name: 'Show less' }).click()
+  await expect(code).not.toContainText('Last fetched line')
 })

@@ -50,6 +50,7 @@ for (const view of ['preview', 'thumbnail'] as const) {
     const label = view === 'preview' ? 'Preview of Image' : 'Thumbnail of Image'
     await expect(media.getByRole('img', { name: label })).toBeVisible()
     await expect(media).not.toContainText('sha256:')
+    await page.getByRole('radio', { name: 'Tools', exact: true }).check()
     await page.getByRole('button', { name: 'Raw', exact: true }).first().click()
     await expect(media.getByRole('img', { name: label })).toBeVisible()
     await media.getByRole('img', { name: label }).click()
