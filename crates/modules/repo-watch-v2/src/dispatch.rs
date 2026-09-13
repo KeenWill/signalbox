@@ -107,6 +107,9 @@ impl RepoWatchStore {
         repository: &RepositorySlug,
         rule: &RepoWatchRule,
     ) -> Result<Option<RuleEvent>, StoreError> {
+        if self.observer_evaluation_paused(repository).await? {
+            return Ok(None);
+        }
         loop {
             let row: Option<(Decimal, Uuid, Vec<u8>)> = sqlx::query_as(
                 "SELECT event.repository_event_ordinal, event.event_id, event.normalized_payload

@@ -77,14 +77,11 @@ async fn await_title_generation(
     + 'static,
 ) -> Result<Option<String>, crate::session_titles::TitleError> {
     let (completed, result) = tokio::sync::oneshot::channel();
-    if tasks
+    tasks
         .try_send(Box::pin(async move {
             let _ = completed.send(generation.await);
         }))
-        .is_err()
-    {
-        return Err(crate::session_titles::TitleError::Generation);
-    }
+        .map_err(|_| crate::session_titles::TitleError::Generation)?;
     result
         .await
         .unwrap_or(Err(crate::session_titles::TitleError::Generation))
@@ -204,25 +201,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_suggestion_handoff_rejects_without_starting_generation() {
+    async fn saturated_suggestion_handoff_is_rejected_without_a_detached_waiter() {
         let (tasks, mut pending) = tokio::sync::mpsc::channel::<super::super::SessionTitleTask>(1);
         tasks.try_send(Box::pin(async {})).expect("full handoff");
-        let (started, mut start) = tokio::sync::oneshot::channel();
-        let result = await_title_generation(tasks, async move {
-            started.send(()).expect("fixture observes generation");
-            Ok(None)
-        })
-        .await;
+        let (settled, settlement) = tokio::sync::oneshot::channel();
         assert!(matches!(
-            result,
+            await_title_generation(tasks, async move {
+                settled.send(()).expect("fixture observes settlement");
+                Ok(None)
+            })
+            .await,
             Err(crate::session_titles::TitleError::Generation)
         ));
-        assert!(matches!(
-            start.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-        ));
+        assert!(
+            settlement.await.is_err(),
+            "rejected generation is dropped before it starts"
+        );
         pending.recv().await.expect("buffered task").await;
-        assert!(pending.recv().await.is_none());
+        assert!(
+            pending.recv().await.is_none(),
+            "saturation leaves no detached handoff waiter"
+        );
     }
 
     #[tokio::test]

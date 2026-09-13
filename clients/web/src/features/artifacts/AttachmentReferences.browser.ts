@@ -296,13 +296,21 @@ test('restores focus to the image preview control after closing details', async 
   )
   await page.goto('/src/features/artifacts/scenario.html')
   const control = page
-    .getByRole('article', { name: 'Artifact Image', exact: true })
-    .getByRole('button', { name: 'Image Image', exact: true })
+    .getByRole('list', { name: 'Attachments', includeHidden: true })
+    .getByRole('article', { name: 'Artifact Image', exact: true, includeHidden: true })
+    .getByRole('button', { name: 'Image Image', exact: true, includeHidden: true })
+  await expect(control).toHaveAttribute('aria-haspopup', 'dialog')
+  await expect(control).toHaveAttribute('aria-expanded', 'false')
+  await expect(control).not.toHaveAttribute('aria-pressed')
   await control.focus()
   await page.keyboard.press('Enter')
   await expect(page.getByRole('dialog', { name: 'Attachment details' })).toBeVisible()
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await expect(control).toHaveAttribute('aria-expanded', 'true')
+  await expect(pane).toHaveAttribute('id', (await control.getAttribute('aria-controls')) ?? '')
   await page.keyboard.press('Escape')
   await expect(control).toBeFocused()
+  await expect(control).toHaveAttribute('aria-expanded', 'false')
 })
 
 test('labels uppercase image MIME types as images in previews and details', async ({ page }) => {
@@ -420,5 +428,46 @@ for (const label of ['image/', 'image/png extra']) {
     pending.resolve()
     await expect(page.getByRole('button', { name: 'Retry attachment' })).toBeVisible()
     await expect(chip).toBeVisible()
+  })
+}
+
+for (const controlName of ['Download', 'Image Image', 'Load original']) {
+  test(`keeps an offscreen attachment active while ${controlName} owns focus`, async ({ page }) => {
+    await page.route('**/api/bootstrap', (route) =>
+      route.fulfill({ json: webContractBootstrapFixture }),
+    )
+    await page.route('**/api/blobs/**/descriptor?*', (route) =>
+      route.fulfill({ json: withoutFilename(jpegDescriptor) }),
+    )
+    await page.route('**/api/blobs/**/content/image-png', (route) =>
+      route.fulfill({ body: preview, contentType: 'image/png' }),
+    )
+    await page.goto('/src/features/artifacts/scenario.html?original&revisit')
+    const control = page
+      .getByRole('article', { name: 'Artifact Image', exact: true })
+      .getByRole(controlName === 'Download' ? 'link' : 'button', {
+        name: controlName,
+        exact: true,
+      })
+    await control.focus()
+    await page.getByRole('listitem').evaluate(async (element) => {
+      await new Promise<void>((resolve) => {
+        const observer = new IntersectionObserver(([entry]) => {
+          if (entry?.isIntersecting) return
+          observer.disconnect()
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        })
+        observer.observe(element)
+        window.scrollTo(0, document.documentElement.scrollHeight)
+      })
+    })
+    await expect(control).not.toBeInViewport()
+    await expect(control).toBeFocused()
+    await page.getByRole('heading', { name: 'Conversation attachments' }).evaluate((element) => {
+      element.tabIndex = -1
+      element.focus({ preventScroll: true })
+    })
+    await expect(control).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Conversation attachments' })).toBeFocused()
   })
 }

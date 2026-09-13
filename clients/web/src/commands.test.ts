@@ -114,17 +114,8 @@ describe('command registry', () => {
       focusTimeline: () => undefined,
       paneSize: 320,
     })
-    invokeCommand('pane.inspector.resize', {
-      dispatch: store.dispatch,
-      getState: store.getState,
-      timelineIds: [],
-      artifactPreviewIds: [],
-      artifactOriginalIds: [],
-      focusTimeline: () => undefined,
-      paneSize: 440,
-    })
 
-    expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320, inspector: 440 })
+    expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320 })
   })
 
   it('routes exact session opening through a parameterized central command', () => {
@@ -499,9 +490,9 @@ describe('command registry', () => {
     expect(opened).toBe(1)
   })
 
-  it('keeps the artifact inspector reachable from product surfaces', () => {
+  it('omits the unbound artifact inspector from product commands', () => {
     const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
 
-    expect(productCommandIds).toContain('artifact.open')
+    expect(productCommandIds).not.toContain('artifact.open')
   })
 })

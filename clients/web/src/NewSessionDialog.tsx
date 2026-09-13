@@ -44,7 +44,7 @@ export function NewSessionDialog({
   }, [open])
   const templates = useQuery({
     queryKey: ['production', 'templates'],
-    queryFn: ({ signal }) => templatesApi.list(signal),
+    queryFn: ({ signal }) => templatesApi.listForSessionPicker(signal),
     enabled: open && retained === null,
   })
   const selected =
