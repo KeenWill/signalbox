@@ -533,11 +533,11 @@ function TranscriptWindow({
     [turns, pending],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
-  const renderContinuation = (page: WebSessionTimelineDetailPage) => {
+  const renderContinuation = (page: WebSessionTimelineDetailPage, adoptPage?: AdoptToolPage) => {
     const key = JSON.stringify([continuationSequence(page), page.continuation])
     return (
       <ContinuedEvent
-        adoptToolPage={adoptToolPage}
+        adoptToolPage={adoptPage}
         key={key}
         sessionId={sessionId}
         page={page}
@@ -927,7 +927,7 @@ function TurnContent({
   sessionId: string
   limits: SessionTranscriptLimits
   target?: string
-  renderContinuation: (page: WebSessionTimelineDetailPage) => ReactNode
+  renderContinuation: (page: WebSessionTimelineDetailPage, adoptPage?: AdoptToolPage) => ReactNode
   eventContinuations: Readonly<Record<string, EventContinuationState>>
   onEventContinuation: (sequence: string, state: EventContinuationState) => void
   onExpand: (mode: DetailMode) => void
@@ -966,7 +966,7 @@ function TurnContent({
             ))
         )
       })
-      .map(renderContinuation)
+      .map((page) => renderContinuation(page, adoptToolPage))
   const events = turn.events.filter(
     (event, index) =>
       turn.events.findIndex(
@@ -1446,6 +1446,14 @@ function ContinuedEventReader({
       adoptToolPage(state.previous, detail.data, false)
   }, [state, detail.data, adoptToolPage])
   const attachedMessages = new Set(page.items.map((item) => item.address.event_sequence))
+  const next = detail.data?.continuation
+  const canContinue =
+    detail.data &&
+    next &&
+    (!adoptToolPage ||
+      (next.type === 'more_body' &&
+        isToolBodyContinuation(next.body) &&
+        !advancesToolMember(detail.data)))
   return (
     <section aria-label="More message text">
       {detail.isPending && <p role="status">Loading details…</p>}
@@ -1473,7 +1481,7 @@ function ContinuedEventReader({
           })}
         </div>
       ))}
-      {detail.data?.continuation && !(adoptToolPage && advancesToolMember(detail.data)) && (
+      {canContinue && (
         <button
           type="button"
           onClick={() => {
