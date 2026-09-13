@@ -205,6 +205,8 @@ it.each(['describe', 'load'] as const)(
       supervision: null,
       repository_watch: null,
       workspace_root_kind: null,
+      title_summary: null,
+      last_activity: { kind: 'session' as const, unix_microseconds: '1' },
       sizes: {
         item_count: '3',
         projected_structured_bytes: '234',
@@ -244,6 +246,8 @@ it.each(['describe', 'load'] as const)(
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session' as const, unix_microseconds: '1' },
         sizes: { ...descriptor.sizes, item_count: '1', projected_structured_bytes: '78' },
       },
       history: new BoundedSessionHistory(sessionId, source),
@@ -563,6 +567,8 @@ it.each([
       supervision: null,
       repository_watch: null,
       workspace_root_kind: null,
+      title_summary: null,
+      last_activity: { kind: 'session' as const, unix_microseconds: '1' },
       sizes: {
         item_count: String(through - 39),
         projected_structured_bytes: String((through - 39) * 78),

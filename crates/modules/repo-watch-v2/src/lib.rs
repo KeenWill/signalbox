@@ -1877,8 +1877,8 @@ async fn append_event(
         "INSERT INTO gh_event
             (event_id, content_identity, repository, event_kind, target_kind,
              pull_request_number, normalized_payload, producer,
-             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             repository_event_ordinal, frontier_generation, event_ordinal, recorded_at, source_review_id, source_review_actor, self_review)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($14 = (SELECT login FROM observer_actor WHERE repository=$3 AND ready), false))
          ON CONFLICT DO NOTHING",
     )
     .bind(event.id().into_uuid())
@@ -1894,6 +1894,10 @@ async fn append_event(
     .bind(Decimal::from(event_ordinal))
     .bind(recorded_at)
     .bind(candidate.source_review.map(|review| Decimal::from(review.get())))
+    .bind(match event.kind() {
+        RepoWatchEventKindV1::ReviewSubmitted { reviewer, .. } => Some(reviewer.as_str()),
+        _ => None,
+    })
     .execute(&mut **transaction)
     .await?
     .rows_affected()
@@ -2254,6 +2258,21 @@ impl RepoWatchStore {
             })
         {
             return Err(StoreError::InvalidDispatchBatch);
+        }
+        if initial_batch {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1,0))")
+                .bind(first.repository().as_str())
+                .execute(&mut **transaction)
+                .await?;
+            let paused: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM observer_actor WHERE repository=$1 AND NOT ready)",
+            )
+            .bind(first.repository().as_str())
+            .fetch_one(&mut **transaction)
+            .await?;
+            if paused {
+                return Ok(DispatchAdmission::Suppressed);
+            }
         }
         sqlx::query(
             "SELECT pg_advisory_xact_lock(

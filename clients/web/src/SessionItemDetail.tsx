@@ -125,23 +125,31 @@ const Facts = ({ facts }: { facts: ReadonlyArray<readonly [string, ReactNode]> }
   </dl>
 )
 
-export const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
+export const GoalEventDetail = ({
+  event,
+  includeFacts = true,
+}: {
+  event: GoalEvent
+  includeFacts?: boolean
+}) => (
   <article className="session-detail-member">
-    <Facts
-      facts={[
-        ['Goal event', enumLabel(event.type)],
-        ['Generation', event.generation],
-        [
-          'Reason',
-          event.type === 'blocked'
-            ? enumLabel(event.reason)
-            : event.type === 'session_closed'
-              ? enumLabel(event.outcome)
-              : 'Not recorded',
-        ],
-      ]}
-    />
-    {event.type === 'user_stopped' && (
+    {includeFacts && (
+      <Facts
+        facts={[
+          ['Goal event', enumLabel(event.type)],
+          ['Generation', event.generation],
+          [
+            'Reason',
+            event.type === 'blocked'
+              ? enumLabel(event.reason)
+              : event.type === 'session_closed'
+                ? enumLabel(event.outcome)
+                : 'Not recorded',
+          ],
+        ]}
+      />
+    )}
+    {includeFacts && event.type === 'user_stopped' && (
       <Facts
         facts={[
           ['Closing turn', event.settling_turn_id ?? 'None'],
@@ -289,6 +297,23 @@ const delegationFacts = (detail: DelegationDetail): ReadonlyArray<Fact> => {
 
 const unreachableBody = (body: never): never => {
   throw new TypeError(`unhandled generated timeline detail body: ${String(body)}`)
+}
+
+export const detailTextContent = (body: DetailBody): ReactNode => {
+  switch (body.type) {
+    case 'tool_approval_decision':
+      return body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />
+    case 'context_compaction':
+      return <TextDetail label="Compaction summary" excerpt={body.summary} />
+    case 'delegation': {
+      const content = 'content' in body.detail ? body.detail.content : null
+      return content && <TextDetail label="Delegation content" excerpt={content} />
+    }
+    case 'goal_event':
+      return <GoalEventDetail event={body.event} includeFacts={false} />
+    default:
+      return null
+  }
 }
 
 export const detailContent = (body: DetailBody, includeText = true): ReactNode => {
@@ -503,7 +528,7 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
               ...actorFacts,
             ]}
           />
-          {body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />}
+          {includeText && detailTextContent(body)}
         </>
       )
     }
@@ -521,7 +546,7 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
               ['Up to position', body.through_position],
             ]}
           />
-          <TextDetail label="Compaction summary" excerpt={body.summary} />
+          {includeText && detailTextContent(body)}
         </>
       )
     case 'turn_lifecycle':
@@ -564,11 +589,10 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
       )
     case 'delegation': {
       const detail = body.detail
-      const content = 'content' in detail ? detail.content : null
       return (
         <>
           <Facts facts={delegationFacts(detail)} />
-          {content && <TextDetail label="Delegation content" excerpt={content} />}
+          {includeText && detailTextContent(body)}
         </>
       )
     }

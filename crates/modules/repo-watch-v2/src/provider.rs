@@ -315,18 +315,29 @@ where
 }
 
 impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
-    /// Runs the existing bounded attempt and retains its measured outcome.
+    /// Resolves identity with the observation's client in a separate bounded attempt.
     pub async fn poll_outcome(
         &mut self,
         producer: EventProducer,
     ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
-        let attempt = crate::measurements::AttemptGuard::start(
-            self.store.measurements.clone(),
-            self.repository.clone(),
-        );
-        let result = self.observe(producer).await;
-        use crate::measurements::PollOutcome;
-        attempt.finish(match &result {
+        use crate::measurements::{AttemptGuard, PollOutcome};
+        let client = {
+            let identity_attempt =
+                AttemptGuard::start(self.store.measurements.clone(), self.repository.clone());
+            let client = self.identify_client().await;
+            identity_attempt.finish(match &client {
+                Ok(_) => PollOutcome::Partial,
+                Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
+                Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
+                Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
+                Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
+            });
+            client?
+        };
+        let observation_attempt =
+            AttemptGuard::start(self.store.measurements.clone(), self.repository.clone());
+        let result = self.observe(producer, &client).await;
+        observation_attempt.finish(match &result {
             Ok(outcome) => *outcome,
             Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
             Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
@@ -335,21 +346,52 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
         });
         result
     }
-}
 
-impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
-    async fn observe(
+    async fn identify_client(
         &mut self,
-        producer: EventProducer,
-    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
+    ) -> Result<GitHubClient, RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
+        self.store
+            .prepare_observer_identity(&self.repository)
+            .await
+            .map_err(RepositoryAttemptError::Store)?;
+        let response = client
+            .graphql(br#"{"query":"query RepositoryWatchActor { viewer { login } }"}"#.to_vec())
+            .await
+            .map_err(|error| {
+                RepositoryAttemptError::Observation(ObservationError::Transport(error))
+            })?;
+        let value: serde_json::Value = serde_json::from_slice(&response)
+            .map_err(|_| RepositoryAttemptError::Observation(ObservationError::InvalidResponse))?;
+        let actor = text(&value["data"]["viewer"]["login"])
+            .and_then(|login| RepoWatchAuthorLogin::try_new(login).ok())
+            .ok_or(RepositoryAttemptError::Observation(
+                ObservationError::InvalidResponse,
+            ))?;
+        self.store
+            .record_observer_identity(&self.repository, &actor)
+            .await
+            .map_err(RepositoryAttemptError::Store)?;
+        tracing::info!(
+            repository = self.repository.as_str(),
+            requests = 1_u64,
+            "repository-watch observer identity prepared"
+        );
+        Ok(client)
+    }
+
+    async fn observe(
+        &mut self,
+        producer: EventProducer,
+        client: &GitHubClient,
+    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
         if producer == EventProducer::Webhook {
             return crate::poll_cache::observe_webhook_pulls(
-                &client,
+                client,
                 &self.store,
                 &self.repository,
                 &self.signal_reviewers,
@@ -362,7 +404,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             });
         }
         crate::poll_cache::poll_with_cache(
-            &client,
+            client,
             &self.store,
             &self.repository,
             &self.signal_reviewers,
@@ -1295,7 +1337,7 @@ mod tests {
             .connect_lazy("postgres://unused:unused@localhost/unused")?;
         pool.close().await;
         let store = RepoWatchStore::new(pool);
-        // Inert fixture credentials: the closed store fails before provider I/O.
+        // Inert credentials: the closed store fails before identity I/O.
         let client = GitHubClient::try_new("repo-watch-test", "unused-test-token")?;
         let mut task = GitHubRepositoryTask {
             repository: repository.clone(),

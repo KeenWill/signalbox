@@ -16,12 +16,16 @@ import {
   toolResultItem,
 } from './session-detail-fixture'
 
-test('shows a completed assistant response before its turn closure is loaded', async ({
+test('keeps a response without turn closure in Tools until it becomes final', async ({
   page,
 }, testInfo) => {
   await turnApi(page, undefined, detailItems.slice(0, 4))
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.locator('.session-message-text')).toHaveText([
+    'Inspect the release status and retain the result.',
+  ])
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await expect(transcript.locator('.session-message-text')).toHaveText([
     'Inspect the release status and retain the result.',
     'The release checks passed. Publishing remains unapproved.',
@@ -445,6 +449,210 @@ test('renders tool-batch goal events in All details', async ({ page }) => {
   await expect(transcript.getByText('Release approval is required.', { exact: true })).toBeVisible()
 })
 
+test('All details retains goal text chunks with one set of facts per goal member', async ({
+  page,
+}) => {
+  const input = detailItems[0]
+  const batch = detailItems[1]
+  if (!input || batch?.body.type !== 'tool_batch') throw new Error('Goal fixture missing')
+  const body = batch.body
+  const texts = ['Approval needed.', 'Release verified.']
+  const chunk = (member: number, offset: number) => {
+    const fullText = texts[member] ?? ''
+    const end = Math.min(offset + 6, fullText.length)
+    const next =
+      end < fullText.length
+        ? {
+            address: batch.address,
+            field: 'goal_text' as const,
+            member_index: member,
+            offset_bytes: String(end),
+          }
+        : member === 0
+          ? {
+              address: batch.address,
+              field: 'goal_text' as const,
+              member_index: 1,
+              offset_bytes: '0',
+            }
+          : null
+    const text = {
+      text: fullText.slice(offset, end),
+      offset_bytes: String(offset),
+      total_bytes: String(fullText.length),
+      continuation: end < fullText.length ? next : null,
+    }
+    const item: WebSessionTimelineDetail = {
+      ...batch,
+      projected_body_bytes: 128 + text.text.length,
+      body: {
+        ...body,
+        projected_member_index: member,
+        tools: [],
+        goal_events: [
+          member === 0
+            ? { type: 'blocked', generation: '1', reason: 'authorization_required', text }
+            : { type: 'achieved', generation: '1', text },
+        ],
+      },
+    }
+    return detailPage([item], next ? { type: 'more_body', body: next } : null)
+  }
+  await turnApi(page, undefined, [input, ...chunk(0, 0).items])
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '2')
+      return route.fallback()
+    return route.fulfill({
+      json: chunk(
+        Number(url.searchParams.get('cursor_member') ?? '0'),
+        Number(url.searchParams.get('cursor_offset') ?? '0'),
+      ),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const event = page
+    .getByRole('region', { name: 'Session transcript', exact: true })
+    .locator('[data-event-sequence="2"]')
+  const excerpts: string[] = []
+  for (const [member, text] of texts.entries()) {
+    for (let offset = 0; offset < text.length; offset += 6) {
+      if (member !== 0 || offset !== 0)
+        await event.getByRole('button', { name: 'Continue reading', exact: true }).click()
+      excerpts.push(text.slice(offset, offset + 6))
+      await expect(
+        event.getByRole('region', { name: 'Goal text', exact: true }).locator('pre'),
+      ).toHaveText(excerpts)
+      for (const fact of ['Goal event', 'Generation', 'Reason'])
+        await expect(event.locator('dt').filter({ hasText: new RegExp(`^${fact}$`) })).toHaveCount(
+          member + 1,
+        )
+    }
+  }
+  await expect(event.getByText('Blocked', { exact: true })).toHaveCount(1)
+  await expect(event.getByText('Achieved', { exact: true })).toHaveCount(1)
+  await expect(event.getByText('Authorization required', { exact: true })).toHaveCount(1)
+  await expect(event.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
+})
+
+for (const type of [
+  'context_compaction',
+  'tool_approval_decision',
+  'delegation',
+  'goal_event',
+] as const) {
+  test(`All details retains ${type} text chunks with one immutable fact set`, async ({ page }) => {
+    const input = detailItems[0]
+    const approval = detailItems[2]
+    if (!input || approval?.body.type !== 'tool_approval_decision')
+      throw new Error('Detail fixture missing')
+    const approvalBody = approval.body
+    const labels = {
+      context_compaction: 'Compaction summary',
+      tool_approval_decision: 'Approval rationale',
+      delegation: 'Delegation content',
+      goal_event: 'Goal text',
+    }
+    const fields = {
+      context_compaction: 'compaction_summary',
+      tool_approval_decision: 'approval_rationale',
+      delegation: 'delegation_content',
+      goal_event: 'goal_text',
+    } as const
+    const address = { event_sequence: '2' }
+    const chunk = (offset: number) => {
+      const continuation =
+        offset < 2
+          ? { address, field: fields[type], member_index: 0, offset_bytes: String(offset + 1) }
+          : null
+      const text = {
+        text: 'abc'[offset] ?? '',
+        offset_bytes: String(offset),
+        total_bytes: '3',
+        continuation,
+      }
+      const item: WebSessionTimelineDetail = {
+        address,
+        projected_body_bytes: 129,
+        kind:
+          type === 'context_compaction'
+            ? 'context_compacted'
+            : type === 'tool_approval_decision'
+              ? 'tool_approval_decided'
+              : type === 'delegation'
+                ? 'delegation_update'
+                : 'goal_changed',
+        body:
+          type === 'context_compaction'
+            ? {
+                type,
+                compaction_id: detailCallId,
+                model_call_id: detailCallId,
+                result_frontier_id: detailCallId,
+                summary_entry_id: detailCallId,
+                through_position: '1',
+                summary: text,
+              }
+            : type === 'tool_approval_decision'
+              ? { ...approvalBody, rationale: text }
+              : type === 'delegation'
+                ? {
+                    type,
+                    detail: {
+                      type: 'session_message',
+                      relationship_id: detailCallId,
+                      message_id: detailCallId,
+                      sender_session_id: detailCallId,
+                      recipient_session_id: detailSessionId,
+                      message_ordinal: '1',
+                      delivery_sequence: '1',
+                      content: text,
+                    },
+                  }
+                : {
+                    type,
+                    session_id: detailSessionId,
+                    event: {
+                      type: 'blocked',
+                      generation: '1',
+                      reason: 'authorization_required',
+                      text,
+                    },
+                  },
+      }
+      return detailPage([item], continuation ? { type: 'more_body', body: continuation } : null)
+    }
+    await turnApi(page, undefined, [input, ...chunk(0).items])
+    await page.route('**/timeline-detail?**', (route) => {
+      const url = new URL(route.request().url())
+      if ((url.searchParams.get('cursor_address') ?? url.searchParams.get('first')) !== '2')
+        return route.fallback()
+      return route.fulfill({ json: chunk(Number(url.searchParams.get('cursor_offset') ?? '0')) })
+    })
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: 'All details', exact: true }).check()
+    const event = page
+      .getByRole('region', { name: 'Session transcript', exact: true })
+      .locator('[data-event-sequence="2"]')
+    const text = event.getByRole('region', { name: labels[type], exact: true }).locator('pre')
+    await expect(text).toHaveText(['a'])
+    const facts = await event.locator('.session-detail-facts').allTextContents()
+    expect(facts.length).toBeGreaterThan(0)
+    for (const excerpts of [
+      ['a', 'b'],
+      ['a', 'b', 'c'],
+    ]) {
+      await event.getByRole('button', { name: 'Continue reading', exact: true }).click()
+      await expect(text).toHaveText(excerpts)
+      await expect(event.locator('.session-detail-facts')).toHaveText(facts)
+    }
+    await expect(event.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(
+      0,
+    )
+  })
+}
+
 test('All details retains earlier message chunks through continuation failures and retries', async ({
   page,
 }) => {
@@ -651,9 +859,7 @@ for (const level of ['All details', 'Summary', 'Tools']) {
   })
 }
 
-test('preserves assistant text before its tool without treating it as the final response', async ({
-  page,
-}) => {
+test('keeps intermediate tool-producing responses in Tools and All details', async ({ page }) => {
   const input = detailItems[0]
   const tool = detailItems[1]
   const response = detailItems[3]
@@ -676,16 +882,24 @@ test('preserves assistant text before its tool without treating it as the final 
   ])
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
-  await expect(transcript.locator('.session-message-text')).toHaveText([
+  const summaryText = [
     'Inspect the release status and retain the result.',
-    'I will inspect the release status now.',
     'The release checks passed. Publishing remains unapproved.',
-  ])
-  await expect(transcript.locator('.session-message-text, .session-tool-chips')).toHaveText([
-    'Inspect the release status and retain the result.',
-    'I will inspect the release status now.',
-    'The release checks passed. Publishing remains unapproved.',
-  ])
+  ]
+  await expect(transcript.locator('.session-message-text')).toHaveText(summaryText)
+  await expect(transcript.locator('[data-event-sequence="2"]')).toHaveCount(0)
+  for (const level of ['Tools', 'All details']) {
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    await expect(transcript.locator('.session-message-text')).toHaveText([
+      summaryText[0]!,
+      text.text,
+      summaryText[1]!,
+    ])
+    await expect(transcript.locator('[data-event-sequence="2"]')).toBeVisible()
+  }
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  await expect(transcript.locator('.session-message-text')).toHaveText(summaryText)
+  await expect(transcript.locator('[data-event-sequence="2"]')).toHaveCount(0)
 })
 
 for (const recovered of [false, true]) {
@@ -1384,8 +1598,12 @@ for (const [open, close, collapseFrom] of [
   })
 }
 
-for (const afterOutput of [false, true]) {
-  test(`shows later batch members as separate chips${afterOutput ? ' after reading tool output' : ''}`, async ({
+for (const [afterOutput, members] of [
+  [false, 3],
+  [true, 3],
+  [false, 40],
+] as const) {
+  test(`shows later batch members as separate chips${afterOutput ? ' after reading tool output' : ''}${members > 3 ? ` with ${members} bounded members` : ''}`, async ({
     page,
   }, testInfo) => {
     const original = detailItems[1]
@@ -1410,7 +1628,7 @@ for (const afterOutput of [false, true]) {
           {
             ...tool,
             request_id: `00000000-0000-0000-0000-${String(140 + index).padStart(12, '0')}`,
-            tool_name: ['exec_command', 'read_file', 'apply_patch'][index] ?? 'tool',
+            tool_name: ['exec_command', 'read_file', 'apply_patch'][index] ?? `tool_${index}`,
             arguments: detailExcerpt(`Arguments for tool ${index}`),
             evidence: index === 0 && afterOutput ? tool.evidence : { type: 'request_only' },
           },
@@ -1467,7 +1685,7 @@ for (const afterOutput of [false, true]) {
           [member(index)],
           index === 0 && afterOutput
             ? cursor(0, 'tool_result')
-            : index < 2
+            : index < members - 1
               ? cursor(index + 1)
               : null,
         ),
@@ -1516,8 +1734,27 @@ for (const afterOutput of [false, true]) {
     await expect(
       chips.getByRole('region', { name: 'apply_patch details', exact: true }),
     ).toContainText('Arguments for tool 2')
+    for (let index = 3; index < members; index++) {
+      await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
+      await expect(
+        chips.getByRole('button', { name: `Open turn details for tool_${index}`, exact: true }),
+      ).toBeVisible()
+      await expect(
+        page.getByRole('region', { name: 'Transcript text', exact: true }),
+      ).toHaveAttribute('data-retained-tool-pages', '3')
+      await expect(chips.getByRole('button', { name: /^Open turn details for / })).toHaveCount(4)
+      if (index > 3)
+        await expect(
+          chips.getByRole('button', { name: /^Open turn details for read_file/ }),
+        ).toHaveCount(0)
+    }
     await expect(chips.getByRole('button', { name: 'Show more tools', exact: true })).toHaveCount(0)
-    expect(reads).toEqual(afterOutput ? [0, 0, 1, 1, 2] : [1, 1, 2])
+    expect(reads).toEqual([
+      ...(afterOutput ? [0, 0] : []),
+      1,
+      1,
+      ...Array.from({ length: members - 2 }, (_, index) => index + 2),
+    ])
     await page.screenshot({ path: testInfo.outputPath('separate-batch-chips.png') })
     await transcript.getByRole('button', { name: 'Open turn details', exact: true }).first().click()
     await expect(transcript.locator('[data-event-sequence="2"]')).toBeVisible()
