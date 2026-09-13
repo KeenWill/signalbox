@@ -7,8 +7,10 @@ import { SESSION_WINDOW_BYTES } from '../session-workspace'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
+  type InitialDetailFacts,
   initialDetailFacts,
   type SessionWindowAnchor,
+  sameInitialDetailFacts,
 } from './model'
 
 // Share one detail budget across each window; keep three neighboring windows.
@@ -27,7 +29,7 @@ export type TranscriptReadAnchor = SessionWindowAnchor & {
 
 export class TranscriptWindowReader {
   private history: BoundedSessionHistory | undefined
-  private readonly facts = new Map<string, string>()
+  private readonly facts = new Map<string, InitialDetailFacts>()
 
   constructor(private readonly sessionId: string) {}
 
@@ -72,12 +74,27 @@ export class TranscriptWindowReader {
     )
     for (const [sequence, current] of facts) {
       const previous = this.facts.get(sequence)
-      if (previous !== undefined && previous !== current)
+      if (previous !== undefined && !sameInitialDetailFacts(previous, current))
         throw new TypeError('Transcript detail changed its retained immutable facts')
     }
     for (const [sequence, current] of facts) {
+      const previous = this.facts.get(sequence)
+      const retained = previous
+        ? {
+            immutable: current.immutable,
+            excerpts: [
+              ...previous.excerpts.filter(
+                (prior) => !current.excerpts.some((excerpt) => excerpt.path === prior.path),
+              ),
+              ...current.excerpts.map((excerpt) => {
+                const prior = previous.excerpts.find((candidate) => candidate.path === excerpt.path)
+                return prior && prior.text.length > excerpt.text.length ? prior : excerpt
+              }),
+            ],
+          }
+        : current
       this.facts.delete(sequence)
-      this.facts.set(sequence, current)
+      this.facts.set(sequence, retained)
     }
     while (this.facts.size > TRANSCRIPT_RETAINED_WINDOWS * TRANSCRIPT_WINDOW_ITEMS) {
       const oldest = this.facts.keys().next().value
