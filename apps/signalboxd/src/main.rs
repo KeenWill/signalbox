@@ -1854,9 +1854,13 @@ async fn run_hub_incarnation(
     };
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service.clone());
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
+    let runner_pool = pool.clone();
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
-        RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
+        RuntimeTaskExit::Runner(tokio::select! {
+            result = runner_runtime.run(runner_shutdown_receiver) => result,
+            () = runner_pool.close_event() => Ok(()),
+        })
     });
     let runner_reconciliation = async {
         tokio::select! {
