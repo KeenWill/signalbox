@@ -234,3 +234,33 @@ test('reports missing session context without a loading status or request', asyn
   )
   expect(requests).toEqual([])
 })
+
+test('never presents cached scenario usage as server usage during failed reads', async ({
+  page,
+}) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  let release: () => void = () => undefined
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let usageReads = 0
+  await page.route('**/api/**', async (route) => {
+    if (new URL(route.request().url()).pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    usageReads += 1
+    await pending
+    await route.fulfill({ status: 503, body: 'Usage unavailable' })
+  })
+  await page.goto('/src/search-usage/preview.html?workbench')
+  const rows = page.getByRole('rowgroup', { name: 'Usage call rows' })
+  await expect(rows).toHaveAttribute('data-total-loaded', '100')
+  await expect(rows).toContainText('unpriced')
+  await page.getByRole('button', { name: 'Load server usage' }).click()
+  await expect.poll(() => usageReads).toBe(2)
+  await expect(rows).toHaveAttribute('data-total-loaded', '0')
+  await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
+  release()
+  await expect(page.getByRole('alert')).toContainText('Usage could not load')
+  await expect(rows).toHaveAttribute('data-total-loaded', '0')
+  await expect(page.getByText('unpriced', { exact: false })).toHaveCount(0)
+})

@@ -9,7 +9,7 @@ function useSummaryCost(sessionId: string, enabled: boolean, turnId?: string) {
   const client = useQueryClient()
   const filters = { sessionId, turnId }
   const query = useQuery({
-    queryKey: ['search-usage', 'summary', filters],
+    queryKey: ['search-usage', 'http', 'summary', filters],
     enabled,
     queryFn: async ({ signal }) => {
       const source = await client.ensureQueryData(usageSourceOptions)
@@ -40,7 +40,7 @@ export function turnCosts(page: WebUsageCallPage): ReadonlyMap<string, CostTotal
 export function useTurnCosts(sessionId: string) {
   const client = useQueryClient()
   const query = useQuery({
-    queryKey: ['session-turn-costs', sessionId],
+    queryKey: ['session-turn-costs', 'http', sessionId],
     enabled: Boolean(sessionId),
     queryFn: async ({ signal }) => {
       const source = await client.ensureQueryData(usageSourceOptions)

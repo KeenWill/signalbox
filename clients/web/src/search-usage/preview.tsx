@@ -6,11 +6,14 @@ import {
   parseSearchWith,
   RouterProvider,
   stringifySearchWith,
+  useLocation,
+  useNavigate,
 } from '@tanstack/react-router'
 import { createRoot } from 'react-dom/client'
 import '../app.css'
 import { readProductRouteState } from '../product'
-import { SearchUsageScenarioSource } from './scenario'
+import { defaultSearchUsageRouteState, SearchUsageWorkbench } from '../SearchUsage'
+import { SEARCH_USAGE_SCENARIO_SESSION_ID, SearchUsageScenarioSource } from './scenario'
 import {
   CostChip,
   SessionCostChip,
@@ -45,14 +48,36 @@ function CostPreview({ sessionId, turnId }: { sessionId: string; turnId: string 
 
 const source = new SearchUsageScenarioSource()
 function Preview() {
-  const query = new URLSearchParams(window.location.search)
-  return query.get('preview') === 'cost' ? (
-    <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
-  ) : query.has('http') ? (
-    <UsageSurface />
-  ) : (
-    <UsageContent source={source} />
-  )
+  const search = useLocation({ select: (location) => location.searchStr })
+  const navigate = useNavigate()
+  const query = new URLSearchParams(search)
+  if (query.get('preview') === 'cost')
+    return <CostPreview sessionId={query.get('session') ?? ''} turnId={query.get('turn') ?? ''} />
+  if (query.has('http')) return <UsageSurface />
+  if (query.has('workbench'))
+    return (
+      <div className="usage-product">
+        <button
+          type="button"
+          onClick={() =>
+            void navigate({
+              to: '.',
+              search: (previous) => ({ ...previous, http: 'true' }),
+            })
+          }
+        >
+          Load server usage
+        </button>
+        <SearchUsageWorkbench
+          source={source}
+          currentSessionId={SEARCH_USAGE_SCENARIO_SESSION_ID}
+          route={{ ...defaultSearchUsageRouteState, view: 'usage', usageSession: 'all' }}
+          onRouteChange={() => undefined}
+          onReveal={async () => undefined}
+        />
+      </div>
+    )
+  return <UsageContent source={source} authority="scenario" />
 }
 const rootRoute = createRootRoute()
 const route = createRoute({
@@ -66,6 +91,7 @@ const router = createRouter({
   parseSearch: parseSearchWith((value) => value),
   stringifySearch: stringifySearchWith(String),
 })
+
 if (import.meta.env.DEV) {
   const root = document.getElementById('root')
   if (root)
