@@ -3499,7 +3499,7 @@ test("session supervision preserves retained evidence and rejects unknown classe
 });
 
 
-test("completed tool media preserves document presentation", () => {
+function documentToolDetailPage() {
   const page = userInputDetailPage();
   page.items[0].kind = "tool_batch_transition";
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
@@ -3523,7 +3523,23 @@ test("completed tool media preserves document presentation", () => {
       },
     }],
   };
+  return page;
+}
+
+test("completed tool media preserves document presentation", () => {
+  const page = documentToolDetailPage();
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
-  media.presentation_kind = "unknown";
+  page.items[0].body.tools[0].evidence.result_media_reference.presentation_kind = "unknown";
   assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});
+
+test("completed tool media requires a MIME type within its UTF-8 byte bound", () => {
+  const page = documentToolDetailPage();
+  const media = page.items[0].body.tools[0].evidence.result_media_reference;
+  for (const value of ["", "not-a-mime", `application/x; label="${"é".repeat(120)}"`]) {
+    media.media_type = value;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a MIME value of at most 255 UTF-8 bytes/);
+  }
+  media.media_type = `application/${"x".repeat(243)}`;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
 });

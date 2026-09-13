@@ -410,6 +410,13 @@ impl tool_loop::PostgresToolLoopRepository {
         option::Option<signalbox_domain::ToolMediaReference>,
         tool_loop::ToolLoopRepositoryError,
     >;
+    pub async fn load_media_references(
+        &self,
+        requests: &[signalbox_domain::ToolRequestId],
+    ) -> result::Result<
+        map::BTreeMap<signalbox_domain::ToolRequestId, signalbox_domain::ToolMediaReference>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
 }
 impl tool_loop::PostgresToolLoopRepository {
     pub async fn file_use_target(

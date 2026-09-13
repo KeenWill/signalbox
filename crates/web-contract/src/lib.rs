@@ -3818,6 +3818,12 @@ function assertTimelineDetailPage(value) {{
             );
           }}
           if (physical !== null) {{
+            if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {{
+              assertMediaType(
+                physical.result_media_reference.media_type,
+                `${{path}}.body.tools[0].evidence.result_media_reference.media_type`,
+              );
+            }}
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {{
               fail(

@@ -135,7 +135,7 @@ Completed tool-attempt detail includes its retained presented-media digest,
 media type, presentation kind, and byte length when the result is media.
 Presentation preserves the retained image or document kind. Blob bytes use the
 existing content route; earlier transition snapshots carry no later result
-reference.
+reference. Each detail page loads completed media references in one batch.
 
 ## Design decisions
 

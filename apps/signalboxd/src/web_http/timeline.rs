@@ -625,6 +625,7 @@ async fn populate_tool_media(
     page: &mut WebSessionTimelineDetailPage,
     pool: Option<&sqlx::PgPool>,
 ) -> Result<(), ()> {
+    let mut targets = Vec::new();
     for item in &mut page.items {
         let WebSessionTimelineDetailBody::ToolBatch { tools, .. } = &mut item.body else {
             continue;
@@ -638,19 +639,31 @@ async fn populate_tool_media(
             else {
                 continue;
             };
-            let repository = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(
-                pool.ok_or(())?.clone(),
-            );
             let request = signalbox_domain::ToolRequestId::from_uuid(
                 tool.request_id.as_str().parse().map_err(|_| ())?,
             );
-            *result_media_reference = repository
-                .load_media_reference(request)
-                .await
-                .map_err(|_| ())?
-                .map(tool_media_reference_dto)
-                .transpose()?;
+            targets.push((request, result_media_reference));
         }
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let repository =
+        signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.ok_or(())?.clone());
+    let requests = targets
+        .iter()
+        .map(|(request, _)| *request)
+        .collect::<Vec<_>>();
+    let references = repository
+        .load_media_references(&requests)
+        .await
+        .map_err(|_| ())?;
+    for (request, target) in targets {
+        *target = references
+            .get(&request)
+            .cloned()
+            .map(tool_media_reference_dto)
+            .transpose()?;
     }
     Ok(())
 }

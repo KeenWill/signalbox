@@ -107,6 +107,38 @@ impl PostgresToolLoopRepository {
             }
         }
     }
+
+    /// Loads completed media evidence for the requested tools in one query.
+    pub async fn load_media_references(
+        &self,
+        requests: &[ToolRequestId],
+    ) -> Result<BTreeMap<ToolRequestId, ToolMediaReference>, ToolLoopRepositoryError> {
+        if requests.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let stored: Vec<(Uuid, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT request_id, result_media_reference FROM tool_attempt
+             WHERE request_id = ANY($1) AND terminal_disposition_kind = 'completed'
+               AND result_content_kind = 'media'",
+        )
+        .bind(
+            requests
+                .iter()
+                .map(|request| request.into_uuid())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        stored
+            .into_iter()
+            .map(|(request, value)| {
+                let value = value.ok_or(ToolLoopCorruption::Inconsistent(
+                    "missing media reference evidence",
+                ))?;
+                Ok((ToolRequestId::from_uuid(request), decode(value)?))
+            })
+            .collect()
+    }
 }
 
 impl PostgresToolLoopRepository {
