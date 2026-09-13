@@ -1871,3 +1871,22 @@ fn processor_boundary_preserves_verified_source_integrity_failure() {
     assert_eq!(inspected, Err(FileMediaFailure::SourceIntegrity));
     assert_eq!(read, Err(FileMediaFailure::SourceIntegrity));
 }
+
+#[test]
+fn general_file_view_is_rejected_for_a_non_pdf_reader() {
+    let view = ReadViewDeclaration::try_new(
+        ReadViewName::try_new("file").unwrap(),
+        String::from("Synthetic general-file view."),
+        CanonicalJsonObjectSchema::try_new(EMPTY_OPTIONS_SCHEMA).unwrap(),
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
+        ReadViewBounds::File {
+            source_bytes: 64,
+            output_bytes: 64,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        registry_with_view_result(view),
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
+    ));
+}

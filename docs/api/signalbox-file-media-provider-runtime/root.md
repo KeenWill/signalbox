@@ -25,6 +25,10 @@ impl<Source> ResolvedFileUse<Source> {
         self,
         capability: option::Option<signalbox_model_runtime::ImagePresentationCapability>,
     ) -> Self;
+    pub fn with_document_target(
+        self,
+        capability: option::Option<signalbox_model_runtime::DocumentPresentationCapability>,
+    ) -> Self;
     pub const fn file_use(&self) -> &signalbox_file_media_runtime::FileUse;
     pub const fn source(&self) -> &Source;
     pub fn into_parts(
