@@ -178,6 +178,8 @@ const useDeterministicSession = async (
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
@@ -211,6 +213,7 @@ test('applies saved visual preferences before the first rendered frame', async (
     localStorage.setItem(
       'signalbox.web.preferences.v1',
       JSON.stringify({
+        navigationCollapsed: false,
         layout: 'workbench',
         density: 'comfortable',
         detail: 'condensed',
@@ -277,11 +280,11 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('focuses Scenario studio after cross-route navigation', async ({ page }) => {
+test('focuses Scenario studio when opened by URL', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page.locator('main.workspace')).toBeFocused()
@@ -293,7 +296,7 @@ test('restores the scenario title after leaving product routes', async ({ page }
   await page.goto('/attention')
   await expect(page).toHaveTitle('Attention · Signalbox')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
@@ -508,6 +511,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
@@ -571,6 +575,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.locator('.session-item-summary small').first()).toBeHidden()
@@ -589,6 +594,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
@@ -760,6 +766,8 @@ test('uses the displayed product navigation sequence', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
+  await expect(page.getByRole('region', { name: '0 sessions', exact: true })).toBeVisible()
+  await page.getByRole('main').focus()
 
   await page.keyboard.press('g')
   await page.keyboard.press('s')
@@ -790,7 +798,7 @@ test('clears scenario-only help when browser history returns to the product shel
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
@@ -992,9 +1000,10 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   const paneSliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await paneSliders.nth(0).fill('300')
   await paneSliders.nth(1).fill('400')
+  await paneSliders.nth(1).blur()
   await page.setViewportSize({ width: 1000, height: 800 })
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '300px')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.goto('/scenario/streaming')
 
   await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
@@ -1029,8 +1038,13 @@ test('compacts the scenario toolbar at its pane width', async ({ page }, testInf
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 780, height: 720 })
   await page.goto('/settings')
-  await page.getByRole('group', { name: 'Pane widths' }).getByRole('slider').nth(0).fill('360')
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  const navigationWidth = page
+    .getByRole('group', { name: 'Pane widths' })
+    .getByRole('slider')
+    .nth(0)
+  await navigationWidth.fill('360')
+  await navigationWidth.blur()
+  await page.goto('/scenario/streaming')
 
   const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
   await expect(toolbar).toBeVisible()
@@ -1061,14 +1075,18 @@ test('keeps Settings available without consulting daemon bootstrap', async ({ pa
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('offers Scenario Studio through the product command palette', async ({ page }) => {
+test('keeps Scenario Studio out of product navigation while preserving its URL', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
-  await page.getByRole('button', { name: /Go to Scenario studio/ }).click()
+  await expect(page.getByRole('button', { name: /Go to Scenario studio/ })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /Scenario studio/ })).toHaveCount(0)
+  await page.goto('/scenario/streaming')
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1423,6 +1441,7 @@ test('stacks Imports from the available product pane width', async ({ page }) =>
     localStorage.setItem(
       'signalbox.web.preferences.v1',
       JSON.stringify({
+        navigationCollapsed: false,
         layout: 'workbench',
         density: 'compact',
         detail: 'condensed',
@@ -1531,6 +1550,8 @@ test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
+  await expect(page.getByRole('region', { name: '0 sessions', exact: true })).toBeVisible()
+  await page.getByRole('main').focus()
 
   await page.keyboard.press('g')
   await page.keyboard.press('s')
@@ -1596,7 +1617,7 @@ test('does not run product view hotkeys while the artifact sheet owns focus', as
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
   const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
   await expect(sheet).toBeVisible()
-  await sheet.getByRole('button', { name: 'Close artifact inspector' }).focus()
+  await sheet.getByRole('button', { name: 'Close attachment details' }).focus()
   await page.keyboard.press('Shift+T')
   await page.keyboard.press('Shift+D')
   await page.keyboard.press('Shift+W')
@@ -1626,7 +1647,7 @@ test('unwinds the phone navigation sheet with Escape', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('closes the phone navigation sheet before entering Scenario studio', async ({ page }) => {
+test('omits Scenario Studio from the phone navigation sheet', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1634,8 +1655,9 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
 
   await page.getByRole('button', { name: 'Open navigation' }).click()
   const navigation = page.getByRole('dialog', { name: 'Product navigation' })
-  await navigation.getByRole('link', { name: /Scenario studio/ }).click()
-  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(navigation.getByRole('link', { name: /Scenario studio/ })).toHaveCount(0)
+  await navigation.getByRole('link', { name: 'Sessions', exact: true }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1962,5 +1984,146 @@ test('retained continuation availability locks navigation before bootstrap and t
   await page.getByRole('button', { name: 'Abandon', exact: true }).click()
   await expect(settings).not.toHaveAttribute('aria-disabled', 'true')
   await settings.click()
+  await expect(page).toHaveURL(/\/settings$/)
+})
+
+test('the wordmark returns home with keyboard activation', async ({ page }, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+  const home = page.getByRole('link', { name: 'Signalbox home' })
+  await expect(home).toHaveAttribute('href', '/attention')
+  await home.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('wordmark-home.png') })
+})
+
+test('the sidebar rail remembers collapse and keeps keyboard navigation', async ({
+  page,
+}, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+  const collapse = page.getByRole('button', { name: 'Collapse sidebar', exact: true })
+  await collapse.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('button', { name: 'Expand sidebar', exact: true })).toBeFocused()
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '56px')
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Expand sidebar', exact: true })).toBeVisible()
+  const attention = page.getByRole('link', { name: 'Attention', exact: true })
+  await attention.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/attention$/)
+  await page.screenshot({ path: testInfo.outputPath('sidebar-rail.png') })
+  await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '218px')
+})
+
+test('the command palette opens a pasted session id and restores focus on cancel', async ({
+  page,
+}, testInfo) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  const pastedSessionId = 'abcdef01-2345-6789-abcd-ef0123456789'
+  await page.goto('/settings')
+  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+  await palette.click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  const dialog = page.getByRole('dialog', { name: 'Open session by id' })
+  await expect(dialog.getByLabel('Session ID')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(palette).toBeFocused()
+  await palette.click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await dialog.getByLabel('Session ID').fill(pastedSessionId.toUpperCase())
+  await page.screenshot({ path: testInfo.outputPath('open-session-command.png') })
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/sessions\\?.*session=${pastedSessionId}`))
+  await expect(dialog).toBeHidden()
+})
+
+test('offers the sidebar command only when the desktop sidebar is visible', async ({ page }) => {
+  await page.goto('/settings')
+  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+  await palette.click()
+  await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('radio', { name: 'Focus', exact: true }).check()
+  await palette.click()
+  await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.getByRole('radio', { name: 'Workbench', exact: true }).check()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await palette.click()
+  await expect(page.getByRole('button', { name: /Toggle sidebar/ })).toHaveCount(0)
+})
+
+for (const catalogState of [
+  { q: 'review', sort: 'identity', archived: 'true', afterSession: sessionWorkspaceFixture.id },
+  { q: 'review', archived: 'true', afterSession: sessionWorkspaceFixture.id, afterActivity: '42' },
+]) {
+  test(`opening and reopening a session by id preserves catalog state for ${catalogState.sort ?? 'activity'} order`, async ({
+    page,
+  }) => {
+    await useDeterministicBootstrap(page)
+    await useDeterministicSession(page)
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          ...emptySessionCatalogFixture,
+          sort:
+            catalogState.sort === 'identity'
+              ? 'session_identity_ascending'
+              : 'last_activity_descending',
+        },
+      }),
+    )
+    const search = new URLSearchParams(Object.entries(catalogState))
+    await page.goto(`/sessions?${search}`)
+    for (const step of ['Open from catalog', 'Reopen the current session']) {
+      await test.step(step, async () => {
+        await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+        await page.getByRole('button', { name: /^Open session by id/ }).click()
+        await page
+          .getByRole('dialog', { name: 'Open session by id' })
+          .getByLabel('Session ID')
+          .fill(sessionWorkspaceFixture.id)
+        await page.keyboard.press('Enter')
+        search.set('session', sessionWorkspaceFixture.id)
+        search.set('workspace', 'true')
+        await expect
+          .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+          .toEqual(Object.fromEntries(search))
+      })
+    }
+    await page.keyboard.press('Escape')
+    await expect
+      .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+      .toEqual(catalogState)
+  })
+}
+
+test('opening a session by id from a direct empty workspace returns to the catalog', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/settings')
+  await page.goto('/sessions?workspace=true&q=review&archived=true')
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  await page.getByRole('button', { name: /^Open session by id/ }).click()
+  await page
+    .getByRole('dialog', { name: 'Open session by id' })
+    .getByLabel('Session ID')
+    .fill(sessionWorkspaceFixture.id)
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`session=${sessionWorkspaceFixture.id}`))
+  await page.keyboard.press('Escape')
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/sessions')
+  await expect
+    .poll(() => Object.fromEntries(new URL(page.url()).searchParams))
+    .toEqual({ q: 'review', archived: 'true' })
+  await page.goBack()
   await expect(page).toHaveURL(/\/settings$/)
 })

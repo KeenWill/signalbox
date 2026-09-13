@@ -180,6 +180,43 @@ pub struct WebSubmitInputRequest {
     pub message: String,
 }
 
+/// Creates an interactive session using the named template's defaults.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebCreateSessionRequest {
+    /// Durable identity for creation, retained when retrying.
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    /// Configured session template name.
+    pub template_name: String,
+    /// Separately idempotent input submitted after creation commits.
+    pub first_input: Option<WebSubmitInputRequest>,
+}
+
+/// Committed creation identity and a current catalog projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebCreateSessionResponse {
+    pub session_id: WebSessionId,
+    pub summary: WebSessionCatalogSummary,
+}
+
+/// Human title replacement preserving the other loaded metadata fields.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTitleRequest {
+    /// Durable identity retained when retrying the title edit.
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    /// Exact nonempty human-facing title.
+    #[schemars(length(min = 1))]
+    pub title: String,
+}
+
 /// Small generated-contract fixture proving Rust/TypeScript round trips.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -565,6 +602,79 @@ pub enum WebModelSelection {
     },
 }
 
+/// Complete loaded template catalog in name order.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateList {
+    pub templates: Vec<WebTemplateSummary>,
+}
+
+/// Creation defaults and workflow authority for one loaded template.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSummary {
+    pub name: String,
+    pub digest: String,
+    pub version: WebPositiveU64,
+    pub model: WebModelSelection,
+    pub model_label: String,
+    pub dangerous_tool_auto_approval: bool,
+    pub workflow_tools: Vec<WebTemplateWorkflowTool>,
+}
+
+/// One declared workflow operation with its effective approval posture.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateWorkflowTool {
+    pub name: String,
+    pub grant: WebTemplateWorkflowGrant,
+    pub posture: WebTemplateApprovalPosture,
+}
+
+/// Operation authority copied from the accepted template.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebTemplateWorkflowGrant {
+    Enabled { enabled: bool },
+    AllRegistrations,
+    Registrations { names: Vec<String> },
+}
+
+/// Effective workflow approval selection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTemplateApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+/// Source section that defines the selected template.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTemplateSourceKind {
+    Template,
+    ReviewLibrary,
+}
+
+/// Replacement source for one template or its shared review library.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSaveRequest {
+    pub definition_toml: String,
+}
+
+/// Full accepted definition, including retained external prompt contents.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateDetail {
+    pub summary: WebTemplateSummary,
+    pub system_prompt: String,
+    pub source_kind: WebTemplateSourceKind,
+    /// Version-one TOML document containing this template or its shared review library.
+    pub definition_toml: String,
+}
+
 /// Idempotent continuation command for one selected immutable frontier.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -935,6 +1045,12 @@ pub struct WebSessionSupervision {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    /// Current human title projected by the session catalog.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
+    pub title_summary: Option<String>,
+    /// Current catalog activity, including its timestamp and category.
+    pub last_activity: WebSessionCatalogActivity,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub supervision: Option<WebSessionSupervision>,
@@ -1231,6 +1347,27 @@ pub enum WebTimelineToolFailureCause {
     CrashLost,
 }
 
+/// Presentation supported by retained tool-result media evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+    Document,
+}
+
+/// Immutable presented bytes. Images use the blob content route; documents use
+/// the download view in the blob descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    /// Canonical media types use the domain media identity's 255-byte bound.
+    #[schemars(length(max = 255))]
+    pub media_type: String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 #[allow(
@@ -1241,6 +1378,8 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        /// Present only for completed media results in the frozen transition.
+        result_media_reference: Option<WebTimelineToolMediaReference>,
         result: Option<WebTimelineTextExcerpt>,
         failure: Option<WebTimelineTextExcerpt>,
         /// Whether the frozen transition snapshot recorded a result payload,
@@ -2696,6 +2835,13 @@ pub struct WebSessionCatalogActivity {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionCatalogSummary {
+    /// Retained origin of a repository-watch create action.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(
+        required,
+        schema_with = "nullable_schema::<WebRepositoryWatchProvenance>"
+    )]
+    pub repository_watch: Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required, schema_with = "nullable_title_summary_schema")]
@@ -2864,6 +3010,20 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         &mut session_catalog_schema,
         "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
     )?;
+    make_pointer_nullable(
+        &mut session_catalog_schema,
+        "/$defs/WebRepositoryWatchProvenance/properties/pull_request",
+    )?;
+    let mut create_session_response_schema =
+        canonical_schema(schemars::schema_for!(WebCreateSessionResponse).to_value());
+    make_pointer_nullable(
+        &mut create_session_response_schema,
+        "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
+    )?;
+    make_pointer_nullable(
+        &mut create_session_response_schema,
+        "/$defs/WebRepositoryWatchProvenance/properties/pull_request",
+    )?;
 
     let mut live_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebSessionLiveSnapshot).to_value());
@@ -2926,6 +3086,21 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             schema: canonical_schema(schemars::schema_for!(WebSubmitInputRequest).to_value()),
         },
         ContractSchema {
+            name: "WebCreateSessionRequest",
+            decoder: "decodeWebCreateSessionRequest",
+            schema: canonical_schema(schemars::schema_for!(WebCreateSessionRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebCreateSessionResponse",
+            decoder: "decodeWebCreateSessionResponse",
+            schema: create_session_response_schema,
+        },
+        ContractSchema {
+            name: "WebSessionTitleRequest",
+            decoder: "decodeWebSessionTitleRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSessionTitleRequest).to_value()),
+        },
+        ContractSchema {
             name: "WebContractExample",
             decoder: "decodeWebContractExample",
             schema: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
@@ -2984,6 +3159,21 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSessionLiveStreamEvent",
             decoder: "decodeWebSessionLiveStreamEvent",
             schema: live_event_schema,
+        },
+        ContractSchema {
+            name: "WebTemplateList",
+            decoder: "decodeWebTemplateList",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateList).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateSaveRequest",
+            decoder: "decodeWebTemplateSaveRequest",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateSaveRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateDetail",
+            decoder: "decodeWebTemplateDetail",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateDetail).to_value()),
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -3708,6 +3898,18 @@ function assertTimelineDetailPage(value) {{
             );
           }}
           if (physical !== null) {{
+            if (physical.result_media_reference !== undefined && physical.result_media_reference !== null) {{
+              const media = physical.result_media_reference;
+              const mediaPath = `${{path}}.body.tools[0].evidence.result_media_reference`;
+              assertCanonicalMediaType(
+                media.media_type,
+                `${{mediaPath}}.media_type`,
+              );
+              assertCanonicalU64(media.length_bytes, `${{mediaPath}}.length_bytes`);
+              if (media.presentation_kind === "document" && media.media_type !== "application/pdf") {{
+                fail(`${{mediaPath}}.media_type`, "application/pdf for document presentation");
+              }}
+            }}
             const terminalFailure = physical.state === "known_failed";
             if (physical.result_present && physical.state !== "completed") {{
               fail(
@@ -3722,8 +3924,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               !physical.result_present
             ) {{
               fail(
@@ -3748,8 +3950,8 @@ function assertTimelineDetailPage(value) {{
               );
             }}
             if (
-              physical.result !== undefined &&
-              physical.result !== null &&
+              ((physical.result !== undefined && physical.result !== null) ||
+                (physical.result_media_reference !== undefined && physical.result_media_reference !== null)) &&
               physical.state !== "completed"
             ) {{
               fail(
@@ -4627,6 +4829,13 @@ function assertMediaType(value, path) {{
   }}
 }}
 
+function assertCanonicalMediaType(value, path) {{
+  assertMediaType(value, path);
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(value)) {{
+    fail(path, "a canonical lowercase MIME type without parameters");
+  }}
+}}
+
 function assertBlobDigest(value, path) {{
   if (!/^sha256:[0-9a-f]{{64}}$/.test(value)) {{
     fail(path, "a tagged lowercase SHA-256 digest");
@@ -5317,6 +5526,14 @@ fn typescript_object(
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepositoryWatchProvenance {
+    /// Head branch in the dispatched pull-request context.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_schema::<String>")]
+    pub head_branch: Option<String>,
+    /// Base branch in the dispatched pull-request context.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_schema::<String>")]
+    pub base_branch: Option<String>,
     /// Exact retained dispatch.
     pub dispatch_id: WebLiveResourceId,
     /// Position in the dispatch's action batch.
@@ -5404,6 +5621,80 @@ mod tests {
             .expect("generated web-contract artifact is checked in");
 
         assert_eq!(checked_in, artifact.contents);
+    }
+
+    #[test]
+    fn repository_watch_members_require_explicit_nulls() {
+        let origin = serde_json::json!({
+            "head_branch": null, "base_branch": null,
+            "dispatch_id": "00000000-0000-0000-0000-000000000063",
+            "event_id": "00000000-0000-0000-0000-000000000064",
+            "repository": "signalbox/example", "rule_id": "review-response",
+            "rule_revision": "3", "action_ordinal": "2",
+            "event_kind": "review_submitted", "pull_request": "81",
+        });
+        assert!(
+            serde_json::from_value::<super::WebRepositoryWatchProvenance>(origin.clone()).is_ok()
+        );
+        for field in ["head_branch", "base_branch"] {
+            let mut missing = origin.clone();
+            missing
+                .as_object_mut()
+                .expect("origin object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebRepositoryWatchProvenance>(missing).is_err()
+            );
+        }
+        let summary = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "repository_watch": null, "title_summary": null, "title_truncated": false,
+            "archived": false, "current_turn_id": null, "active_turn_count": "0",
+            "queued_turn_count": "0", "state": "idle", "action": null, "goal_block": null,
+            "judge": { "actionable": "0", "completed": "0", "escalated": "0", "failed": "0" },
+            "last_activity": { "unix_microseconds": "1", "kind": "session" },
+        });
+        assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(summary.clone()).is_ok());
+        let mut missing = summary;
+        missing
+            .as_object_mut()
+            .expect("summary object")
+            .remove("repository_watch");
+        assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(missing).is_err());
+    }
+
+    #[test]
+    fn descriptor_header_facts_require_nullable_title_and_non_null_activity() {
+        let descriptor = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "title_summary": null,
+            "last_activity": { "kind": "session", "unix_microseconds": "1" },
+            "supervision": null, "workspace_root_kind": null, "repository_watch": null,
+            "sizes": { "item_count": "1", "projected_text_bytes": "0",
+                "projected_structured_bytes": "96", "referenced_blob_count": "0",
+                "referenced_blob_bytes": "0" },
+            "first_address": { "event_sequence": "1" }, "latest_address": { "event_sequence": "1" },
+            "work": { "active_turn_count": "0", "queued_turn_count": "0" }, "observed_through": "1",
+        });
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(descriptor.clone())
+                .is_ok()
+        );
+        for field in ["title_summary", "last_activity"] {
+            let mut missing = descriptor.clone();
+            missing
+                .as_object_mut()
+                .expect("descriptor object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebSessionTimelineDescriptor>(missing).is_err()
+            );
+        }
+        let mut null_activity = descriptor;
+        null_activity["last_activity"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<super::WebSessionTimelineDescriptor>(null_activity).is_err()
+        );
     }
 
     #[test]

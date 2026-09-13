@@ -15,6 +15,23 @@ and override reasoning with `--effort`. It performs no publication. A failed
 trial with no observed terminal frontier stops new session submissions until the
 caller resolves it. Labels and scoring stay with the caller.
 
+Selecting `--template review-judgment-agentic` requires `pr` and
+`review_context` in each case. The context carries matching `pr` and `head_sha`,
+`findings` with `finding_id`, and `threads` with `thread_id`; entries carry
+`author`, `path`, `line`, and `text`, and threads also carry `resolved`.
+Candidates may carry `source_thread_id` to exclude their own thread. The harness
+uploads the other entries as retained context, supplies short synopses, and
+exposes the case's `context` string through a file. It parses the terminal model
+call's assistant text as the judgment and retains its entry witnesses and
+per-judgment totals for all reported token-usage axes; any unknown component
+leaves that axis's total unknown.
+
+Before submitting agentic input, the harness provisions the session's
+[derived workspace](configuration-and-credentials.md) with a detached `head/`
+checkout, `change.patch`, and `context.txt`. File reads are confined to that
+session's root; other cases and results remain outside it. Replays preserve
+existing evidence files and require their bytes to match.
+
 Before judgment, `scripts/review_citations.py` attaches structured resolution of
 the finding location, cited paths and line ranges, and explicit identifiers to
 each candidate. Evidence names the checked-out head and includes matching
@@ -23,6 +40,18 @@ Identifier evidence prefers the cited file and nearest line, preserves the
 source match count, and matches the final name in a qualified identifier. Source
 presence does not establish runtime database state. The judgment template is
 unchanged.
+
+With `--sibling-full-text-bytes`, each case also supplies `pr` and
+`review_context` with the same `pr` and `head_sha` and explicit `findings` and
+`threads` arrays. Finding entries carry `finding_id`, `author`, `path`, `line`,
+and `text`; thread entries carry `thread_id` and `resolved` alongside the same
+evidence fields. A subject's optional `source_thread_id` excludes its original
+thread. The harness projects these fields before creating the judgment session;
+labels are not projected. The caller supplies the review snapshot; the helper
+does not fetch or infer comment history.
+
+The harness copies a case's optional `sibling_context_source` into its result
+for caller-side scoring of retained and current-state context separately.
 
 ## Overview
 

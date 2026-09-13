@@ -21,6 +21,7 @@ pub struct ModelCapabilities {
     service_tiers: BTreeSet<ServiceTier>,
     reasoning_replay_family: Option<String>,
     image_presentation: Option<crate::ImagePresentationCapability>,
+    document_presentation: Option<crate::DocumentPresentationCapability>,
 }
 
 impl ModelCapabilities {
@@ -36,6 +37,7 @@ impl ModelCapabilities {
             service_tiers,
             reasoning_replay_family: None,
             image_presentation: None,
+            document_presentation: None,
         }
     }
 
@@ -51,6 +53,20 @@ impl ModelCapabilities {
     /// Borrows this target's admitted image presentation capability.
     pub const fn image_presentation(&self) -> Option<&crate::ImagePresentationCapability> {
         self.image_presentation.as_ref()
+    }
+
+    /// Declares bounded document presentation for this exact target.
+    pub fn with_document_presentation(
+        mut self,
+        capability: Option<crate::DocumentPresentationCapability>,
+    ) -> Self {
+        self.document_presentation = capability;
+        self
+    }
+
+    /// Borrows the target's admitted document capability.
+    pub const fn document_presentation(&self) -> Option<&crate::DocumentPresentationCapability> {
+        self.document_presentation.as_ref()
     }
 
     /// Declares the operator-configured family for opaque reasoning replay.

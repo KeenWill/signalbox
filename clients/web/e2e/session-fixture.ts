@@ -35,6 +35,7 @@ export async function sessionApi(
     grown: false,
     observed: false,
     historyReads: [] as string[],
+    historyAddresses: [] as Array<string | null>,
     textReads: [] as string[],
     submissions: [] as Array<{ command_id: string; message: string }>,
   }
@@ -91,6 +92,17 @@ export async function sessionApi(
           },
         },
       ]
+      items.push({
+        address: { event_sequence: '43' },
+        kind: 'turn_completed',
+        projected_body_bytes: 128,
+        body: {
+          type: 'turn_lifecycle',
+          turn_id: turnId,
+          lifecycle: 'terminalized',
+          cause_code: 'completed',
+        },
+      })
       if (state.grown)
         items.push({
           address: { event_sequence: '44' },
@@ -109,7 +121,16 @@ export async function sessionApi(
         })
       const selected = items.filter(
         (item) =>
-          BigInt(item.address.event_sequence) >= BigInt(url.searchParams.get('first') ?? '0'),
+          BigInt(item.address.event_sequence) >=
+            BigInt(
+              url.searchParams.get('cursor_address') ?? url.searchParams.get('first') ?? '0',
+            ) &&
+          BigInt(item.address.event_sequence) <=
+            BigInt(
+              url.searchParams.get('through') ??
+                url.searchParams.get('cursor_address') ??
+                '18446744073709551615',
+            ),
       )
       return route.fulfill({
         json: {
@@ -123,6 +144,7 @@ export async function sessionApi(
     const latest = state.grown ? '44' : '43'
     if (url.pathname.endsWith('/timeline')) {
       state.historyReads.push(url.searchParams.get('anchor') ?? '')
+      state.historyAddresses.push(url.searchParams.get('address'))
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
@@ -165,6 +187,8 @@ export async function sessionApi(
         supervision: state.supervision,
         repository_watch: origin,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: state.grown ? '3' : '2',
           projected_text_bytes: String(
@@ -215,6 +239,7 @@ export async function openSessionFromCatalog(page: Page, id: string) {
             session_id: id,
             title_summary: title,
             title_truncated: false,
+            repository_watch: null,
             action: null,
             active_turn_count: '0',
             queued_turn_count: '0',

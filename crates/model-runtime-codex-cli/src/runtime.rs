@@ -692,6 +692,7 @@ impl CodexCliRuntime {
         let correlation = operation.correlation;
         let mut operation = ModelOperation {
             image_presentation: operation.image_presentation,
+            document_presentation: operation.document_presentation,
             correlation: (),
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,

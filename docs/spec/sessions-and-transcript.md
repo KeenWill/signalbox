@@ -131,6 +131,37 @@ with a visible reason, while retries remain available. A bounded rates read
 reports lifecycle state, turn outcome counts, the latest failed turn and its
 provider cause, and goal disposition for up to 32 listed sessions.
 
+Completed tool-attempt detail includes its retained presented-media digest,
+media type, presentation kind, and byte length when the result is media.
+Presentation preserves the retained image or document kind. Blob bytes use the
+existing content route for images and the descriptor's download route for
+documents; earlier transition snapshots carry no later result reference. Each
+detail page loads completed media references in one batch. Media read failures
+return `session_projection_failed` and log the underlying failure
+classification.
+
+`POST /api/sessions` creates a pathless interactive session from a named
+template through `CreateSession`, with an open start gate and unmonitored
+ownership. It accepts a creation command ID and an optional first text input
+with its own command ID; creation commits before input submission. A 201
+response returns the session ID and current catalog summary after both requested
+commands succeed. Retries retain both identities and payloads.
+
+The web timeline descriptor includes the current catalog title summary and last
+activity category and timestamp, including for archived sessions. Both members
+are required; the title may be null and activity is non-null. These header facts
+are read separately from the timeline bounds.
+
+`PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
+title, rejects other fields, and replaces metadata through the user command
+service. It loads and preserves tags, attributes, and the archive flag under the
+session lock in the replacement transaction. A title that exceeds the complete
+metadata size limit after merging returns 400 without changing metadata. A 204
+response acknowledges the committed replacement; equal replay returns the
+recorded result without reinstalling it. Title-only intent is retained with the
+receipt; reusing a full-replacement command ID for a title request, or the
+reverse, is conflicting reuse.
+
 ## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from
@@ -510,7 +541,9 @@ issued it and is rejected under the other order. The catalog keeps only sessions
 carrying every required tag, excludes archived sessions unless they are
 requested, and searches by an exact case-sensitive substring of the title or the
 canonical session UUID. A catalog page, its exact total, and its cursor are read
-in one snapshot.
+in one snapshot. Catalog summaries require `repository_watch`, with null for a
+non-watch session; provenance requires nullable `head_branch` and `base_branch`
+members.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read
@@ -527,28 +560,90 @@ Lag confined to records the snapshot cursor covers is absorbed silently. Falling
 behind past covered records, or saturating the monitor while retained fragment
 text is draining, emits one positive-cursor resync item and ends the response;
 the client then replaces all transient presentation with a fresh live snapshot
-and resumes durable history above its cursor without reloading the historical
+and resumes durable history above its cursor without discarding the visible
 transcript. The browser permits one immediate resynchronization, then waits one
 second before each subsequent resynchronization; leaving the session cancels the
 wait. The session synchronization service owns the selected stream and publishes
 its phase, monotonic cursor, and live projection to application state. Only the
 open workspace requests a follow subscription, and closing it cancels that
 subscription. Transcript text reads require the bounded timeline-detail
-capability and replace pages of at most eight items and 65,536 projected bytes,
-clamped to the advertised limits, with exact byte accounting and continuation
-matching. Pagination resets when the session, window bounds, or observation
-cursor changes; the response bound includes their attachment references. Text
-pages advance past metadata-only detail records automatically within the
-workspace record budget and projected-byte page budget; discarded records
-consume both budgets. The scan and retained-content item budgets are clamped
-independently to the advertised limit. The continuation remains available when
-either budget is exhausted. An empty detail page stops the scan and preserves
-its unreturned-item continuation. The conversation shows user and assistant text
-and attachment references, tool arguments and output, and unsuccessful turn
-outcomes in event order. Repeated terminal outcomes for the same turn and cause
-appear once. Bookkeeping is hidden until Events is selected. The last bounded
-raw detail page is retained separately from conversation content to validate
-body continuations.
+capability. The virtual transcript retains three neighboring keyset windows,
+each with at most eight headers and a shared detail budget of eight items and
+65,536 projected bytes, clamped to the advertised limits. Each header receives
+an equal share of the detail budget; unread body continuations remain available
+on demand. Attachment references are included in the response bound. Scrolling
+loads earlier or later windows. Loading a later window preserves the reading
+position even when that window reaches the actual tail; it does not
+automatically request the remaining history. Following live growth resumes when
+the reader scrolls to that tail. Session and anchor changes reset the view;
+observation refreshes retain visible text while rereading loaded windows, or
+refresh from latest when following the confirmed actual timeline tail. Following
+continues when a refresh replaces the entire retained window, even if the prior
+tail row is absent. User-driven backward navigation clears that tail intent;
+automatic scans through hidden tail records preserve it. Refreshes continue
+retaining current text through a failed reread. The session-scoped reader
+compares immutable detail facts, including identities, attachment references and
+excerpt byte totals and overlapping excerpt content, across initial reads and
+expanded event rereads. It retains facts for at most 24 recently read event
+addresses; changed excerpt lengths under different read budgets preserve
+compatible prefixes and retain the longest checked excerpt.
+
+Windows advance past metadata-only detail records, including goal-only tool
+batches hidden by the selected conversation summary, in the requested direction
+automatically within the workspace record budget and projected-byte budget. All
+returned headers, detail items and projected bytes are charged, including
+discarded records. The scan item budget is clamped to the advertised detail
+limit; each automatic read uses only the remaining scan allowance. Scanning
+stops at a visible item, a detail continuation, or an exhausted budget. Rapid
+edge events share one in-flight page read. Programmatic anchor and measurement
+adjustments do not start page reads. Prepending rows does not trigger selection
+scrolling when the selected row identity stays unchanged; a changed selection
+scrolls into view once its row is available. An empty detail page preserves its
+unreturned-item continuation. Hidden non-tool details with a body continuation
+retain an addressable reading row; opening it shows the requested excerpt.
+Scrolling again starts a fresh bounded scan using the timeline continuation.
+Turn segments retain window boundaries so prepending history preserves existing
+rows and their disclosures. Retained tool chips stay in their assigned window
+segment when earlier proposal evidence is loaded; evicted assignments are
+discarded. An open request-only tool keeps its disclosure and continued text
+when its first physical attempt arrives. Later physical attempts retain separate
+disclosure identities. Turn-wide classification uses all loaded events.
+
+The transcript groups contiguous events by turn while preserving interleaved
+chronology. Summary shows user messages, assistant text accompanying tool calls,
+final assistant text and unsuccessful turn outcomes. Tool calls and their detail
+are hidden in Summary. A completed response remains visible as a non-final
+message when its completed-turn closure is not loaded. Distinct physical tool
+attempts remain independently inspectable in event order even when they share
+one request. A failed attempt remains labeled as failed with its available cause
+even when it has no failure excerpt. Later batch members load on demand at the
+batch position as separate tool chips. A cursor advancing to another member is
+exposed outside the preceding tool disclosure; same-member argument, output and
+failure fields remain inside that disclosure. Goal-text cursors do not belong to
+tool disclosures, including cursors returned after reading tool text; nested
+reading controls stop before a goal field. Provider failures remain visible at
+their event position, including before a later successful retry. Tool output
+reads use the matching physical attempt in the retained detail pages, including
+later turn segments. Expanded tool evidence stays beside its originating chip
+before later messages. Repeated terminal outcomes for the same turn and cause
+appear once at their first chronological position. New browser profiles start in
+Summary; stored level choices are preserved. Applying a level command clears
+local turn overrides and opened continuation readers even when that level is
+already selected. Tools shows tool chips with argument and output summaries. All
+details exposes every loaded event, including bookkeeping, independently of the
+Events control. Tool-produced goal events show their status and bounded text
+alongside tools. Turn details use the bounded per-turn detail route. Explicit
+continuation reads retain earlier opened chunks until the detail view closes or
+leaves the retained transcript. The last bounded raw detail page remains
+available to validate each body continuation. Individual turns can expand
+independently of the persisted level. Escape collapses the focused expanded turn
+and restores a surviving heading control for that turn before a subsequent
+Escape closes the workspace. The scrolling transcript owns the conversation
+focus entry and command target; the enclosing section adds no focus stop.
+Invalid event-link addresses outside the unsigned 64-bit range are ignored. When
+a turn is opened, retained events without a turn identity are associated only by
+an exact per-turn route match with unchanged immutable facts; events skipped by
+that route remain outside the selected turn.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

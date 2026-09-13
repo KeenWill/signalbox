@@ -1,4 +1,4 @@
-import type { WebSessionTimelineDetail } from '../src/generated/web-contract.mjs'
+import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src/preferences'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, test } from './fontTest'
 import {
@@ -17,9 +17,10 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   const api = await sessionApi(page)
   await openSession(page)
   api.grow()
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
-  expect(api.state.historyReads).toEqual(['latest', 'after'])
-  expect(api.state.textReads).toEqual(['41', '44'])
+  expect(api.state.historyReads).toContain('after')
+  expect(api.state.textReads).toContain('44')
   await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
   await page.getByRole('button', { name: 'Send message', exact: true }).focus()
   await page.keyboard.press('Enter')
@@ -44,12 +45,13 @@ test('follows new active work after restoring an inactive session position', asy
     .toBe('41')
   await page.reload()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Inactive$/ })).toBeVisible()
-  expect(api.state.historyReads.at(-1)).toBe('around')
+  expect(api.state.historyReads).toContain('around')
   api.state.active = true
   api.grow()
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
-  expect(api.state.historyReads).toEqual(['latest', 'around', 'after'])
+  expect(api.state.historyReads).toContain('after')
 })
 
 test('retries an unconfirmed acceptance with the same command and text', async ({ page }) => {
@@ -162,6 +164,7 @@ for (const viewport of [
     const api = await sessionApi(page)
     await openSession(page)
     api.grow()
+    await page.getByRole('radio', { name: 'All details', exact: true }).check()
     await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
     await expect(page.getByText('Live updates unavailable.')).toBeVisible()
     await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
@@ -304,75 +307,21 @@ test('uses smaller advertised transcript limits in the workspace', async ({ page
   api.advanceObservation()
 })
 
-test('resets text pagination when only the window observation changes', async ({ page }) => {
+test('refreshes the bounded transcript when only the observation changes', async ({ page }) => {
   const api = await sessionApi(page)
-  await page.route('**/api/bootstrap', (route) =>
-    route.fulfill({
-      json: {
-        ...bootstrapFixture,
-        limits: { ...bootstrapFixture.limits, max_timeline_detail_items: 1 },
-      },
-    }),
-  )
-  const cursors: Array<string | null> = []
-  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
-    const cursor = new URL(route.request().url()).searchParams.get('cursor_address')
-    cursors.push(cursor)
-    const item: WebSessionTimelineDetail =
-      cursor === null
-        ? {
-            address: { event_sequence: '41' },
-            kind: 'input_accepted',
-            projected_body_bytes: 128 + initialMessage.length,
-            body: {
-              type: 'user_input',
-              turn_id: turnId,
-              text: excerpt(initialMessage),
-              attachments: [],
-            },
-          }
-        : {
-            address: { event_sequence: '43' },
-            kind: 'turn_completed',
-            projected_body_bytes: 128,
-            body: {
-              type: 'turn_lifecycle',
-              turn_id: turnId,
-              lifecycle: 'terminalized',
-              cause_code: 'completed',
-            },
-          }
-    return route.fulfill({
-      json: {
-        session_id: sessionId,
-        items: [item],
-        projected_body_bytes: item.projected_body_bytes,
-        continuation:
-          cursor === null ? { type: 'more_at', address: { event_sequence: '43' } } : null,
-      },
-    })
-  })
   await openSession(page)
-  await page.getByRole('button', { name: 'Next text page' }).click()
-  await expect(page.getByRole('button', { name: 'First text page' })).toBeVisible()
-  await expect(page.getByText('Loading transcript…', { exact: true })).toHaveCount(0)
+  const reads = api.state.textReads.length
+  api.advanceObservation()
+  await expect(page.getByText('Live updates unavailable.')).toBeVisible()
+  await expect.poll(() => api.state.textReads.length).toBeGreaterThan(reads)
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
   await expect(
     page.getByRole('region', { name: 'Transcript text' }).getByRole('alert'),
   ).toHaveCount(0)
-  expect(cursors).toEqual([null, '43'])
-  api.advanceObservation()
-  await expect(page.getByText('Live updates unavailable.')).toBeVisible()
-  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
-  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
-  await expect(page.getByRole('button', { name: 'First text page' })).toHaveCount(0)
-  expect(cursors.slice(2).length).toBeGreaterThan(0)
-  expect(cursors.slice(2).every((cursor) => cursor === null)).toBe(true)
 })
 
-test('keeps earlier text reachable after live appending evicts a text-page entry', async ({
-  page,
-}) => {
+test('keeps earlier text reachable after live growth', async ({ page }) => {
   const api = await sessionApi(page)
   const latest = () => (api.state.grown ? 9 : 8)
   await page.route(`**/api/sessions/${sessionId}`, (route) =>
@@ -382,6 +331,8 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
         supervision: null,
         repository_watch: null,
         workspace_root_kind: null,
+        title_summary: null,
+        last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: String(latest()),
           projected_text_bytes: String(latest() * 7),
@@ -398,9 +349,14 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
   )
   await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) => {
     const url = new URL(route.request().url())
+    const anchor = url.searchParams.get('anchor')
+    const address = Number(url.searchParams.get('address'))
+    const end = anchor === 'before' ? address - 1 : latest()
     const first =
-      url.searchParams.get('anchor') === 'after' ? Number(url.searchParams.get('address')) + 1 : 1
-    const items = Array.from({ length: latest() - first + 1 }, (_, index) => ({
+      anchor === 'after'
+        ? address + 1
+        : Math.max(1, end - Number(url.searchParams.get('max_items') ?? 8) + 1)
+    const items = Array.from({ length: end - first + 1 }, (_, index) => ({
       address: { event_sequence: String(first + index) },
       kind: 'input_accepted',
       projected_structured_bytes: 78,
@@ -411,7 +367,7 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
         items,
         projected_structured_bytes: items.length * 78,
         continuation_before: first > 1 ? { event_sequence: String(first) } : null,
-        continuation_after: null,
+        continuation_after: end < latest() ? { event_sequence: String(end) } : null,
       },
     })
   })
@@ -447,17 +403,18 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
   await expect(page.getByText('Entry 1', { exact: true })).toBeVisible()
   api.grow()
   await expect(page.getByText('Entry 9', { exact: true })).toBeVisible()
-  await expect(page.getByText('Entry 1', { exact: true })).toHaveCount(0)
-  expect(reads).toEqual(['1', '9'])
-  await page.getByRole('button', { name: 'First text page', exact: true }).click()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.evaluate((element) => {
+    element.scrollTop = 0
+  })
+  await transcript.hover()
+  await page.mouse.wheel(0, -900)
   await expect(page.getByText('Entry 1', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Next text page', exact: true }).click()
-  await expect(page.getByText('Entry 9', { exact: true })).toBeVisible()
-  expect(reads).toEqual(['1', '9', '1', '9'])
+  expect(reads).toContain('9')
 })
 
 for (const growth of [false, true]) {
-  test(`keeps a paginated first page through ${growth ? 'tail-growing' : 'observation-only'} resync`, async ({
+  test(`keeps rendered text through ${growth ? 'tail-growing' : 'observation-only'} resync`, async ({
     page,
   }) => {
     const api = await sessionApi(page)
@@ -496,10 +453,15 @@ for (const growth of [false, true]) {
       })
     })
     let textReads = 0
+    let failReads = false
     await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
       textReads++
-      if (textReads > 1)
-        return route.fulfill({ status: 503, body: 'Historical reread unavailable' })
+      if (failReads) return route.fulfill({ status: 503, body: 'Historical reread unavailable' })
+      const first = new URL(route.request().url()).searchParams.get('first')
+      if (first !== '41')
+        return route.fulfill({
+          json: { session_id: sessionId, items: [], projected_body_bytes: 0, continuation: null },
+        })
       const item = {
         address: { event_sequence: '41' },
         kind: 'input_accepted',
@@ -516,12 +478,13 @@ for (const growth of [false, true]) {
           session_id: sessionId,
           items: [item],
           projected_body_bytes: item.projected_body_bytes,
-          continuation: { type: 'more_at', address: { event_sequence: '43' } },
+          continuation: null,
         },
       })
     })
     await openSession(page)
-    await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    failReads = true
     if (growth) api.grow()
     else api.advanceObservation()
     resynchronize()
@@ -534,9 +497,11 @@ for (const growth of [false, true]) {
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
     await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
-    await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'Transcript text' }).getByRole('alert'),
+    ).toContainText('Transcript failed to load')
     if (growth) expect(api.state.historyReads).toContain('after')
-    expect(textReads).toBe(1)
+    expect(textReads).toBeGreaterThan(2)
   })
 }
 
@@ -547,6 +512,8 @@ for (const viewport of [
   test(`repository watch origin at ${viewport.name} size`, async ({ page, browserName }) => {
     await page.setViewportSize(viewport)
     const origin: WebRepositoryWatchProvenance = {
+      head_branch: 'review',
+      base_branch: 'main',
       dispatch_id: '00000000-0000-0000-0000-000000000063',
       action_ordinal: '2',
       repository: 'signalbox/example',
@@ -725,3 +692,147 @@ for (const response of [204, 500]) {
     ).toBeVisible()
   })
 }
+
+for (const active of [false, true]) {
+  test(`opens a search result at its matching address when active is ${active}`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page, active)
+    await page.route('**/api/search?**', (route) =>
+      route.fulfill({
+        json: {
+          results: [
+            {
+              session_id: sessionId,
+              address: { event_sequence: '41' },
+              projection_id: '1',
+              source: { kind: 'accepted_input', accepted_input_id: turnId, turn_id: turnId },
+              content_class: 'user_transcript',
+              snippet: initialMessage,
+              highlights: [],
+            },
+          ],
+          continuation: null,
+        },
+      }),
+    )
+    await page.goto(`/sessions?session=${sessionId}&workspace=true`)
+    await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+    await page.getByRole('row', { name: /43 Turn completed/ }).click()
+    await page.getByRole('link', { name: /Search/ }).click()
+    await page.getByRole('textbox', { name: 'Search text' }).fill('check')
+    await page.getByRole('button', { name: 'Search', exact: true }).click()
+    api.state.historyReads.length = 0
+    api.state.historyAddresses.length = 0
+    const result = page.getByRole('link', { name: new RegExp(initialMessage) })
+    await result.focus()
+    await result.press('Enter')
+    await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeFocused()
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    expect(api.state.historyReads).toEqual(['around'])
+    expect(api.state.historyAddresses).toEqual(['41'])
+    await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+    await expect(page.getByRole('row', { name: /41 Message accepted/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await page.getByRole('button', { name: /^Latest/ }).click()
+    await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
+    await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  })
+}
+
+for (const action of ['switch', 'close', 'reopen'] as const) {
+  const outcome =
+    action === 'switch'
+      ? 'switches sessions'
+      : action === 'close'
+        ? 'closes'
+        : 'reopens the current session'
+  test(`clears a matching address when the workspace ${outcome}`, async ({ page }) => {
+    const api = await sessionApi(page)
+    const otherId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
+    const other = await sessionApi(page, false, otherId)
+    await page.route('**/api/sessions?**', (route) =>
+      route.fulfill({
+        json: {
+          cursor: '0',
+          sort: 'last_activity_descending',
+          summaries: [],
+          continuation: null,
+          total: '0',
+        },
+      }),
+    )
+    await page.goto(`/sessions?session=${sessionId}&workspace=true&around=41`)
+    await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    const session = page.getByRole('grid', { name: 'Session timeline' })
+    if (action === 'switch') {
+      await openSessionFromCatalog(page, otherId)
+      await expect.poll(() => other.state.historyReads).toEqual(['latest'])
+    } else if (action === 'close') {
+      await session.press('Escape')
+      await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
+    } else {
+      api.state.active = true
+      api.advanceObservation()
+      await openSessionFromCatalog(page, sessionId)
+      await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+    }
+    await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  })
+}
+
+test('keeps an explicit non-result event visible and focused in Results mode', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  api.grow()
+  await page.addInitScript(
+    ({ key, preferences }) => {
+      localStorage.setItem(key, JSON.stringify(preferences))
+    },
+    {
+      key: BROWSER_PREFERENCES_KEY,
+      preferences: { ...createDefaultBrowserPreferences(), detail: 'results' },
+    },
+  )
+  await page.goto(`/sessions?session=${sessionId}&workspace=true&around=44`)
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  const match = timeline.getByRole('row').filter({ hasText: '44' })
+  await expect(match).toBeVisible()
+  await expect(match).toHaveAttribute('aria-selected', 'true')
+  await expect(timeline).toBeFocused()
+  await page.getByRole('button', { name: /^Latest/ }).click()
+  await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  await expect(match).toHaveCount(0)
+  await page.reload()
+  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+})
+
+test('consumes a pending search match when reopening the current session', async ({ page }) => {
+  const api = await sessionApi(page, true)
+  let releaseMatch = () => {}
+  const matchReleased = new Promise<void>((resolve) => {
+    releaseMatch = resolve
+  })
+  let matchRequested = false
+  await page.route('**/api/sessions/*/timeline?**', async (route) => {
+    if (new URL(route.request().url()).searchParams.get('anchor') === 'around') {
+      matchRequested = true
+      await matchReleased
+    }
+    await route.fallback()
+  })
+  await page.goto(`/sessions?session=${sessionId}&workspace=true&around=43`)
+  await expect.poll(() => matchRequested).toBe(true)
+  await openSessionFromCatalog(page, sessionId)
+  await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
+  releaseMatch()
+  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await expect(page.getByRole('row', { name: /43 Turn completed/ })).toHaveAttribute(
+    'aria-selected',
+    'false',
+  )
+})

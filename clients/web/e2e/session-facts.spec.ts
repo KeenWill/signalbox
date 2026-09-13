@@ -8,7 +8,9 @@ import {
   type WebRepositoryWatchProvenance,
 } from './session-fixture'
 
-const origin = {
+const origin: WebRepositoryWatchProvenance = {
+  head_branch: null,
+  base_branch: null,
   dispatch_id: turnId,
   action_ordinal: '1',
   repository: 'signalbox/example',
@@ -17,7 +19,7 @@ const origin = {
   rule_revision: '3',
   event_id: sessionId,
   event_kind: 'review_submitted',
-} as WebRepositoryWatchProvenance
+}
 const group = (amount: string, label = 'real') => ({
   call_kind: 'model_call',
   model_id: turnId,

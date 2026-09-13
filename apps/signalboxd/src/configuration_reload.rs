@@ -92,6 +92,16 @@ impl From<ReloadRepositoryError> for ConfigurationReloadError {
     }
 }
 
+/// Failure to validate, persist, or activate a template edit.
+#[derive(Debug)]
+pub(crate) enum TemplateSaveError {
+    NotFound,
+    Validation(String),
+    Unavailable,
+    Write,
+    Reload,
+}
+
 /// One daemon-wide reload mutex and one atomically replaced catalog pair.
 #[derive(Clone)]
 pub struct ConfigurationReload {
@@ -197,6 +207,22 @@ impl ConfigurationReload {
         match &self.watch {
             Some(watch) => watch.approval_judge_authority(session).await,
             None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn repository_watch_origins(
+        &self,
+        sessions: &[signalbox_domain::SessionId],
+    ) -> Result<
+        std::collections::BTreeMap<
+            signalbox_domain::SessionId,
+            signalbox_module_repo_watch_v2::RetainedDispatchAction,
+        >,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        match &self.watch {
+            Some(watch) => watch.session_origins(sessions, &self.pool).await,
+            None => Ok(std::collections::BTreeMap::new()),
         }
     }
 
@@ -594,7 +620,15 @@ impl ConfigurationReload {
         if !self.repository.pending().await?.is_empty() {
             return Ok(ReloadLookup::Pending);
         }
-        let replacement = self.read_replacement();
+        self.install_replacement(request, self.read_replacement())
+            .await
+    }
+
+    async fn install_replacement(
+        &self,
+        request: ReloadConfiguration,
+        replacement: Result<ConfigurationCatalogs, ReloadResult>,
+    ) -> Result<ReloadLookup, ConfigurationReloadError> {
         let (replacement, intent) = match replacement.and_then(|replacement| {
             let prior = self.catalogs().retained()?;
             let retained = replacement.retained()?;
@@ -655,7 +689,87 @@ impl ConfigurationReload {
             .map_err(ConfigurationReloadError::RecoveryRequired)
     }
 
+    /// Validates and persists a replacement while sharing reload's serial admission.
+    pub(crate) async fn save_template(
+        &self,
+        name: &signalbox_domain::SessionTemplateName,
+        definition: &str,
+    ) -> Result<ConfigurationCatalogs, TemplateSaveError> {
+        use std::io::Write as _;
+
+        let _serial = self.serial.lock().await;
+        if self.catalogs().templates.resolve(name).is_none() {
+            return Err(TemplateSaveError::NotFound);
+        }
+        if !self
+            .repository
+            .pending()
+            .await
+            .map_err(|_| TemplateSaveError::Unavailable)?
+            .is_empty()
+        {
+            return Err(TemplateSaveError::Unavailable);
+        }
+        let current = self.read_replacement().map_err(template_validation_error)?;
+        if current.templates.resolve(name).is_none() {
+            return Err(TemplateSaveError::NotFound);
+        }
+        let document = std::fs::read_to_string(&self.template_path)
+            .map_err(|_| TemplateSaveError::Unavailable)?
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| TemplateSaveError::Unavailable)?;
+        let source = current
+            .templates
+            .replace_definition(name, definition, document)
+            .map_err(|error| TemplateSaveError::Validation(error.to_string()))?;
+        let replacement = self
+            .read_replacement_with_templates(Some(&source))
+            .map_err(template_validation_error)?;
+        if replacement.templates.resolve(name).is_none() {
+            return Err(TemplateSaveError::Validation(
+                "Replacement must retain the selected template name".to_owned(),
+            ));
+        }
+        let parent = self
+            .template_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut file =
+            tempfile::NamedTempFile::new_in(parent).map_err(|_| TemplateSaveError::Write)?;
+        let permissions = std::fs::metadata(&self.template_path)
+            .map_err(|_| TemplateSaveError::Write)?
+            .permissions();
+        file.as_file()
+            .set_permissions(permissions)
+            .map_err(|_| TemplateSaveError::Write)?;
+        file.write_all(source.as_bytes())
+            .map_err(|_| TemplateSaveError::Write)?;
+        file.as_file()
+            .sync_all()
+            .map_err(|_| TemplateSaveError::Write)?;
+        file.persist(&self.template_path)
+            .map_err(|_| TemplateSaveError::Write)?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| TemplateSaveError::Reload)?;
+        let request = ReloadConfiguration {
+            command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+        };
+        match self.install_replacement(request, Ok(replacement)).await {
+            Ok(ReloadLookup::Recorded(ReloadResult::Reloaded)) => Ok(self.catalogs()),
+            _ => Err(TemplateSaveError::Reload),
+        }
+    }
+
     fn read_replacement(&self) -> Result<ConfigurationCatalogs, ReloadResult> {
+        self.read_replacement_with_templates(None)
+    }
+
+    fn read_replacement_with_templates(
+        &self,
+        source: Option<&str>,
+    ) -> Result<ConfigurationCatalogs, ReloadResult> {
         let models = HubModelConfiguration::read(&self.model_path).map_err(|error| {
             let phase = if matches!(error, crate::HubModelConfigurationError::Read) {
                 ReloadPhase::Read
@@ -678,20 +792,31 @@ impl ConfigurationReload {
                 "repository-watch configuration changes require restart",
             ));
         }
-        let templates =
-            SessionTemplateConfiguration::read(&self.template_path, || self.home.clone(), &models)
-                .map_err(|error| {
-                    let phase = if matches!(
-                        error,
-                        crate::SessionTemplateConfigurationError::ReadCatalog
-                            | crate::SessionTemplateConfigurationError::ReadPrompt
-                    ) {
-                        ReloadPhase::Read
-                    } else {
-                        ReloadPhase::Validate
-                    };
-                    failure(phase, &error.to_string())
-                })?;
+        let templates = match source {
+            Some(source) => SessionTemplateConfiguration::parse_at_with_home(
+                source,
+                &self.template_path,
+                &|| self.home.clone(),
+                &models,
+            ),
+            None => SessionTemplateConfiguration::read(
+                &self.template_path,
+                || self.home.clone(),
+                &models,
+            ),
+        }
+        .map_err(|error| {
+            let phase = if matches!(
+                error,
+                crate::SessionTemplateConfigurationError::ReadCatalog
+                    | crate::SessionTemplateConfigurationError::ReadPrompt
+            ) {
+                ReloadPhase::Read
+            } else {
+                ReloadPhase::Validate
+            };
+            failure(phase, &error.to_string())
+        })?;
         let catalogs = ConfigurationCatalogs {
             models: Arc::new(models),
             templates: Arc::new(templates),
@@ -712,6 +837,13 @@ impl ConfigurationReload {
             ));
         }
         Ok(catalogs)
+    }
+}
+
+fn template_validation_error(result: ReloadResult) -> TemplateSaveError {
+    match result {
+        ReloadResult::Failed { reason, .. } => TemplateSaveError::Validation(reason),
+        ReloadResult::Reloaded => TemplateSaveError::Unavailable,
     }
 }
 
@@ -746,13 +878,16 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
         .get_mut("credential_profiles")
         .and_then(toml::Value::as_array_mut)
     {
+        profiles.retain(|profile| {
+            profile.get("adapter").and_then(toml::Value::as_str) != Some("sandboxed_exec")
+        });
         for profile in profiles {
             if profile.get("adapter").and_then(toml::Value::as_str) == Some("github") {
                 continue;
             }
             if matches!(
                 profile.get("delivery").and_then(toml::Value::as_str),
-                Some("file" | "environment" | "kubernetes_secret")
+                Some("file" | "environment" | "kubernetes_secret" | "onepassword")
             ) && let Some(profile) = profile.as_table_mut()
             {
                 profile.insert(
@@ -761,6 +896,8 @@ fn startup_sections(source: &str) -> Result<toml::Table, ReloadResult> {
                 );
                 profile.remove("file");
                 profile.remove("variable");
+                profile.remove("item");
+                profile.remove("executable");
             }
             if profile.get("delivery").and_then(toml::Value::as_str) == Some("codex_home")
                 && let Some(profile) = profile.as_table_mut()
@@ -1020,6 +1157,348 @@ mod tests {
         (directory, reload)
     }
 
+    // Arbitrary template name and prompt text for the save integration fixtures.
+    const SAVE_NAME: &str = "save-template";
+    const SAVE_PROMPT: &str = "Initial instructions.";
+    const UPDATED_PROMPT: &str = "Updated instructions.";
+
+    fn save_fixture(pool: sqlx::PgPool) -> (tempfile::TempDir, ConfigurationReload, String) {
+        let (directory, original) = fixture();
+        let alias = original
+            .catalogs()
+            .models
+            .model_aliases()
+            .next()
+            .expect("alias")
+            .0;
+        let source = format!(
+            "version = 1\n[[templates]]\nname = {SAVE_NAME:?}\nversion = 1\nalias = \"{}\"\nsystem_prompt = {SAVE_PROMPT:?}\ndangerous_tool_auto_approval = false\n",
+            alias.as_uuid()
+        );
+        std::fs::write(&original.template_path, &source).expect("initial templates");
+        let catalogs = original.read_replacement().expect("initial catalogs");
+        let reload = ConfigurationReload::new(
+            pool,
+            (*catalogs.models).clone(),
+            (*catalogs.templates).clone(),
+            original.model_path,
+            original.template_path,
+            None,
+        )
+        .expect("save fixture");
+        (directory, reload, source)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn template_save_installs_the_digest_that_reload_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use axum::{Extension, body::Body, http::Request};
+        use http_body_util::BodyExt as _;
+        use tower::ServiceExt as _;
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (_directory, reload, source) = save_fixture(pool.clone());
+        let name = signalbox_domain::SessionTemplateName::try_new(SAVE_NAME.to_owned())?;
+        let before = reload
+            .catalogs()
+            .templates
+            .resolve(&name)
+            .expect("before")
+            .provenance()
+            .content_digest();
+        let changed = source.replace(SAVE_PROMPT, UPDATED_PROMPT);
+        let router = crate::web_http::production_router(None, None, None, None, None, None, None)
+            .layer(Extension(reload.clone()));
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/templates/{SAVE_NAME}"))
+                    .header("host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(
+                        &signalbox_web_contract::WebTemplateSaveRequest {
+                            definition_toml: changed,
+                        },
+                    )?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let detail: signalbox_web_contract::WebTemplateDetail =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+        assert_eq!(detail.system_prompt, UPDATED_PROMPT);
+        assert_ne!(detail.summary.digest, hex::encode(before.as_bytes()));
+        let disk = reload.read_replacement().expect("saved file validates");
+        assert_eq!(
+            detail.summary.digest,
+            hex::encode(
+                disk.templates
+                    .resolve(&name)
+                    .expect("saved template")
+                    .provenance()
+                    .content_digest()
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            reload
+                .reload(ReloadConfiguration {
+                    command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await?,
+            ReloadLookup::Recorded(ReloadResult::Reloaded)
+        );
+        assert_eq!(
+            reload
+                .catalogs()
+                .templates
+                .resolve(&name)
+                .expect("reloaded")
+                .defaults()
+                .system_prompt()
+                .expect("prompt")
+                .as_str(),
+            UPDATED_PROMPT
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL"]
+    async fn invalid_template_save_preserves_file_and_loaded_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+        let (_directory, reload, source) = save_fixture(pool.clone());
+        let name = signalbox_domain::SessionTemplateName::try_new(SAVE_NAME.to_owned())?;
+        let invalid = format!("{source}unknown_field = true\n");
+        assert!(matches!(
+            reload.save_template(&name, &invalid).await,
+            Err(TemplateSaveError::Validation(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&reload.template_path)?, source);
+        assert_eq!(
+            reload
+                .catalogs()
+                .templates
+                .resolve(&name)
+                .expect("unchanged")
+                .defaults()
+                .system_prompt()
+                .expect("prompt")
+                .as_str(),
+            SAVE_PROMPT
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambient_task_sources_load_reload_and_disappear() {
+        use std::os::unix::ffi::OsStringExt;
+        const INVALID_VARIABLE: &str = "SIGNALBOX_AMBIENT_INVALID_UTF8";
+        const VARIABLE: &str = "SIGNALBOX_AMBIENT_RELOAD_FIXTURE";
+        const REPLACEMENT_VARIABLE: &str = "SIGNALBOX_AMBIENT_RELOAD_REPLACEMENT";
+        const EMPTY_VARIABLE: &str = "SIGNALBOX_AMBIENT_EMPTY";
+        const TERMINATORS_VARIABLE: &str = "SIGNALBOX_AMBIENT_TERMINATORS";
+        if std::env::var(VARIABLE).as_deref() != Ok("synthetic-task-first\n") {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "configuration_reload::tests::ambient_task_sources_load_reload_and_disappear",
+                    "--nocapture",
+                ])
+                .env(VARIABLE, "synthetic-task-first\n")
+                .env(REPLACEMENT_VARIABLE, "synthetic-task-second\r\n")
+                .env(EMPTY_VARIABLE, "")
+                .env(TERMINATORS_VARIABLE, "\r\n")
+                .env(
+                    INVALID_VARIABLE,
+                    std::ffi::OsString::from_vec(b"prefix\xffsecret".to_vec()),
+                )
+                .output()
+                .expect("isolated fixture");
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (directory, reload) = fixture();
+        let first_file = directory.path().join("task-first");
+        let second_file = directory.path().join("task-second");
+        std::fs::write(&first_file, "synthetic-task-first\n").expect("first source");
+        std::fs::write(&second_file, "synthetic-task-second\r\n").expect("second source");
+        let base = reload.catalogs().models.source().to_owned();
+        for (source, expected) in [
+            (
+                format!("file = {:?}", first_file),
+                b"synthetic-task-first".as_slice(),
+            ),
+            (
+                format!("file = {:?}", second_file),
+                b"synthetic-task-second".as_slice(),
+            ),
+            (
+                format!("variable = {VARIABLE:?}"),
+                b"synthetic-task-first".as_slice(),
+            ),
+            (
+                format!("variable = {REPLACEMENT_VARIABLE:?}"),
+                b"synthetic-task-second".as_slice(),
+            ),
+        ] {
+            let configured = format!(
+                "{base}\n[[credential_profiles]]\nname = \"task-fixture\"\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\n{source}\n"
+            );
+            std::fs::write(&reload.model_path, configured).expect("replacement");
+            let replacement = reload.read_replacement().expect("source reloads");
+            let (_, value) = replacement
+                .models
+                .resolve_ambient_task_credential("task-fixture")
+                .await
+                .expect("current source resolves");
+            assert_eq!(value.expose_bytes(), expected);
+            assert_eq!(
+                signalbox_model_runtime::redact_credential_text(
+                    serde_json::to_string(std::str::from_utf8(expected).expect("synthetic UTF-8"))
+                        .expect("serialized task output"),
+                    &value,
+                ),
+                r#""[redacted]""#
+            );
+            assert!(
+                !format!("{value:?}")
+                    .contains(std::str::from_utf8(expected).expect("synthetic UTF-8"))
+            );
+            *reload.current.write().expect("catalog lock") = replacement;
+        }
+        std::fs::write(&first_file, b"prefix\xffsecret").expect("invalid UTF-8 credential");
+        use signalbox_model_runtime::CredentialAccessFailure;
+        for (source, expected_failure) in [
+            (
+                format!("file = {first_file:?}"),
+                CredentialAccessFailure::InvalidUtf8,
+            ),
+            (
+                format!("variable = {INVALID_VARIABLE:?}"),
+                CredentialAccessFailure::InvalidUtf8,
+            ),
+            (
+                format!("variable = {EMPTY_VARIABLE:?}"),
+                CredentialAccessFailure::Unavailable,
+            ),
+            (
+                format!("variable = {TERMINATORS_VARIABLE:?}"),
+                CredentialAccessFailure::Unavailable,
+            ),
+        ] {
+            let configured = format!(
+                "{base}\n[[credential_profiles]]\nname = \"task-fixture\"\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\n{source}\n"
+            );
+            let models = HubModelConfiguration::parse(&configured).expect("source shape admitted");
+            assert_eq!(
+                models
+                    .validate_credential_files()
+                    .expect_err("invalid ambient credential rejected at load")
+                    .failure,
+                expected_failure
+            );
+            assert_eq!(
+                models
+                    .resolve_ambient_task_credential("task-fixture")
+                    .await
+                    .expect_err("invalid ambient credential rejected at use")
+                    .failure,
+                expected_failure
+            );
+            std::fs::write(&reload.model_path, configured).expect("invalid replacement");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("invalid ambient credential rejected on reload"),
+                failure(
+                    ReloadPhase::Validate,
+                    &format!(
+                        "credential reference `task-fixture` could not be resolved: {expected_failure:?}"
+                    )
+                )
+            );
+        }
+        std::fs::write(&reload.model_path, &base).expect("remove purpose");
+        let removed = reload.read_replacement().expect("purpose removal reloads");
+        assert_eq!(
+            removed
+                .models
+                .resolve_ambient_task_credential("task-fixture")
+                .await
+                .expect_err("removed purpose unavailable")
+                .failure,
+            signalbox_model_runtime::CredentialAccessFailure::Unmapped
+        );
+    }
+
+    #[tokio::test]
+    async fn ambient_file_credentials_reject_empty_values_at_load_reload_and_use() {
+        use signalbox_model_runtime::CredentialAccessFailure;
+
+        const PURPOSE: &str = "task-fixture";
+        const VALID_CREDENTIAL: &str = "synthetic-task-secret";
+        let (directory, reload) = fixture();
+        let path = directory.path().join("ambient-file");
+        std::fs::write(&path, VALID_CREDENTIAL).expect("valid initial credential");
+        let configured = format!(
+            "{}\n[[credential_profiles]]\nname = {PURPOSE:?}\nadapter = \"sandboxed_exec\"\ndelivery = \"ambient\"\nfile = {path:?}\n",
+            reload.catalogs().models.source()
+        );
+        std::fs::write(&reload.model_path, configured).expect("ambient profile");
+        let models = reload
+            .read_replacement()
+            .expect("valid credential admitted")
+            .models;
+        assert_eq!(
+            models
+                .resolve_ambient_task_credential(PURPOSE)
+                .await
+                .expect("valid credential resolves")
+                .1
+                .expose_bytes(),
+            VALID_CREDENTIAL.as_bytes()
+        );
+
+        for empty_value in [b"".as_slice(), b"\r\n".as_slice()] {
+            std::fs::write(&path, empty_value).expect("rotate to normalized empty credential");
+            assert_eq!(
+                models
+                    .validate_credential_files()
+                    .expect_err("normalized empty credential rejected at load")
+                    .failure,
+                CredentialAccessFailure::Unavailable
+            );
+            assert_eq!(
+                models
+                    .resolve_ambient_task_credential(PURPOSE)
+                    .await
+                    .expect_err("normalized empty credential rejected at use")
+                    .failure,
+                CredentialAccessFailure::Unavailable
+            );
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("normalized empty credential rejected on reload"),
+                failure(
+                    ReloadPhase::Validate,
+                    "credential reference `task-fixture` could not be resolved: Unavailable"
+                )
+            );
+        }
+    }
+
     #[tokio::test]
     async fn reload_accepts_a_model_credential_with_permissive_mode() {
         let (directory, reload) = fixture();
@@ -1050,6 +1529,8 @@ mod tests {
                 "synthetic-second-secret",
             )
             .env_remove("SIGNALBOX_TEST_CREDENTIAL_MISSING")
+            .env("SIGNALBOX_TEST_CREDENTIAL_EMPTY", "")
+            .env("SIGNALBOX_TEST_CREDENTIAL_TERMINATORS", "\r\n")
             .output()
             .expect("isolated environment fixture");
         assert!(
@@ -1119,7 +1600,7 @@ mod tests {
                 .finish(),
         )
         .expect("isolated log subscriber");
-        let (_directory, reload) = fixture();
+        let (directory, reload) = fixture();
         let reference = CredentialReference::new("anthropic-overflow");
         let mut document = reload
             .catalogs()
@@ -1185,23 +1666,102 @@ mod tests {
                 .expose_bytes(),
             b"synthetic-second-secret"
         );
-        std::fs::write(
-            &reload.model_path,
-            replacement.replace(
-                "SIGNALBOX_TEST_CREDENTIAL_SECOND",
-                "SIGNALBOX_TEST_CREDENTIAL_MISSING",
-            ),
+        for variable in [
+            "SIGNALBOX_TEST_CREDENTIAL_MISSING",
+            "SIGNALBOX_TEST_CREDENTIAL_EMPTY",
+            "SIGNALBOX_TEST_CREDENTIAL_TERMINATORS",
+        ] {
+            let source = replacement.replace("SIGNALBOX_TEST_CREDENTIAL_SECOND", variable);
+            let models = HubModelConfiguration::parse(&source).expect("environment source");
+            assert_eq!(
+                models
+                    .validate_credential_files()
+                    .expect_err("unavailable at load")
+                    .failure,
+                signalbox_model_runtime::CredentialAccessFailure::Unavailable
+            );
+            assert_eq!(
+                FileCredentialAccess::from_configuration(&models, ModelAdapter::Anthropic)
+                    .resolve(&reference)
+                    .await
+                    .expect_err("unavailable at use")
+                    .failure,
+                signalbox_model_runtime::CredentialAccessFailure::Unavailable
+            );
+            std::fs::write(&reload.model_path, source).expect("unavailable source");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("unavailable at reload"),
+                failure(
+                    ReloadPhase::Validate,
+                    "credential reference `anthropic-overflow` could not be resolved: Unavailable"
+                )
+            );
+        }
+
+        let executable = directory.path().join("op");
+        std::fs::write(&executable, "#!/bin/sh\nprintf synthetic-vault-secret\n")
+            .expect("vault CLI");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )
-        .expect("missing source");
-        assert_eq!(
-            reload
-                .read_replacement()
-                .expect_err("missing variable rejected"),
-            failure(
-                ReloadPhase::Validate,
-                "credential reference `anthropic-overflow` could not be resolved: Unavailable"
-            )
+        .expect("executable");
+        let file = directory.path().join("switching-token");
+        std::fs::write(&file, b"synthetic-first-secret").expect("file source");
+        let file_source = format!("delivery = \"file\"\nfile = {file:?}");
+        let mounted_source = format!("delivery = \"kubernetes_secret\"\nfile = {file:?}");
+        let environment_source =
+            "delivery = \"environment\"\nvariable = \"SIGNALBOX_TEST_CREDENTIAL_FIRST\"";
+        let vault_source = format!(
+            "delivery = \"onepassword\"\nitem = \"op://fixture/account/token\"\nexecutable = {executable:?}"
         );
+        for source in [
+            file_source.as_str(),
+            vault_source.as_str(),
+            file_source.as_str(),
+            vault_source.as_str(),
+            mounted_source.as_str(),
+            vault_source.as_str(),
+            environment_source,
+            vault_source.as_str(),
+            environment_source,
+        ] {
+            let profile = document["credential_profiles"]
+                .as_array_of_tables_mut()
+                .expect("profiles")
+                .iter_mut()
+                .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+                .expect("profile");
+            for field in ["delivery", "file", "variable", "item", "executable"] {
+                profile.remove(field);
+            }
+            let fields = source
+                .parse::<toml_edit::DocumentMut>()
+                .expect("delivery fields");
+            for (field, value) in fields.iter() {
+                profile.insert(field, value.clone());
+            }
+            std::fs::write(&reload.model_path, document.to_string()).expect("switched delivery");
+            let next = reload
+                .read_replacement()
+                .expect("byte delivery switches live");
+            let expected: &[u8] = if source == vault_source {
+                b"synthetic-vault-secret"
+            } else {
+                b"synthetic-first-secret"
+            };
+            assert_eq!(
+                FileCredentialAccess::from_configuration(&next.models, ModelAdapter::Anthropic)
+                    .resolve(&reference)
+                    .await
+                    .expect("new source resolves")
+                    .expose_bytes(),
+                expected
+            );
+            *reload.current.write().expect("catalog lock") = next;
+        }
     }
 
     #[tokio::test]
@@ -1266,6 +1826,114 @@ mod tests {
                 ReloadPhase::Validate,
                 "credential reference `anthropic-overflow` could not be resolved: Unavailable"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_refuses_changed_github_onepassword_sources() {
+        let (_directory, initial) = fixture();
+        let base = format!(
+            "{}\n[[credential_profiles]]\nname = \"github-reload-fixture\"\nadapter = \"github\"\ndelivery = \"onepassword\"\nitem = \"op://fixture/account/first\"\nexecutable = \"/unused/op\"\n",
+            initial.catalogs().models.source()
+        );
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            HubModelConfiguration::parse(&base).expect("initial profiles"),
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload");
+        for replacement in [
+            base.replace("op://fixture/account/first", "op://fixture/account/second"),
+            base.replace("/unused/op", "/unused/replacement-op"),
+            base.replace(
+                "delivery = \"onepassword\"\nitem = \"op://fixture/account/first\"\nexecutable = \"/unused/op\"",
+                "delivery = \"file\"\nfile = \"/unused/token\"",
+            ),
+        ] {
+            std::fs::write(&reload.model_path, replacement).expect("replacement");
+            assert_eq!(
+                reload
+                    .read_replacement()
+                    .expect_err("startup credential source cannot reload"),
+                failure(ReloadPhase::Validate, "startup-only configuration differs")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn onepassword_reload_replaces_the_live_item_reference() {
+        use crate::{FileCredentialAccess, configuration::ModelAdapter};
+        use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+        let (directory, initial) = fixture();
+        let executable = directory.path().join("op");
+        std::fs::write(&executable, "#!/bin/sh\ncase \"$5\" in\nop://fixture/account/first) printf synthetic-first-secret ;;\nop://fixture/account/second) printf synthetic-second-secret ;;\n*) exit 1 ;;\nesac\n").expect("fake CLI");
+        std::fs::set_permissions(
+            &executable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("executable");
+        let reference = CredentialReference::new("anthropic-overflow");
+        let mut document = initial
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("catalog");
+        let profile = document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles")
+            .iter_mut()
+            .find(|profile| profile["name"].as_str() == Some(reference.as_str()))
+            .expect("profile");
+        profile["delivery"] = toml_edit::value("onepassword");
+        profile.remove("file");
+        profile["item"] = toml_edit::value("op://fixture/account/first");
+        profile["executable"] = toml_edit::value(executable.to_str().expect("CLI path"));
+        let models =
+            HubModelConfiguration::parse(&document.to_string()).expect("1Password catalog");
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            models,
+            SessionTemplateConfiguration::default(),
+            initial.model_path,
+            initial.template_path,
+            None,
+        )
+        .expect("reload composition");
+        std::fs::write(&reload.model_path, document.to_string()).expect("initial source");
+        let first = reload
+            .read_replacement()
+            .expect("1Password source admitted");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&first.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("first item")
+                .expose_bytes(),
+            b"synthetic-first-secret"
+        );
+        std::fs::write(
+            &reload.model_path,
+            document
+                .to_string()
+                .replace("op://fixture/account/first", "op://fixture/account/second"),
+        )
+        .expect("replacement source");
+        let replacement = reload.read_replacement().expect("item reference reloads");
+        assert_eq!(
+            FileCredentialAccess::from_configuration(&replacement.models, ModelAdapter::Anthropic)
+                .resolve(&reference)
+                .await
+                .expect("replacement item")
+                .expose_bytes(),
+            b"synthetic-second-secret"
         );
     }
 

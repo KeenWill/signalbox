@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_judge_eval import Trial, git, prepare_checkout, run_trials, validate_result
+from review_judge_agentic import prepare_workspace
 
 
 class JudgmentResultTests(unittest.TestCase):
@@ -49,6 +50,8 @@ class ScratchCheckoutTests(unittest.TestCase):
         self.repository = root / "repository"
         self.repository.mkdir()
         self.workspace = root / "workspace"
+        self.workspace.mkdir()
+        git(self.workspace, "init", "--initial-branch=main")
         git(self.repository, "init", "--initial-branch=main")
         self.head = self.commit("first")
 
@@ -84,10 +87,67 @@ class ScratchCheckoutTests(unittest.TestCase):
             prepare_checkout(self.repository, self.workspace, self.head)
         self.assertEqual((tree / "source.txt").read_text(), "changed by a case")
 
+    def test_agentic_workspace_contains_only_its_head_and_case_evidence(self):
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        (self.workspace / "other-result.json").write_text("Another verdict")
+        evidence = self.repository.parent / "change.patch"
+        evidence.write_text("This case's diff")
+        first = prepare_workspace(self.workspace, "first-session", tree, self.head, evidence, "First context")
+        second = prepare_workspace(self.workspace, "second-session", tree, self.head, evidence, "Second context")
+        for head, context in ((first, "First context"), (second, "Second context")):
+            self.assertFalse(head.parent.is_relative_to(self.workspace))
+            self.assertTrue((head.parent / ".git").is_dir())
+            self.assertEqual(set(path.name for path in head.parent.iterdir()), {".git", "head", "change.patch", "context.txt"})
+            self.assertEqual(git(head, "rev-parse", "HEAD"), self.head)
+            self.assertEqual((head / "source.txt").read_text(), "first")
+            self.assertEqual((head.parent / "context.txt").read_text(), context)
+        self.assertNotEqual(first.parent, second.parent)
+        self.assertEqual(prepare_workspace(self.workspace, "first-session", tree, self.head, evidence, "First context"), first)
+
+    def test_changed_agentic_replay_preserves_original_patch_and_context(self):
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        patch = self.repository.parent / "change.patch"
+        patch.write_text("Original diff")
+        head = prepare_workspace(self.workspace, "session", tree, self.head, patch, "Original context")
+        for changed_patch, changed_context in (("Original diff", "Changed context"),
+                                                ("Changed diff", "Original context")):
+            with self.subTest(patch=changed_patch, context=changed_context):
+                patch.write_text(changed_patch)
+                with self.assertRaisesRegex(ValueError, "workspace evidence differs"):
+                    prepare_workspace(self.workspace, "session", tree, self.head, patch, changed_context)
+                self.assertEqual((head.parent / "change.patch").read_text(), "Original diff")
+                self.assertEqual((head.parent / "context.txt").read_text(), "Original context")
+
+    def test_agentic_root_uses_the_configured_workspaces_object_format(self):
+        workspace = self.repository.parent / "sha256-workspace"
+        git(self.repository, "init", "--object-format=sha256", str(workspace))
+        tree = prepare_checkout(self.repository, self.workspace, self.head)
+        patch = self.repository.parent / "change.patch"
+        patch.write_text("Diff")
+        head = prepare_workspace(workspace, "session", tree, self.head, patch, "Context")
+        self.assertEqual(git(head.parent, "rev-parse", "--show-object-format"), "sha256")
+        self.assertEqual(git(head, "rev-parse", "HEAD"), self.head)
+
+    def test_plain_workspace_uses_the_reviewed_checkouts_object_format(self):
+        checkout = self.repository.parent / "sha256-checkout"
+        git(self.repository, "init", "--object-format=sha256", str(checkout))
+        git(checkout, "-c", "user.name=Judge fixture", "-c",
+            "user.email=judge@example.com", "commit", "--allow-empty", "-m", "Head")
+        head_sha = git(checkout, "rev-parse", "HEAD")
+        patch = self.repository.parent / "change.patch"
+        patch.write_text("Diff")
+        for parent in (self.repository.parent, self.repository):
+            with self.subTest(parent=parent):
+                workspace = parent / "plain-workspace"
+                workspace.mkdir()
+                head = prepare_workspace(workspace, "session", checkout, head_sha, patch, "Context")
+                self.assertEqual(git(head.parent, "rev-parse", "--show-object-format"), "sha256")
+                self.assertEqual(git(head, "rev-parse", "HEAD"), head_sha)
+
     def test_citations_are_resolved_before_the_judge_session_is_created(self):
         args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
                                output=self.repository.parent / "results",
-                               template="review-judgment")
+                               template="review-judgment", sibling_full_text_bytes=None)
         case = {"id": "finding", "head_sha": self.head, "base_sha": self.head,
                 "pr_title": "Review source", "pr_scope": "Source change", "context": "",
                 "findings": [{"finding_id": "finding", "finding_text": "`missing_gate()` fails."}]}
@@ -99,6 +159,26 @@ class ScratchCheckoutTests(unittest.TestCase):
         reference = json.loads(source.read_text())["findings"][0]["citation_resolution"]
         self.assertEqual(reference["head_sha"], self.head)
         self.assertEqual(reference["references"][0]["status"], "absent_at_head")
+
+    def test_sibling_context_is_projected_before_session_creation(self):
+        args = SimpleNamespace(repository=self.repository, workspace=self.workspace,
+                               output=self.repository.parent / "results",
+                               template="review-judgment", sibling_full_text_bytes=16_384)
+        peer = {"finding_id": "peer", "author": "reviewer", "path": "source.txt",
+                "line": 1, "text": "Another candidate.", "ruling": "DECLINE"}
+        case = {"id": "finding", "head_sha": self.head, "base_sha": self.head,
+                "pr_title": "Review source", "pr_scope": "Source change", "context": "",
+                "findings": [{"finding_id": "finding", "finding_text": "Candidate."}],
+                "pr": 42,
+                "review_context": {"pr": 42, "head_sha": self.head, "findings": [peer], "threads": []}}
+        trial = Trial(args, case)
+        with patch.object(trial, "mutate", side_effect=RuntimeError("before model")):
+            with self.assertRaisesRegex(RuntimeError, "before model"):
+                trial.run()
+        source = self.workspace / "review-judge-eval" / "results" / trial.key / "input.json"
+        context = json.loads(source.read_text())["sibling_context"]
+        self.assertEqual(context["entries"][0]["finding_id"], "peer")
+        self.assertNotIn("ruling", context["entries"][0])
 
 
 class TrialAdmissionTests(unittest.TestCase):

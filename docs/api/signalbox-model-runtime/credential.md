@@ -37,6 +37,7 @@ pub enum CredentialAccessFailure {
     Unmapped,
     Unavailable,
     Unreadable,
+    InvalidUtf8,
     NotRegularFile,
     WrongOwner,
     InsecurePermissions,

@@ -21,6 +21,8 @@ const descriptor = (count: number) => ({
   supervision: null,
   repository_watch: null,
   workspace_root_kind: null,
+  title_summary: null,
+  last_activity: { kind: 'session' as const, unix_microseconds: '1' },
   sizes: {
     item_count: String(count),
     projected_structured_bytes: String(count * 78),
@@ -138,14 +140,21 @@ it.each([
   {
     anchor: { kind: 'first' } as SessionWindowAnchor,
     work: { active_turn_count: '1', queued_turn_count: '0' },
+    requestedAddress: undefined,
   },
   {
     anchor: { kind: 'around', eventSequence: '40' } as SessionWindowAnchor,
     work: descriptor(81).work,
+    requestedAddress: undefined,
+  },
+  {
+    anchor: { kind: 'around', eventSequence: '40' } as SessionWindowAnchor,
+    work: { active_turn_count: '1', queued_turn_count: '0' },
+    requestedAddress: '40',
   },
 ])(
   'preserves $anchor.kind with work $work and exposes newer history through continuation',
-  async ({ anchor, work }) => {
+  async ({ anchor, work, requestedAddress }) => {
     const source: SessionTimelineSource = {
       limits: { max_timeline_window_items: 256, max_timeline_window_bytes: 65_536 },
       readDescriptor: vi.fn().mockResolvedValue({ ...descriptor(81), work }),
@@ -155,6 +164,7 @@ it.each([
     const queryKey = ['production', 'session-workspace', sessionId]
     queries.setQueryData<SessionWorkspace>(queryKey, {
       active: false,
+      requestedAddress,
       anchor,
       descriptor: descriptor(80),
       history: new BoundedSessionHistory(sessionId, source),

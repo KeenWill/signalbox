@@ -19,6 +19,7 @@ test-support = [
 
 [dependencies]
 signalbox-file-media-adapter-pdf = { path = "../../crates/file-media-adapter-pdf" }
+signalbox-file-media-adapter-svg = { path = "../../crates/file-media-adapter-svg" }
 signalbox-file-media-runtime = { path = "../../crates/file-media-runtime" }
 signalbox-file-media-processor-runtime = { path = "../../crates/file-media-processor-runtime" }
 signalbox-file-media-provider-runtime = { path = "../../crates/file-media-provider-runtime" }
@@ -51,6 +52,7 @@ image = { version = "0.25.8", default-features = false, features = [
 ] }
 percent-encoding = "2.3.2"
 mime = "0.3.17"
+tikv-jemallocator = { version = "0.7.0", features = ["background_threads"] }
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.
 # Already present transitively under axum.

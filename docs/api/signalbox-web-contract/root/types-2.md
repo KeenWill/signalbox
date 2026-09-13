@@ -2,6 +2,150 @@
 
 # root: types-2
 
+## WebSearchResult
+
+```rust
+pub struct WebSearchResult {
+    pub session_id: WebSessionId,
+    pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
+    pub source: WebSearchResultSource,
+    pub content_class: WebSearchContentClass,
+    pub snippet: string::String,
+    pub highlights: vec::Vec<WebSearchHighlight>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSearchPage
+
+```rust
+pub struct WebSearchPage {
+    pub results: vec::Vec<WebSearchResult>,
+    pub continuation: option::Option<WebSearchCursor>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageCallKind
+
+```rust
+pub enum WebUsageCallKind {
+    ModelCall,
+    ApprovalJudge,
+    ContextCompaction,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageProvenance
+
+```rust
+pub enum WebUsageProvenance {
+    Reported,
+    Estimated,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageInputSemantics
+
+```rust
+pub enum WebUsageInputSemantics {
+    Unknown,
+    CacheExclusive,
+    CacheInclusive,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebNullableU64
+
+```rust
+pub enum WebNullableU64 {
+    Value(WebU64),
+    Null,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebNullableU64 {
+    #[must_use]
+    pub fn from_option(value: option::Option<u64>) -> Self;
+}
+```
+
+## WebNullableU128
+
+```rust
+pub enum WebNullableU128 {
+    Value(WebU128),
+    Null,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebNullableU128 {
+    #[must_use]
+    pub fn from_option(value: option::Option<u128>) -> Self;
+}
+```
+
+## WebUsageTokenAxes
+
+```rust
+pub struct WebUsageTokenAxes {
+    pub input: WebNullableU64,
+    pub output: WebNullableU64,
+    pub cache_creation_input: WebNullableU64,
+    pub cache_read_input: WebNullableU64,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageAggregateTokenAxes
+
+```rust
+pub struct WebUsageAggregateTokenAxes {
+    pub input: WebNullableU128,
+    pub output: WebNullableU128,
+    pub cache_creation_input: WebNullableU128,
+    pub cache_read_input: WebNullableU128,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageTokenCoverage
+
+```rust
+pub struct WebUsageTokenCoverage {
+    pub input: bool,
+    pub output: bool,
+    pub cache_creation_input: bool,
+    pub cache_read_input: bool,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageCostLabel
+
+```rust
+pub enum WebUsageCostLabel {
+    Real,
+    MeteredEquivalent,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageCostUnavailableReason
+
+```rust
+pub enum WebUsageCostUnavailableReason {
+    NoTokenEvidence,
+    UnknownInputSemantics,
+    IncompleteCacheAxes,
+    InvalidCacheBreakdown,
+    ConfigurationUnavailable,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebDollarAmount
 
 ```rust
@@ -402,6 +546,7 @@ pub struct WebSessionCatalogActivity {
 
 ```rust
 pub struct WebSessionCatalogSummary {
+    pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub title_summary: option::Option<string::String>,
     pub title_truncated: bool,
@@ -484,6 +629,8 @@ impl error::Error for GenerateWebContractError {}
 
 ```rust
 pub struct WebRepositoryWatchProvenance {
+    pub head_branch: option::Option<string::String>,
+    pub base_branch: option::Option<string::String>,
     pub dispatch_id: WebLiveResourceId,
     pub action_ordinal: WebPositiveU64,
     pub repository: string::String,

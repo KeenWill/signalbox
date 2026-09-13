@@ -470,6 +470,7 @@ async fn initial_facts_baseline(
                 return Ok(pull.clone());
             }
             RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+                required_check_conclusions: None,
                 context: PullRequestEventContext::new(PullRequestEventContextInput {
                     number: context.number(),
                     head_sha: context.head_sha().clone(),

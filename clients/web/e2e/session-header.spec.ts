@@ -33,6 +33,8 @@ test('Escape closes trigger details before session details', async ({ page }) =>
     dispatch_id: turnId,
     action_ordinal: '1',
     repository: 'signalbox/example',
+    head_branch: null,
+    base_branch: null,
     pull_request: '81',
     rule_id: 'review-response',
     rule_revision: '3',
@@ -82,5 +84,32 @@ for (const load of ['pending', 'failed'] as const) {
     await page.keyboard.press('Escape')
     await expect(page).toHaveURL(/\/sessions$/)
     release()
+  })
+}
+
+for (const focus of ['conversation', 'composer'] as const) {
+  test(`Escape closes session details after focus moves to the ${focus}`, async ({ page }) => {
+    await sessionApi(page)
+    await openSession(page)
+    const details = page.getByText('Session details', { exact: true })
+    const telemetry = page.getByText('Up to date as of', { exact: true })
+    const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+    await details.click()
+    if (focus === 'composer') {
+      const message = page.getByRole('textbox', { name: 'Message', exact: true })
+      await message.fill('Keep this draft')
+      await message.press('Escape')
+      await expect(conversation).toBeFocused()
+      await expect(message).toHaveValue('Keep this draft')
+      await expect(telemetry).toBeVisible()
+    } else {
+      await conversation.focus()
+    }
+    await page.keyboard.press('Escape')
+    await expect(telemetry).toBeHidden()
+    await expect(details).toBeFocused()
+    await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(sessionId)
+    await page.keyboard.press('Escape')
+    await expect(page).toHaveURL(/\/sessions$/)
   })
 }

@@ -196,7 +196,7 @@ where
     )]
     pub async fn execute(
         &mut self,
-        mut session: SessionId,
+        session: SessionId,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -207,6 +207,36 @@ where
             Observation::Error,
         >,
     > {
+        self.execute_with_tool_request_allowance(session, |_, _| std::future::ready(Ok(None)))
+            .await
+    }
+
+    /// Resolves a tool proposal allowance after loading the exact prepared call.
+    /// The caller reads durable requests for the supplied session and turn.
+    /// Send authorization still checks that this prepared call is current.
+    /// The runtime provider enforces it during response decoding, including batches.
+    #[allow(
+        clippy::result_large_err,
+        reason = "The error retains the correlated observation inline for retry."
+    )]
+    pub async fn execute_with_tool_request_allowance<Allowance, AllowanceFuture>(
+        &mut self,
+        mut session: SessionId,
+        allowance: Allowance,
+    ) -> Result<
+        ModelCallExecutionOutcome,
+        ModelCallExecutionError<
+            Prepare::Error,
+            Failure::Error,
+            Authorization::Error,
+            Provider::Error,
+            Observation::Error,
+        >,
+    >
+    where
+        Allowance: FnOnce(SessionId, TurnId) -> AllowanceFuture,
+        AllowanceFuture: std::future::Future<Output = Result<Option<u64>, Prepare::Error>>,
+    {
         if let Some(retained) = self.retained_state.take() {
             match retained.state {
                 RetainedModelCallExecutionStateKind::PreparedFailure {
@@ -464,7 +494,14 @@ where
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let turn = prepared.turn();
-        let advertised_tools = self.catalog.definitions();
+        let tool_request_limit = allowance(prepared.session(), turn)
+            .await
+            .map_err(ModelCallExecutionError::Prepare)?;
+        let advertised_tools = if tool_request_limit == Some(0) {
+            Box::default()
+        } else {
+            self.catalog.definitions()
+        };
         let operation = match PreparedModelOperation::render_within(
             *prepared,
             credential_reference,
@@ -475,6 +512,7 @@ where
             self.retained_frontier_content_limit,
         ) {
             Ok(mut operation) => {
+                operation.tool_request_limit = tool_request_limit;
                 operation.retained_mapped_target = retained_mapped_target;
                 operation.invocation_capacity_reserved = invocation_capacity_reserved;
                 operation
@@ -1052,6 +1090,11 @@ where
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
+                    if definition.is_some_and(|definition| {
+                        definition.requires_approval_judge(proposal.arguments())
+                    }) {
+                        return Some(InitialToolApproval::Delegated);
+                    }
                     let base = initial_tool_approval(posture, definition);
                     if base != InitialToolApproval::Delegated {
                         return Some(base);

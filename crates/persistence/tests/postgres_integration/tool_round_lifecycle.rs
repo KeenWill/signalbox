@@ -4,6 +4,42 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn turn_tool_allowance_counts_durable_requests_in_only_the_selected_turn()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, repository, _, _) =
+        checkpoint_confirmed_tool_round(&pool, 0x473_1000, "read_file", "{}").await?;
+    assert_eq!(
+        repository
+            .turn_tool_request_count(fixture.session, fixture.turn)
+            .await?,
+        1
+    );
+    assert_eq!(
+        repository
+            .turn_tool_request_count(fixture.session, TurnId::from_uuid(Uuid::now_v7()))
+            .await?,
+        0
+    );
+    assert_eq!(
+        repository
+            .turn_tool_request_count(SessionId::from_uuid(Uuid::now_v7()), fixture.turn)
+            .await?,
+        0
+    );
+    let reloaded = repository.clone();
+    drop(repository);
+    assert_eq!(
+        reloaded
+            .turn_tool_request_count(fixture.session, fixture.turn)
+            .await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn completed_image_attempt_reloads_in_the_active_batch() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _) = migrated_postgres().await?;
     // Supplies distinct identities for the completed tool-round fixture.
@@ -6974,8 +7010,114 @@ async fn file_use_resolution_requires_the_selector_for_repeated_visible_attachme
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn media_reference_batch_correlates_results_and_omits_non_media_requests()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+    };
+    let (_container, pool, _) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let identity = |seed, media_type: &str| {
+        MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([seed; 32]),
+            media_type.into(),
+            "fixture".into(),
+            "reader".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .unwrap()
+    };
+    let length = std::num::NonZeroU64::new(64).unwrap();
+    let image = ToolMediaReference::direct_image(identity(1, "image/png"), length).unwrap();
+    let document =
+        ToolMediaReference::direct_document(identity(2, "application/pdf"), length).unwrap();
+    let mut requests = Vec::new();
+    let mut expected = std::collections::BTreeMap::new();
+    for (index, reference) in [Some(image), Some(document), None, None]
+        .into_iter()
+        .enumerate()
+    {
+        let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+            &pool,
+            0x133_500 + index as u128 * 0x100,
+            "file_read",
+            "{}",
+        )
+        .await?;
+        requests.push(request);
+        repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    request,
+                    ToolApprovalDecision::Approve,
+                ),
+                || TurnAttemptId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::ExternalEffect,
+            )
+            .await?;
+        let authorized = repository
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        if index == 3 {
+            continue;
+        }
+        let text = ToolResultText::try_new("fixture result".into()).unwrap();
+        let result = match reference {
+            Some(reference) => {
+                expected.insert(request, reference.clone());
+                ToolResultContent::Media { text, reference }
+            }
+            None => ToolResultContent::Text(text),
+        };
+        repository
+            .commit_observation(
+                authorized
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::Completed { result }),
+            )
+            .await?;
+    }
+    assert!(repository.load_media_references(&[]).await?.is_empty());
+    assert!(
+        repository
+            .load_media_references(&requests[2..])
+            .await?
+            .is_empty()
+    );
+    requests.push(requests[0]);
+    requests.push(ToolRequestId::from_uuid(Uuid::now_v7()));
+    requests.reverse();
+    assert_eq!(repository.load_media_references(&requests).await?, expected);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
 -> Result<(), Box<dyn Error>> {
+    media_result_commit_is_atomic_and_terminal_reference_is_immutable(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn document_result_commit_preserves_its_kind_and_immutable_evidence()
+-> Result<(), Box<dyn Error>> {
+    media_result_commit_is_atomic_and_terminal_reference_is_immutable(true).await
+}
+
+async fn media_result_commit_is_atomic_and_terminal_reference_is_immutable(
+    document: bool,
+) -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
     };
@@ -7008,7 +7150,11 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
     let identity = |seed| {
         MediaValidationIdentity::try_new(
             BlobDigest::from_bytes([seed; 32]),
-            "image/png".into(),
+            if document {
+                "application/pdf".into()
+            } else {
+                "image/png".into()
+            },
             "fixture".into(),
             "png".into(),
             "v1".into(),
@@ -7016,11 +7162,15 @@ async fn image_result_commit_is_atomic_and_terminal_reference_is_immutable()
         )
         .unwrap()
     };
-    let reference = ToolMediaReference::image(
-        identity(1),
-        identity(2),
-        std::num::NonZeroU64::new(64).unwrap(),
-    )
+    let reference = if document {
+        ToolMediaReference::direct_document(identity(1), std::num::NonZeroU64::new(64).unwrap())
+    } else {
+        ToolMediaReference::image(
+            identity(1),
+            identity(2),
+            std::num::NonZeroU64::new(64).unwrap(),
+        )
+    }
     .unwrap();
     assert!(
         sqlx::query(

@@ -81,6 +81,37 @@ pub struct WebSubmitInputRequest {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebCreateSessionRequest
+
+```rust
+pub struct WebCreateSessionRequest {
+    pub command_id: string::String,
+    pub template_name: string::String,
+    pub first_input: option::Option<WebSubmitInputRequest>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebCreateSessionResponse
+
+```rust
+pub struct WebCreateSessionResponse {
+    pub session_id: WebSessionId,
+    pub summary: WebSessionCatalogSummary,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebSessionTitleRequest
+
+```rust
+pub struct WebSessionTitleRequest {
+    pub command_id: string::String,
+    pub title: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebContractExample
 
 ```rust
@@ -407,6 +438,94 @@ pub enum WebModelSelection {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTemplateList
+
+```rust
+pub struct WebTemplateList {
+    pub templates: vec::Vec<WebTemplateSummary>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTemplateSummary
+
+```rust
+pub struct WebTemplateSummary {
+    pub name: string::String,
+    pub digest: string::String,
+    pub version: WebPositiveU64,
+    pub model: WebModelSelection,
+    pub model_label: string::String,
+    pub dangerous_tool_auto_approval: bool,
+    pub workflow_tools: vec::Vec<WebTemplateWorkflowTool>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTemplateWorkflowTool
+
+```rust
+pub struct WebTemplateWorkflowTool {
+    pub name: string::String,
+    pub grant: WebTemplateWorkflowGrant,
+    pub posture: WebTemplateApprovalPosture,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTemplateWorkflowGrant
+
+```rust
+pub enum WebTemplateWorkflowGrant {
+    Enabled { enabled: bool },
+    AllRegistrations,
+    Registrations { names: vec::Vec<string::String> },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTemplateApprovalPosture
+
+```rust
+pub enum WebTemplateApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTemplateSourceKind
+
+```rust
+pub enum WebTemplateSourceKind {
+    Template,
+    ReviewLibrary,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTemplateSaveRequest
+
+```rust
+pub struct WebTemplateSaveRequest {
+    pub definition_toml: string::String,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>, schemars::JsonSchema
+```
+
+## WebTemplateDetail
+
+```rust
+pub struct WebTemplateDetail {
+    pub summary: WebTemplateSummary,
+    pub system_prompt: string::String,
+    pub source_kind: WebTemplateSourceKind,
+    pub definition_toml: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebImportContinuationRequest
 
 ```rust
@@ -633,6 +752,8 @@ pub struct WebSessionSupervision {
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub title_summary: option::Option<string::String>,
+    pub last_activity: WebSessionCatalogActivity,
     pub supervision: option::Option<WebSessionSupervision>,
     pub workspace_root_kind: option::Option<WebSessionWorkspaceRootKind>,
     pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
@@ -926,6 +1047,28 @@ pub enum WebTimelineToolFailureCause {
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTimelineMediaPresentationKind
+
+```rust
+pub enum WebTimelineMediaPresentationKind {
+    Image,
+    Document,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineToolMediaReference
+
+```rust
+pub struct WebTimelineToolMediaReference {
+    pub digest: WebBlobId,
+    pub media_type: string::String,
+    pub presentation_kind: WebTimelineMediaPresentationKind,
+    pub length_bytes: WebPositiveU64,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebTimelineToolAttemptEvidence
 
 ```rust
@@ -933,6 +1076,7 @@ pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
         attempt_id: WebSessionId,
+        result_media_reference: option::Option<WebTimelineToolMediaReference>,
         result: option::Option<WebTimelineTextExcerpt>,
         failure: option::Option<WebTimelineTextExcerpt>,
         result_present: bool,
@@ -1839,148 +1983,4 @@ pub struct WebSearchCursor {
     pub projection_id: WebSearchProjectionId,
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchResult
-
-```rust
-pub struct WebSearchResult {
-    pub session_id: WebSessionId,
-    pub address: WebTimelineAddress,
-    pub projection_id: WebSearchProjectionId,
-    pub source: WebSearchResultSource,
-    pub content_class: WebSearchContentClass,
-    pub snippet: string::String,
-    pub highlights: vec::Vec<WebSearchHighlight>,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebSearchPage
-
-```rust
-pub struct WebSearchPage {
-    pub results: vec::Vec<WebSearchResult>,
-    pub continuation: option::Option<WebSearchCursor>,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageCallKind
-
-```rust
-pub enum WebUsageCallKind {
-    ModelCall,
-    ApprovalJudge,
-    ContextCompaction,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageProvenance
-
-```rust
-pub enum WebUsageProvenance {
-    Reported,
-    Estimated,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageInputSemantics
-
-```rust
-pub enum WebUsageInputSemantics {
-    Unknown,
-    CacheExclusive,
-    CacheInclusive,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebNullableU64
-
-```rust
-pub enum WebNullableU64 {
-    Value(WebU64),
-    Null,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebNullableU64 {
-    #[must_use]
-    pub fn from_option(value: option::Option<u64>) -> Self;
-}
-```
-
-## WebNullableU128
-
-```rust
-pub enum WebNullableU128 {
-    Value(WebU128),
-    Null,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-impl WebNullableU128 {
-    #[must_use]
-    pub fn from_option(value: option::Option<u128>) -> Self;
-}
-```
-
-## WebUsageTokenAxes
-
-```rust
-pub struct WebUsageTokenAxes {
-    pub input: WebNullableU64,
-    pub output: WebNullableU64,
-    pub cache_creation_input: WebNullableU64,
-    pub cache_read_input: WebNullableU64,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageAggregateTokenAxes
-
-```rust
-pub struct WebUsageAggregateTokenAxes {
-    pub input: WebNullableU128,
-    pub output: WebNullableU128,
-    pub cache_creation_input: WebNullableU128,
-    pub cache_read_input: WebNullableU128,
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageTokenCoverage
-
-```rust
-pub struct WebUsageTokenCoverage {
-    pub input: bool,
-    pub output: bool,
-    pub cache_creation_input: bool,
-    pub cache_read_input: bool,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageCostLabel
-
-```rust
-pub enum WebUsageCostLabel {
-    Real,
-    MeteredEquivalent,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebUsageCostUnavailableReason
-
-```rust
-pub enum WebUsageCostUnavailableReason {
-    NoTokenEvidence,
-    UnknownInputSemantics,
-    IncompleteCacheAxes,
-    InvalidCacheBreakdown,
-    ConfigurationUnavailable,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

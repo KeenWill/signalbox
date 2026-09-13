@@ -720,6 +720,7 @@ impl CredentialAccessCode {
             CredentialAccessFailure::Unmapped => Self::Unmapped,
             CredentialAccessFailure::Unavailable => Self::Unavailable,
             CredentialAccessFailure::Unreadable
+            | CredentialAccessFailure::InvalidUtf8
             | CredentialAccessFailure::NotRegularFile
             | CredentialAccessFailure::WrongOwner
             | CredentialAccessFailure::InsecurePermissions
@@ -846,6 +847,7 @@ impl PreparedBinding {
 
 /// Opaque runtime capability plus the application facts it was prepared from.
 pub struct RuntimeModelCallCapability<Prepared> {
+    proposal_limits: signalbox_application::ToolProposalLimits,
     invocation_capacity_reserved: bool,
     prepared: Prepared,
     binding: PreparedBinding,
@@ -1304,6 +1306,20 @@ fn classify_runtime_input_count(
     }
 }
 
+fn narrowed_proposal_limits(
+    mut limits: signalbox_application::ToolProposalLimits,
+    remaining: Option<u64>,
+) -> signalbox_application::ToolProposalLimits {
+    if let Some(remaining) = remaining {
+        limits.max_requests = Some(
+            limits
+                .max_requests
+                .map_or(remaining, |limit| limit.min(remaining)),
+        );
+    }
+    limits
+}
+
 impl<R> ModelCallProvider for RuntimeModelCallProvider<R>
 where
     R: ModelRuntime<ModelCallId> + Send + Sync,
@@ -1403,6 +1419,10 @@ where
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
                 RuntimeModelCallCapability {
+                    proposal_limits: narrowed_proposal_limits(
+                        self.proposal_limits,
+                        operation.tool_request_limit(),
+                    ),
                     invocation_capacity_reserved: operation.invocation_capacity_reserved(),
                     prepared,
                     binding,
@@ -1561,7 +1581,7 @@ where
             &observations.observations,
             &capability.resolved_target,
             self.diagnostic_model_identity_limit,
-            self.proposal_limits,
+            capability.proposal_limits,
         )
         .map_err(|failure| {
             fail_closed(telemetry, failure.error, failure.served_target.as_deref())
@@ -2004,17 +2024,29 @@ fn render_runtime_messages(
             ModelConversationMessage::ToolResult {
                 request, content, ..
             } => {
-                let image = match content {
+                let media = match content {
                     ModelToolResultContent::Success(ToolResultContent::Media {
                         reference, ..
-                    }) => Some(MessagePart::ImageReference(
-                        signalbox_model_runtime::ImageReference {
-                            authority: request.into_uuid().to_string(),
-                            digest: *reference.presented().digest().as_bytes(),
-                            byte_length: reference.byte_length(),
-                            media_type: reference.presented().media_type().to_owned(),
-                        },
-                    )),
+                    }) => Some(match reference.kind() {
+                        signalbox_domain::ToolMediaKind::Document => {
+                            MessagePart::DocumentReference(
+                                signalbox_model_runtime::DocumentReference {
+                                    authority: request.into_uuid().to_string(),
+                                    digest: *reference.presented().digest().as_bytes(),
+                                    byte_length: reference.byte_length(),
+                                    media_type: reference.presented().media_type().to_owned(),
+                                },
+                            )
+                        }
+                        signalbox_domain::ToolMediaKind::Image => {
+                            MessagePart::ImageReference(signalbox_model_runtime::ImageReference {
+                                authority: request.into_uuid().to_string(),
+                                digest: *reference.presented().digest().as_bytes(),
+                                byte_length: reference.byte_length(),
+                                media_type: reference.presented().media_type().to_owned(),
+                            })
+                        }
+                    }),
                     _ => None,
                 };
                 let (content, is_error) = render_tool_result(content);
@@ -2028,7 +2060,13 @@ fn render_runtime_messages(
                         let position = message
                             .parts
                             .iter()
-                            .position(|part| matches!(part, MessagePart::ImageReference(_)))
+                            .position(|part| {
+                                matches!(
+                                    part,
+                                    MessagePart::ImageReference(_)
+                                        | MessagePart::DocumentReference(_)
+                                )
+                            })
                             .unwrap_or(message.parts.len());
                         message.parts.insert(position, part);
                     } else {
@@ -2043,10 +2081,10 @@ fn render_runtime_messages(
                         parts: vec![part],
                     });
                 }
-                if let Some(image) = image
+                if let Some(media) = media
                     && let Some(message) = rendered.last_mut()
                 {
-                    message.parts.push(image);
+                    message.parts.push(media);
                 }
                 assistant_call = None;
                 collecting_tool_results = true;
@@ -3042,6 +3080,55 @@ mod tests {
         assert!(matches!(rendered[0].parts[1], MessagePart::ToolResult(_)));
         let MessagePart::ImageReference(image) = &rendered[0].parts[2] else {
             panic!("one authenticated image reference")
+        };
+        assert_eq!(image.authority, request.into_uuid().to_string());
+        assert_eq!(rendered[0].parts.len(), 3);
+    }
+
+    #[test]
+    fn typed_pdf_results_issue_document_authority_after_all_tool_results() {
+        use signalbox_domain::{
+            BlobDigest, MediaValidationEvidence, MediaValidationIdentity, ToolMediaReference,
+            ToolResultContent, ToolResultText,
+        };
+        use signalbox_model_runtime::MessagePart;
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(133));
+        let identity = MediaValidationIdentity::try_new(
+            BlobDigest::from_bytes([1; 32]),
+            "application/pdf".into(),
+            "fixture".into(),
+            "png".into(),
+            "v1".into(),
+            MediaValidationEvidence::StrongSignature,
+        )
+        .unwrap();
+        let reference =
+            ToolMediaReference::direct_document(identity, std::num::NonZeroU64::new(64).unwrap())
+                .unwrap();
+        let messages = [
+            ModelConversationMessage::ToolResult {
+                source: source(134),
+                request,
+                content: ModelToolResultContent::Success(ToolResultContent::Media {
+                    text: ToolResultText::try_new("image".into()).unwrap(),
+                    reference,
+                }),
+            },
+            ModelConversationMessage::ToolResult {
+                source: source(135),
+                request: ToolRequestId::from_uuid(Uuid::from_u128(136)),
+                content: ModelToolResultContent::Success(ToolResultContent::Text(
+                    ToolResultText::try_new(r#"{"output":"image","digest":"pretend"}"#.into())
+                        .unwrap(),
+                )),
+            },
+        ];
+        let rendered = render_runtime_messages(&messages);
+        assert_eq!(rendered.len(), 1);
+        assert!(matches!(rendered[0].parts[0], MessagePart::ToolResult(_)));
+        assert!(matches!(rendered[0].parts[1], MessagePart::ToolResult(_)));
+        let MessagePart::DocumentReference(image) = &rendered[0].parts[2] else {
+            panic!("one authenticated document reference")
         };
         assert_eq!(image.authority, request.into_uuid().to_string());
         assert_eq!(rendered[0].parts.len(), 3);
@@ -4491,6 +4578,51 @@ mod tests {
         assert_invalid_tool_proposal_closes(invalid_name);
         assert_invalid_tool_proposal_closes(nul_arguments);
         assert_invalid_tool_proposal_closes(mismatched_finish);
+    }
+
+    #[test]
+    fn a_remaining_allowance_rejects_a_batch_overrun_without_losing_the_response() {
+        for remaining in [0, 1, 8] {
+            let limits = super::narrowed_proposal_limits(Default::default(), Some(remaining));
+            let content = (0..10)
+                .map(|index| {
+                    AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new(format!("call-{index}")),
+                        name: ToolName::new("read_file"),
+                        arguments_json: String::from("{}"),
+                    })
+                })
+                .collect();
+            let classified = classify_terminal_with_limit(
+                completion_with_finish("model-exact", CompletionFinish::ToolUse, content),
+                &[],
+                &configured("model-exact"),
+                None,
+                limits,
+            )
+            .expect("bounded proposals retain the provider response");
+            let ModelCallTerminalObservation::CompletedWithTools { response, .. } =
+                classified.observation
+            else {
+                panic!("tool response is retained");
+            };
+            assert_eq!(response.parts().len(), 10);
+            for (index, part) in response.parts().iter().enumerate() {
+                let signalbox_domain::AssistantResponsePart::ToolCall(proposal) = part else {
+                    panic!("only tools")
+                };
+                assert_eq!(
+                    proposal.inadmissible_reason().is_none(),
+                    index < remaining as usize
+                );
+            }
+        }
+        let global = signalbox_application::ToolProposalLimits {
+            max_requests: Some(1),
+            max_argument_bytes: Some(100),
+        };
+        assert_eq!(super::narrowed_proposal_limits(global, Some(8)), global);
+        assert_eq!(super::narrowed_proposal_limits(global, None), global);
     }
 
     #[test]

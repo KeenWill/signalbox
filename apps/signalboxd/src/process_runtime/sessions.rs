@@ -2221,6 +2221,7 @@ where
         }
         Err(
             error @ (SessionMetadataRepositoryError::DifferentCommandKind { .. }
+            | SessionMetadataRepositoryError::InvalidTitleMerge(_)
             | SessionMetadataRepositoryError::Corruption(_)),
         ) => {
             let diagnostic = session_metadata_internal_diagnostic(&error);
@@ -2794,7 +2795,8 @@ where
             session_id.map(CanonicalUuid::into_uuid),
             InternalDiagnostic::SessionMetadataCommandKindMismatch,
         ),
-        SessionMetadataRepositoryError::Corruption(_) => internal_protocol_error(
+        SessionMetadataRepositoryError::InvalidTitleMerge(_)
+        | SessionMetadataRepositoryError::Corruption(_) => internal_protocol_error(
             session_id.map(CanonicalUuid::into_uuid),
             InternalDiagnostic::SessionMetadataCorruption,
         ),

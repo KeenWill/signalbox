@@ -18,6 +18,7 @@ pub struct PreparedModelOperation {
     messages: Box<[ModelConversationMessage]>,
     reasoning_provenance: Box<[ProviderReasoningProvenance]>,
     tools: Box<[ToolDefinition]>,
+    pub(super) tool_request_limit: Option<u64>,
 }
 
 impl PreparedModelOperation {
@@ -149,6 +150,7 @@ impl PreparedModelOperation {
         Ok(Self {
             retained_mapped_target: None,
             invocation_capacity_reserved: false,
+            tool_request_limit: None,
             request,
             credential_reference,
             system_prompt,
@@ -197,6 +199,11 @@ impl PreparedModelOperation {
     /// Borrows the exact model-facing catalog snapshot.
     pub fn tools(&self) -> &[ToolDefinition] {
         &self.tools
+    }
+
+    /// Returns the caller's remaining tool proposal allowance for this call.
+    pub const fn tool_request_limit(&self) -> Option<u64> {
+        self.tool_request_limit
     }
 
     /// Iterates over attachment digests represented by the rendered request.
