@@ -811,6 +811,8 @@ impl RepoWatchReactionObservation {
 /// Field-labeled construction input for one complete pull-request baseline.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPullRequestStateInput {
+    /// Completed conclusions GitHub classifies as required; absent before observation.
+    pub required_check_conclusions: Option<Vec<CheckConclusion>>,
     pub context: PullRequestEventContext,
     pub lifecycle: RepoWatchPullRequestLifecycle,
     pub mergeable_state: MergeableState,
@@ -824,6 +826,7 @@ pub struct RepoWatchPullRequestStateInput {
 /// Complete normalized comparison baseline for one pull request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPullRequestState {
+    required_check_conclusions: Option<Vec<CheckConclusion>>,
     context: PullRequestEventContext,
     lifecycle: RepoWatchPullRequestLifecycle,
     mergeable_state: MergeableState,
@@ -877,7 +880,12 @@ impl RepoWatchPullRequestState {
                 ))
         });
         input.reactions.dedup();
+        if let Some(conclusions) = &mut input.required_check_conclusions {
+            conclusions.sort_unstable();
+            conclusions.dedup();
+        }
         Ok(Self {
+            required_check_conclusions: input.required_check_conclusions,
             context: input.context,
             lifecycle: input.lifecycle,
             mergeable_state: input.mergeable_state,
@@ -887,6 +895,11 @@ impl RepoWatchPullRequestState {
             threads: input.threads.into_boxed_slice(),
             reactions: input.reactions.into_boxed_slice(),
         })
+    }
+
+    /// Returns the observed required-check conclusions, or no observation yet.
+    pub fn required_check_conclusions(&self) -> Option<&[CheckConclusion]> {
+        self.required_check_conclusions.as_deref()
     }
 
     pub const fn context(&self) -> &PullRequestEventContext {
@@ -2933,6 +2946,7 @@ mod tests {
 
     fn pull_request(facts: PullRequestFacts) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
         RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            required_check_conclusions: None,
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number: pull_request_number(facts.number),
                 head_sha: CommitSha::try_new(String::from(facts.head_sha))?,

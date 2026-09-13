@@ -321,6 +321,42 @@ the group and reaps the child. `SIGINT` stops the loop. Reconciliation requires
 a configured policy path and an explicit state path when neither
 `XDG_STATE_HOME` nor `HOME` supplies a default.
 
+## Agentic judgment sessions
+
+The ordinary `review-judgment-agentic` template runs through the daemon's
+existing model/tool loop. Its catalog exposes only `finding_text`,
+`review_thread_text`, and `read_file`. The first two select full text from an
+attached immutable review-context blob retained by the daemon's blob catalog and
+store; they make no code-host request. Their identifiers are
+`sha256:<digest>#<finding_id>` or `sha256:<digest>#<thread_id>`. Each lookup
+uses the existing attachment-visibility proof and 512 KiB blob-read ceiling. A
+missing, ambiguous, or malformed entry fails the tool request.
+
+One judgment occupies one turn. At most eight tool requests can be admitted
+across that turn. After loading the exact prepared call, the application reads
+the remaining allowance for its session and turn; send authorization rejects a
+call that has become stale. The allowance counts all durable requests, including
+rejected proposals and requests outside a compacted frontier. Response decoding
+marks proposals beyond the remaining allowance inadmissible, including a batch
+that crosses the limit. At zero allowance the next call advertises no tools. The
+session also applies the existing automatic-round limit with a ceiling of nine,
+or the configured limit when smaller. Template identity narrows this catalog and
+allowance; it grants no additional authority. Ordinary sessions do not advertise
+the two review-text tools.
+
+`scripts/review_judge_eval.py --template review-judgment-agentic` supplies the
+candidate in full with 160-character, single-line synopses of the other findings
+and threads. Additional case evidence and the prepared patch remain available
+through explicit read paths. The caller supplies the retained snapshot for the
+exact PR and head, including which threads existed then. The adapter excludes
+the subject finding and its source thread, uploads only context fields, and
+takes structured output from the last committed assistant text in the judged
+turn. Each result records the session, turn, terminal frontier, assistant-entry
+witness, wall time, and the existing per-model-call token-usage records. The
+record also sums each token axis across the turn; an unknown component keeps
+that axis unknown. No separate token table is needed. This evaluation path does
+not change publication policy or select a live judgment variant.
+
 ## Planned
 
 - Concrete provider, model, and workspace adapters for the orchestration runner

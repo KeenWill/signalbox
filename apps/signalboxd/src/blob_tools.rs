@@ -25,9 +25,19 @@ use crate::{
     blob_storage_runtime::BlobStoreRegistry,
 };
 
+mod review_text;
+use review_text::{FindingTextContract, ReviewTextReference, ThreadTextContract};
+
 pub(crate) const BLOB_METADATA_NAME: &str = "blob_metadata";
 pub(crate) const BLOB_READ_NAME: &str = "blob_read";
-pub(crate) const BLOB_TOOL_NAMES: &[&str] = &[BLOB_METADATA_NAME, BLOB_READ_NAME];
+pub(crate) const FINDING_TEXT_NAME: &str = "finding_text";
+pub(crate) const REVIEW_THREAD_TEXT_NAME: &str = "review_thread_text";
+pub(crate) const BLOB_TOOL_NAMES: &[&str] = &[
+    BLOB_METADATA_NAME,
+    BLOB_READ_NAME,
+    FINDING_TEXT_NAME,
+    REVIEW_THREAD_TEXT_NAME,
+];
 const INVALID_ARGUMENTS: &str = "expected exact canonical blob-read arguments";
 
 /// Which declaration of the family a validator or executor is serving.
@@ -40,6 +50,8 @@ enum BlobToolMode {
     Metadata,
     /// `blob_read`: a visible digest plus a bounded canonical range.
     Read,
+    FindingText,
+    ThreadText,
 }
 
 #[derive(Debug, Deserialize, ToolSchema)]
@@ -100,12 +112,17 @@ impl ToolArgumentValidator for BlobValidator {
                 digest,
                 decoded_bytes: length,
             }),
+            DecodedArguments::ReviewText(reference) => Ok(ToolPreauthorization::BlobRead {
+                digest: reference.digest,
+                decoded_bytes: NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES)
+                    .ok_or_else(|| self.detail.clone())?,
+            }),
         }
     }
 }
 
 #[derive(Clone)]
-/// Compiled generic blob-read declarations and their catalog-backed executor.
+/// Compiled blob and retained review-text declarations with their catalog-backed executor.
 pub struct BlobTools {
     catalog: CompiledToolCatalog,
     executor: BlobToolExecutor,
@@ -129,6 +146,16 @@ impl BlobTools {
             ToolEffectClass::ExternalEffect,
         )
         .map_err(|_| BlobToolConstructionError)?;
+        let finding = compile_contract_definition::<FindingTextContract>(
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::ExternalEffect,
+        )
+        .map_err(|_| BlobToolConstructionError)?;
+        let thread = compile_contract_definition::<ThreadTextContract>(
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::ExternalEffect,
+        )
+        .map_err(|_| BlobToolConstructionError)?;
         let catalog = CompiledToolCatalog::try_new([
             CompiledTool::new(
                 metadata,
@@ -141,6 +168,20 @@ impl BlobTools {
                 read,
                 BlobValidator {
                     mode: BlobToolMode::Read,
+                    detail: detail.clone(),
+                },
+            ),
+            CompiledTool::new(
+                finding,
+                BlobValidator {
+                    mode: BlobToolMode::FindingText,
+                    detail: detail.clone(),
+                },
+            ),
+            CompiledTool::new(
+                thread,
+                BlobValidator {
+                    mode: BlobToolMode::ThreadText,
                     detail,
                 },
             ),
@@ -233,6 +274,8 @@ impl ToolExecutor for BlobToolExecutor {
         let mode = match invocation.request().name().as_str() {
             BLOB_METADATA_NAME => BlobToolMode::Metadata,
             BLOB_READ_NAME => BlobToolMode::Read,
+            FINDING_TEXT_NAME => BlobToolMode::FindingText,
+            REVIEW_THREAD_TEXT_NAME => BlobToolMode::ThreadText,
             _ => return Err(BlobToolExecutorError::Infrastructure),
         };
         let decoded = decode(invocation.request().arguments(), mode)
@@ -281,6 +324,7 @@ impl ToolExecutor for BlobToolExecutor {
                     Err(error) => failed(error)?,
                 }
             }
+            DecodedArguments::ReviewText(reference) => self.review_text(reference).await?,
         };
         Ok(invocation.bind(evidence))
     }
@@ -293,6 +337,7 @@ enum DecodedArguments {
         offset: u64,
         length: NonZeroU64,
     },
+    ReviewText(ReviewTextReference),
 }
 
 fn decode(
@@ -300,6 +345,9 @@ fn decode(
     mode: BlobToolMode,
 ) -> Result<DecodedArguments, BlobToolExecutorError> {
     match mode {
+        BlobToolMode::FindingText | BlobToolMode::ThreadText => {
+            review_text::decode(arguments, mode).map(DecodedArguments::ReviewText)
+        }
         BlobToolMode::Read => {
             let arguments: ReadArguments = serde_json::from_str(arguments.as_str())
                 .map_err(|_| BlobToolExecutorError::Infrastructure)?;
@@ -488,7 +536,7 @@ mod tests {
         let metadata = declaration(definitions.as_ref(), BLOB_METADATA_NAME)?;
         let read = declaration(definitions.as_ref(), BLOB_READ_NAME)?;
 
-        assert_eq!(definitions.len(), 2);
+        assert_eq!(definitions.len(), 4);
         assert_eq!(metadata.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(metadata.effect_class(), ToolEffectClass::EffectFree);
         assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);

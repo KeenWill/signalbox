@@ -166,7 +166,7 @@ kbd {
 .product-navigation {
   display: grid;
   height: 100%;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .product-navigation nav {
   overflow: auto;
@@ -3279,20 +3279,11 @@ kbd {
   justify-content: center;
   min-height: 34px;
 }
-.navigation-collapsed .scenario-entry {
-  display: none;
-}
 
 .open-session-command {
   display: grid;
   gap: 0.5rem;
   padding: 0.75rem;
-}
-.open-session-command input {
-  min-width: 0;
-  width: 100%;
-  min-height: 32px;
-  padding: 0.4rem 0.5rem;
 }
 
 .open-session-dialog {
