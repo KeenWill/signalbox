@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
@@ -13,6 +13,13 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
+import {
+  createRenameCommandId,
+  readRenameCatalog,
+  renameNeedsReadback,
+  renameSession,
+  retainedRename,
+} from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
@@ -79,10 +86,149 @@ const SessionTitle = ({
   return (
     <>
       <span className="catalog-title-text">
-        {savedTitle || automatic.data?.text || `Session ${summary.session_id}`}
+        {savedTitle ||
+          automatic.data?.text ||
+          (summary.repository_watch?.pull_request
+            ? `PR #${summary.repository_watch.pull_request}`
+            : `Session ${summary.session_id}`)}
       </span>
       {truncated && <span className="catalog-title-truncated">Truncated</span>}
     </>
+  )
+}
+
+const SessionMetadata = ({
+  summary,
+  canRename,
+  catalogUpdatedAt,
+  onRename,
+}: {
+  summary: SessionSummary
+  canRename: boolean
+  catalogUpdatedAt: number
+  onRename: () => void
+}) => {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const intent = useRef<{ command_id: string; title: string } | null>(null)
+  const renameButton = useRef<HTMLButtonElement>(null)
+  const titleInput = useRef<HTMLInputElement>(null)
+  const returnRenameFocus = useRef(false)
+  useEffect(() => {
+    if (editing) titleInput.current?.focus()
+    else if (returnRenameFocus.current) {
+      returnRenameFocus.current = false
+      renameButton.current?.focus()
+    }
+  }, [editing])
+  useEffect(() => {
+    if (catalogUpdatedAt && editing && intent.current && !retainedRename(summary.session_id)) {
+      intent.current = null
+      setTitle(summary.title_truncated ? '' : (summary.title_summary ?? ''))
+      setError(null)
+    }
+  }, [catalogUpdatedAt, editing, summary])
+  const provenance = summary.repository_watch
+  const repositoryUrl = provenance
+    ? `https://github.com/${provenance.repository.split('/').map(encodeURIComponent).join('/')}`
+    : undefined
+  const pullRequestUrl = provenance?.pull_request
+    ? `${repositoryUrl}/pull/${encodeURIComponent(provenance.pull_request)}`
+    : undefined
+  const close = () => {
+    returnRenameFocus.current = true
+    setEditing(false)
+  }
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    if (saving || title.length === 0) return
+    setSaving(true)
+    setError(null)
+    try {
+      if (intent.current?.title !== title) {
+        intent.current = { command_id: createRenameCommandId(), title }
+      }
+      await renameSession(summary.session_id, intent.current)
+      intent.current = null
+      close()
+      void queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
+    } catch (failure) {
+      intent.current = retainedRename(summary.session_id)
+      setError(failure instanceof Error ? failure.message : 'Rename failed. Try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <div className="catalog-metadata">
+      {provenance && (
+        <>
+          <a className="state-chip" href={pullRequestUrl ?? repositoryUrl}>
+            {provenance.pull_request ? `PR #${provenance.pull_request}` : provenance.repository}
+          </a>
+          <a className="state-chip" href={pullRequestUrl ?? repositoryUrl}>
+            {enumLabel(provenance.event_kind)}
+          </a>
+        </>
+      )}
+      <button
+        type="button"
+        ref={renameButton}
+        aria-label={`Rename session ${summary.session_id}`}
+        onClick={() => {
+          onRename()
+          intent.current = retainedRename(summary.session_id)
+          setTitle(
+            intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
+          )
+          setError(
+            intent.current
+              ? renameNeedsReadback(summary.session_id)
+                ? 'Rename acknowledged. Waiting for the current title. Save retries the same request.'
+                : 'A previous rename is unconfirmed. Save retries that title.'
+              : null,
+          )
+          setEditing(true)
+        }}
+        disabled={editing || !canRename}
+      >
+        Rename
+      </button>
+      {editing && (
+        <form
+          className="catalog-rename"
+          onSubmit={save}
+          onKeyDownCapture={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            if (!saving) close()
+          }}
+        >
+          <label>
+            Session title
+            <input
+              ref={titleInput}
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              disabled={saving}
+              readOnly={intent.current !== null}
+              required
+            />
+          </label>
+          <button type="submit" disabled={saving || title.length === 0}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" disabled={saving} onClick={close}>
+            Cancel
+          </button>
+          {error && <p role="alert">{error}</p>}
+        </form>
+      )}
+    </div>
   )
 }
 
@@ -118,6 +264,7 @@ export function SessionCatalogSurface({
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
+  const renameSelection = useRef<string | null>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const errorHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
@@ -135,14 +282,16 @@ export function SessionCatalogSurface({
       state.afterActivity ?? null,
     ],
     queryFn: ({ signal }) =>
-      productTransport.readSessions(
-        {
-          sort: state.sort ?? 'activity',
-          includeArchived: state.archived ?? false,
-          afterSession: state.afterSession,
-          afterActivity: state.afterActivity,
-        },
-        signal,
+      readRenameCatalog(() =>
+        productTransport.readSessions(
+          {
+            sort: state.sort ?? 'activity',
+            includeArchived: state.archived ?? false,
+            afterSession: state.afterSession,
+            afterActivity: state.afterActivity,
+          },
+          signal,
+        ),
       ),
     gcTime: 0,
   })
@@ -191,7 +340,9 @@ export function SessionCatalogSurface({
     return () => onTimelineIds([])
   }, [listed, onTimelineIds])
   useEffect(() => {
-    if (keyboardSelection && overlay === null)
+    const openingRename = renameSelection.current === keyboardSelection
+    renameSelection.current = null
+    if (keyboardSelection && overlay === null && !openingRename)
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
   useEffect(() => {
@@ -456,6 +607,16 @@ export function SessionCatalogSurface({
                       </time>
                       <ArrowRight aria-hidden="true" />
                     </button>
+                    <SessionMetadata
+                      summary={summary}
+                      onRename={() => {
+                        renameSelection.current =
+                          keyboardSelection === summary.session_id ? null : summary.session_id
+                        dispatch(actions.timelineSelected(summary.session_id))
+                      }}
+                      catalogUpdatedAt={sessions.dataUpdatedAt}
+                      canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
+                    />
                   </li>
                 ))}
               </ol>

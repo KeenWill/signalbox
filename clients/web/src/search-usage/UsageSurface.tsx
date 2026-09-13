@@ -1,26 +1,22 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useLocation, useNavigate } from '@tanstack/react-router'
 import { useMemo, useState } from 'react'
-import type { WebUsageCallPage } from '../generated/web-contract.mjs'
+import type { WebContractBootstrap, WebUsageCallPage } from '../generated/web-contract.mjs'
 import { costText, tokenSummary, UsageTable, usageGroupIdentity } from '../SearchUsage'
 import { costTotalText, totalCost } from './cost'
-import type { SearchUsageSource, UsageFilters } from './model'
-import { usageSourceOptions } from './queries'
+import { HttpSearchUsageSource, type SearchUsageSource, type UsageFilters } from './model'
 import './usage.css'
 
-export function UsageSurface() {
-  const source = useQuery(usageSourceOptions)
-  if (source.isError)
-    return (
-      <p role="alert">
-        Usage could not load.{' '}
-        <button type="button" onClick={() => void source.refetch()}>
-          Retry
-        </button>
-      </p>
-    )
-  if (!source.data) return <p role="status">Loading usage…</p>
-  return <UsageContent source={source.data} authority="http" />
+export function UsageSurface({ bootstrap }: { bootstrap: WebContractBootstrap }) {
+  const source = useMemo(() => {
+    try {
+      return HttpSearchUsageSource.withAdmittedUsageBootstrap(bootstrap)
+    } catch {
+      return null
+    }
+  }, [bootstrap])
+  if (!source) return <p role="alert">Usage could not load.</p>
+  return <UsageContent source={source} authority="http" />
 }
 
 export function UsageContent({

@@ -235,6 +235,25 @@ fn example_merge_template_uses_the_metadata_boolean_for_conflicts() {
     );
 }
 
+#[test]
+fn example_review_response_finishes_silently_without_a_fix() {
+    let catalog: toml::Value = toml::from_str(include_str!(
+        "../../../../config/session-templates.example.toml"
+    ))
+    .expect("template example");
+    let template = catalog["templates"]
+        .as_array()
+        .expect("templates")
+        .iter()
+        .find(|template| template["name"].as_str() == Some("review-response-sol"))
+        .expect("review-response template");
+    let prompt = template["system_prompt"].as_str().expect("prompt");
+    assert!(prompt.contains("Do not submit a pull request review."));
+    assert!(prompt.contains(
+        "If no thread was fixed and the head is unchanged, finish without a pull request comment."
+    ));
+}
+
 /// Whether one line is commented-out configuration rather than active TOML.
 fn is_inactive(line: &str) -> bool {
     line == "#" || line.starts_with("# ")

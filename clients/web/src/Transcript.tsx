@@ -1,6 +1,16 @@
-import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, elementScroll, useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Bot, CheckCircle2, CircleDot, TerminalSquare } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import {
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from 'react'
+import './session-transcript.css'
 import { type CommandContext, invokeCommand } from './commands'
 import type { TimelineItem, TimelineKind } from './platform'
 import type { DetailMode } from './state'
@@ -104,41 +114,16 @@ export function Transcript({
   const detail = useAppSelector((state) => state.app.detail)
   const density = useAppSelector((state) => state.app.density)
   const selectedId = useAppSelector((state) => state.app.selectedTimeline)
-  const parentRef = useRef<HTMLDivElement>(null)
   const visibleItems = useMemo(() => visibleTimeline(items, detail), [detail, items])
+  const ids = useMemo(() => visibleItems.map((item) => item.id), [visibleItems])
+  const reportRange = useCallback(
+    (start: number, end: number) => {
+      dispatch(actions.transcriptRangeSet({ start, end }))
+    },
+    [dispatch],
+  )
   const firstVisibleId = visibleItems[0]?.id ?? null
   const selected = visibleItems.findIndex((item) => item.id === selectedId)
-  const virtualizer = useVirtualizer({
-    count: visibleItems.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => (density === 'compact' ? 62 : 78),
-    overscan: TRANSCRIPT_OVERSCAN_ROWS,
-    getItemKey: (index) => visibleItems[index]?.id ?? index,
-    rangeExtractor: (range) => {
-      const indexes = defaultRangeExtractor(range)
-      if (selected < 0 || indexes.includes(selected)) return indexes
-      return [...indexes, selected].sort((left, right) => left - right)
-    },
-  })
-  const virtualItems = virtualizer.getVirtualItems()
-  const rangeStart = Math.max((virtualizer.range?.startIndex ?? 0) - TRANSCRIPT_OVERSCAN_ROWS, 0)
-  const rangeEnd = Math.min(
-    (virtualizer.range?.endIndex ?? 0) + TRANSCRIPT_OVERSCAN_ROWS,
-    Math.max(visibleItems.length - 1, 0),
-  )
-
-  useEffect(() => {
-    if (autoFocus) parentRef.current?.focus()
-  }, [autoFocus])
-
-  useEffect(() => {
-    dispatch(actions.transcriptRangeSet({ start: rangeStart, end: rangeEnd }))
-  }, [dispatch, rangeEnd, rangeStart])
-
-  useEffect(() => {
-    if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })
-  }, [selected, virtualizer])
-
   useEffect(() => {
     if (selected < 0 && visibleItems.length > 0) {
       dispatch(actions.timelineSelected(firstVisibleId))
@@ -171,48 +156,258 @@ export function Transcript({
         </div>
         <span className="window-count">{visibleItems.length} loaded</span>
       </header>
-      <div
-        ref={parentRef}
+      <VirtualTranscript
+        ids={ids}
+        selectedId={selectedId}
+        estimateSize={density === 'compact' ? 62 : 78}
+        autoFocus={autoFocus}
+        onRange={reportRange}
         className="virtual-scroll transcript-scroll"
         role="listbox"
         aria-label="Session timeline"
-        aria-activedescendant={selected >= 0 ? (selectedId ?? undefined) : undefined}
-        tabIndex={0}
         onKeyDown={handleListboxKeyDown}
-        data-mounted-rows={virtualItems.length}
-        data-total-loaded={visibleItems.length}
-      >
-        <div className="virtual-stage" style={{ height: virtualizer.getTotalSize() }}>
-          {virtualItems.map((virtualRow) => {
-            const item = visibleItems[virtualRow.index]
-            if (!item) return null
-            const Renderer = renderers[item.kind]
-            return (
-              // biome-ignore lint/a11y: Focus stays on the aria-activedescendant listbox; pointer selection is supplemental.
-              <div
-                id={item.id}
-                key={item.id}
-                role="option"
-                aria-selected={selectedId === item.id}
-                aria-posinset={virtualRow.index + 1}
-                aria-setsize={visibleItems.length}
-                className={`timeline-row kind-${item.kind}`}
-                data-testid={`timeline-${item.id}`}
-                ref={virtualizer.measureElement}
-                data-index={virtualRow.index}
-                style={{ transform: `translateY(${virtualRow.start}px)` }}
-                onClick={() => dispatch(actions.timelineSelected(item.id))}
-              >
-                <span className="turn-rail">T{item.turn}</span>
-                <div className="timeline-content">
-                  <Renderer item={item} detail={detail} />
-                </div>
-                <span className="elapsed">{item.elapsed}</span>
+        renderRow={(index, measure, style) => {
+          const item = visibleItems[index]
+          if (!item) return null
+          const Renderer = renderers[item.kind]
+          return (
+            // biome-ignore lint/a11y: Focus stays on the aria-activedescendant listbox; pointer selection is supplemental.
+            <div
+              id={item.id}
+              key={item.id}
+              role="option"
+              aria-selected={selectedId === item.id}
+              aria-posinset={index + 1}
+              aria-setsize={visibleItems.length}
+              className={`timeline-row kind-${item.kind}`}
+              data-testid={`timeline-${item.id}`}
+              ref={measure}
+              data-index={index}
+              style={style}
+              onClick={() => dispatch(actions.timelineSelected(item.id))}
+            >
+              <span className="turn-rail">T{item.turn}</span>
+              <div className="timeline-content">
+                <Renderer item={item} detail={detail} />
               </div>
-            )
-          })}
-        </div>
-      </div>
+              <span className="elapsed">{item.elapsed}</span>
+            </div>
+          )
+        }}
+      />
     </section>
+  )
+}
+
+export function VirtualTranscript({
+  scrollRef,
+  ids,
+  renderRow,
+  selectedId,
+  revealId,
+  onReveal,
+  pinnedId,
+  estimateSize = 100,
+  className = 'session-transcript-scroll',
+  autoFocus = false,
+  initialEnd = false,
+  followEnd = false,
+  loadingLater = false,
+  onRange,
+  onEndChange,
+  onEdge,
+  onKeyDown,
+  role = 'region',
+  'aria-label': label = 'Session transcript',
+}: {
+  scrollRef?: RefObject<HTMLDivElement | null>
+  ids: readonly string[]
+  renderRow: (
+    index: number,
+    measure: (node: HTMLDivElement | null) => void,
+    style: React.CSSProperties,
+  ) => ReactNode
+  selectedId?: string | null
+  revealId?: string | null
+  onReveal?: () => void
+  pinnedId?: string | null
+  estimateSize?: number
+  className?: string
+  autoFocus?: boolean
+  initialEnd?: boolean
+  followEnd?: boolean
+  loadingLater?: boolean
+  onRange?: (start: number, end: number) => void
+  onEndChange?: (atEnd: boolean) => void
+  onEdge?: (direction: 'before' | 'after') => void
+  onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>
+  role?: 'listbox' | 'region'
+  'aria-label'?: string
+}) {
+  'use no memo'
+  const localParent = useRef<HTMLDivElement>(null)
+  const parent = scrollRef ?? localParent
+  const selected = selectedId ? ids.indexOf(selectedId) : -1
+  const revealed = revealId ? ids.indexOf(revealId) : -1
+  const pinned = pinnedId ? ids.indexOf(pinnedId) : -1
+  const anchor = useRef<{ id: string; offset: number } | null>(null)
+  const initialized = useRef(false)
+  const atEnd = useRef(initialEnd)
+  const restoringLaterAnchor = useRef(false)
+  const restoredOffset = useRef<number | null>(null)
+  const touchStart = useRef<number | null>(null)
+  const virtualizer = useVirtualizer({
+    useFlushSync: false,
+    count: ids.length,
+    getScrollElement: () => parent.current,
+    scrollToFn: (offset, options, instance) => {
+      elementScroll(offset, options, instance)
+      restoredOffset.current = offset + (options.adjustments ?? 0)
+    },
+    estimateSize: () => estimateSize,
+    overscan: TRANSCRIPT_OVERSCAN_ROWS,
+    getItemKey: (index) => ids[index] ?? index,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range)
+      for (const index of [selected, revealed, pinned])
+        if (index >= 0 && !indexes.includes(index)) indexes.push(index)
+      return indexes.sort((a, b) => a - b)
+    },
+  })
+  const rows = virtualizer.getVirtualItems()
+  const start = virtualizer.range?.startIndex ?? 0
+  const end = virtualizer.range?.endIndex ?? 0
+  useEffect(() => {
+    onRange?.(
+      Math.max(0, start - TRANSCRIPT_OVERSCAN_ROWS),
+      Math.min(ids.length - 1, end + TRANSCRIPT_OVERSCAN_ROWS),
+    )
+  }, [start, end, ids.length, onRange])
+  useEffect(() => {
+    if (autoFocus) parent.current?.focus()
+  }, [autoFocus, parent])
+  const scrolledSelection = useRef<{
+    id: typeof selectedId
+    virtualizer: typeof virtualizer
+  } | null>(null)
+  useEffect(() => {
+    if (selected < 0) {
+      scrolledSelection.current = null
+      return
+    }
+    if (
+      scrolledSelection.current?.id === selectedId &&
+      scrolledSelection.current?.virtualizer === virtualizer
+    )
+      return
+    virtualizer.scrollToIndex(selected, { align: 'auto' })
+    scrolledSelection.current = { id: selectedId, virtualizer }
+  }, [selected, selectedId, virtualizer])
+  const reportEnd = useEffectEvent((value: boolean) => onEndChange?.(value))
+  useLayoutEffect(() => {
+    if (loadingLater) {
+      restoringLaterAnchor.current = true
+      atEnd.current = false
+      return
+    }
+    if (!ids.length) return
+    restoredOffset.current = null
+    if (!initialized.current) {
+      initialized.current = true
+      if (initialEnd && selected < 0) virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
+    } else if (followEnd && atEnd.current) {
+      virtualizer.scrollToIndex(ids.length - 1, { align: 'end' })
+    } else if (anchor.current) {
+      const index = ids.indexOf(anchor.current.id)
+      const position = index < 0 ? undefined : virtualizer.getOffsetForIndex(index, 'start')
+      if (position) virtualizer.scrollToOffset(position[0] + anchor.current.offset)
+      if (restoringLaterAnchor.current) {
+        const element = parent.current
+        atEnd.current =
+          !!element && element.scrollHeight - element.scrollTop - element.clientHeight <= 1
+        reportEnd(atEnd.current)
+      }
+    }
+    restoringLaterAnchor.current = false
+    restoredOffset.current ??= parent.current?.scrollTop ?? null
+  }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
+  const reportReveal = useEffectEvent(() => onReveal?.())
+  useLayoutEffect(() => {
+    if (!revealId || revealed < 0) return
+    virtualizer.scrollToIndex(revealed, { align: 'auto' })
+    const frame = requestAnimationFrame(() => reportReveal())
+    return () => cancelAnimationFrame(frame)
+  }, [revealed, revealId, virtualizer])
+  const remember = () => {
+    const offset = parent.current?.scrollTop ?? 0
+    const row = virtualizer.getVirtualItems().find((item) => item.end > offset)
+    anchor.current = row ? { id: String(row.key), offset: offset - row.start } : null
+  }
+  const edge = (direction?: 'before' | 'after') => {
+    const element = parent.current
+    if (!element) return
+    // Measuring or evicting rows can clamp a requested scroll before its event arrives.
+    const restored =
+      direction === undefined &&
+      restoredOffset.current !== null &&
+      Math.max(0, Math.min(restoredOffset.current, element.scrollHeight - element.clientHeight)) ===
+        element.scrollTop
+    if (!restored) restoredOffset.current = null
+    remember()
+    atEnd.current =
+      !loadingLater &&
+      direction !== 'before' &&
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 1
+    onEndChange?.(atEnd.current)
+    if (restored) return
+    // An explicit edge gesture already handled a queued scroll at this same offset.
+    if (direction !== undefined) restoredOffset.current = element.scrollTop
+    if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
+    else if (
+      element.scrollHeight - element.scrollTop - element.clientHeight < estimateSize &&
+      direction !== 'before'
+    )
+      onEdge?.('after')
+  }
+  return (
+    // biome-ignore lint/a11y: The typed role is either an interactive listbox or a named, keyboard-scrollable region.
+    <div
+      ref={parent}
+      className={className}
+      role={role}
+      aria-label={label}
+      tabIndex={0}
+      aria-activedescendant={
+        role === 'listbox' && selected >= 0 ? (selectedId ?? undefined) : undefined
+      }
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (event.target !== event.currentTarget || event.defaultPrevented) return
+        if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) edge('before')
+        if (['ArrowDown', 'PageDown', 'End'].includes(event.key)) edge('after')
+      }}
+      onTouchStart={(event) => {
+        touchStart.current = event.touches[0]?.clientY ?? null
+      }}
+      onTouchMove={(event) => {
+        const position = event.touches[0]?.clientY
+        if (position !== undefined && touchStart.current !== null)
+          edge(position > touchStart.current ? 'before' : 'after')
+      }}
+      onScroll={() => edge()}
+      onWheel={(event) => edge(event.deltaY < 0 ? 'before' : 'after')}
+      data-mounted-rows={rows.length}
+      data-total-loaded={ids.length}
+    >
+      <div className="virtual-stage" style={{ height: virtualizer.getTotalSize() }}>
+        {rows.map((row) =>
+          renderRow(row.index, virtualizer.measureElement, {
+            position: 'absolute',
+            width: '100%',
+            transform: `translateY(${row.start}px)`,
+          }),
+        )}
+      </div>
+    </div>
   )
 }
