@@ -133,7 +133,10 @@ test('persists levels and reads bounded turn detail', async ({ page }, testInfo)
   await page.reload()
   await expect(page.getByRole('radio', { name: 'Tools', exact: true })).toBeChecked()
   await expect(
-    transcript.getByRole('button', { name: 'Open turn details for exec_command', exact: true }),
+    transcript.getByRole('button', {
+      name: /^Open turn details for exec_command(?: · .+)?$/,
+      exact: true,
+    }),
   ).not.toHaveAttribute('aria-expanded')
   await page.getByRole('radio', { name: 'All details', exact: true }).check()
   await expect.poll(() => turnReads.length).toBeGreaterThan(0)
@@ -155,7 +158,7 @@ test('restores the selected Tools level after collapsing a tool-opened turn', as
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const summary = transcript.getByRole('region', { name: 'exec_command details', exact: true })
   const openTool = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   const heading = transcript.getByRole('button', { name: 'Open turn details', exact: true })
@@ -252,7 +255,10 @@ test('reads later tool members on demand in Tools mode', async ({ page }) => {
   const details = transcript.getByRole('region', { name: 'More message text' })
   await transcript.getByRole('button', { name: 'Show more tools', exact: true }).click()
   await expect(
-    transcript.getByRole('button', { name: 'Open turn details for verify_release', exact: true }),
+    transcript.getByRole('button', {
+      name: /^Open turn details for verify_release(?: · .+)?$/,
+      exact: true,
+    }),
   ).toBeVisible()
   await expect(
     transcript.getByRole('region', { name: 'verify_release details', exact: true }),
@@ -790,10 +796,14 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   const chips = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveText('exec_command · Failed')
+  await expect(chips.first()).toHaveAccessibleName('Open turn details for exec_command · Failed')
+  await expect(chips.last()).toHaveText('exec_command · Completed')
+  await expect(chips.last()).toHaveAccessibleName('Open turn details for exec_command · Completed')
   const slots = transcript.locator('.session-tool-slot')
   await expect(slots.first().getByText('Failure · Attempt lost on restart')).toBeVisible()
   await slots.first().getByRole('button', { name: 'Read more', exact: true }).click()
@@ -1434,7 +1444,10 @@ for (const afterOutput of [false, true]) {
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     const chips = transcript.getByRole('region', { name: 'Tools used' })
     await expect(
-      chips.getByRole('button', { name: 'Open turn details for exec_command', exact: true }),
+      chips.getByRole('button', {
+        name: /^Open turn details for exec_command(?: · .+)?$/,
+        exact: true,
+      }),
     ).toBeVisible()
     if (afterOutput) {
       await expect(
@@ -1453,7 +1466,7 @@ for (const afterOutput of [false, true]) {
     unavailable = false
     await chips.getByRole('button', { name: 'Retry more tools', exact: true }).click()
     const second = chips.getByRole('button', {
-      name: 'Open turn details for read_file',
+      name: /^Open turn details for read_file(?: · .+)?$/,
       exact: true,
     })
     await expect(second).toBeVisible()
@@ -1462,7 +1475,7 @@ for (const afterOutput of [false, true]) {
     ).toContainText('Arguments for tool 1')
     await chips.getByRole('button', { name: 'Show more tools', exact: true }).click()
     const third = chips.getByRole('button', {
-      name: 'Open turn details for apply_patch',
+      name: /^Open turn details for apply_patch(?: · .+)?$/,
       exact: true,
     })
     await expect(third).toBeVisible()
@@ -1845,7 +1858,7 @@ test('keeps an open request disclosure and its continued text when physical atte
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const chips = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
@@ -2123,10 +2136,14 @@ test('identifies payload-free physical attempt states after a successful retry',
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const chips = transcript.getByRole('button', {
-    name: 'Open turn details for exec_command',
+    name: /^Open turn details for exec_command(?: · .+)?$/,
     exact: true,
   })
   await expect(chips).toHaveCount(2)
+  await expect(chips.first()).toHaveText('exec_command · Failed')
+  await expect(chips.first()).toHaveAccessibleName('Open turn details for exec_command · Failed')
+  await expect(chips.last()).toHaveText('exec_command · Completed')
+  await expect(chips.last()).toHaveAccessibleName('Open turn details for exec_command · Completed')
   const slots = transcript.locator('.session-tool-slot')
   await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
     'Failure · Attempt lost on restart',
