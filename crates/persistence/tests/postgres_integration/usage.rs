@@ -15,6 +15,299 @@ const SECOND_INPUT_TOKENS: u64 = 17;
 const THIRD_INPUT_TOKENS: u64 = 23;
 const SELECTED_OUTPUT_TOKENS: u64 = 29;
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn initial_session_title_is_claimed_once_preserves_manual_names_and_records_usage()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{UsageCallKind, UsageCallScope, UsageTokenAxes};
+    use signalbox_domain::{Actor, ReplaceSessionMetadata, SessionMetadataContent};
+    use signalbox_persistence::{
+        session_metadata::SessionMetadataRepository,
+        session_titles::{SessionTitleCall, SessionTitleRepository},
+    };
+    let (container, pool, _) = migrated_postgres().await?;
+    let seed = 0x98_000;
+    let (fixture, mut model_repository, authorized) =
+        authorize_checkpointed_model_call(&pool, seed).await?;
+    let titles = SessionTitleRepository::new(pool.clone());
+    let mut call = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        session: fixture.session,
+        selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            seed + 6,
+        ))),
+        credential_reference: "codex-title-fixture".to_owned(),
+        input_includes_cache_tokens: false,
+        initial_for_turn: Some(fixture.turn),
+    };
+    assert!(
+        !titles.prepare(&mut call, &Default::default()).await?,
+        "an active turn must not trigger a title call"
+    );
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new("Database indexing is complete".to_owned())
+                    .expect("assistant text"),
+            ],
+        });
+    model_repository
+        .commit_observation(
+            fixture.session,
+            observation,
+            signalbox_application::ModelCallTerminalIdentityCandidates::Exact(
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                )),
+            ),
+            |_| TurnId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    assert!(titles.prepare(&mut call, &Default::default()).await?);
+    assert!(
+        !titles
+            .prepare(
+                &mut SessionTitleCall {
+                    call: ModelCallId::from_uuid(Uuid::now_v7()),
+                    ..call.clone()
+                },
+                &Default::default()
+            )
+            .await?,
+        "duplicate completion delivery must not call the model again"
+    );
+    assert!(
+        titles
+            .conversation(fixture.session, 4096)
+            .await?
+            .contains("Database indexing is complete")
+    );
+    let metadata = SessionMetadataRepository::new(pool.clone());
+    let content = SessionMetadataContent::try_new(
+        None,
+        vec!["work".to_owned()],
+        vec![("source".to_owned(), "fixture".to_owned())],
+        true,
+    )
+    .expect("metadata");
+    metadata
+        .handle(ReplaceSessionMetadata::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            fixture.session,
+            content,
+        ))
+        .await?;
+    titles.authorize(call.call).await?;
+    let usage = UsageTokenAxes {
+        input: Some(17),
+        output: Some(5),
+        cache_creation_input: None,
+        cache_read_input: None,
+    };
+    titles
+        .finish(call.call, Some("Database indexing work"), usage)
+        .await?;
+    let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    assert!(
+        metadata
+            .install_generated_title(
+                command,
+                fixture.session,
+                "Database indexing work".to_owned()
+            )
+            .await?
+    );
+    let snapshot = metadata
+        .load_session_metadata(fixture.session)
+        .await?
+        .expect("session");
+    assert_eq!(snapshot.content().title(), Some("Database indexing work"));
+    assert_eq!(snapshot.content().tags().collect::<Vec<_>>(), vec!["work"]);
+    assert_eq!(
+        snapshot.content().attributes().collect::<Vec<_>>(),
+        vec![("source", "fixture")]
+    );
+    assert!(snapshot.content().archived());
+    assert_eq!(
+        SessionMetadataRepository::for_title_update(pool.clone())
+            .load_command(command)
+            .await?
+            .expect("generated receipt")
+            .command()
+            .actor(),
+        Actor::Core
+    );
+    let manual = SessionMetadataContent::try_new(
+        Some("My chosen name".to_owned()),
+        Vec::new(),
+        Vec::new(),
+        false,
+    )
+    .expect("manual name");
+    metadata
+        .handle(ReplaceSessionMetadata::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            fixture.session,
+            manual,
+        ))
+        .await?;
+    assert!(
+        !metadata
+            .install_generated_title(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                fixture.session,
+                "Late generated name".to_owned()
+            )
+            .await?
+    );
+    let mut suggestion = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        initial_for_turn: None,
+        ..call
+    };
+    assert!(titles.prepare(&mut suggestion, &Default::default()).await?);
+    titles.authorize(suggestion.call).await?;
+    titles
+        .finish(suggestion.call, Some("Suggested new name"), usage)
+        .await?;
+    assert_eq!(
+        metadata
+            .load_session_metadata(fixture.session)
+            .await?
+            .expect("session")
+            .content()
+            .title(),
+        Some("My chosen name")
+    );
+    let page = UsageRepository::new(pool.clone())
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(fixture.session),
+                    call_kind: Some(UsageCallKind::SessionTitle),
+                    ..UsageSelection::all()
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(2).expect("page limit"),
+            after: None,
+        })
+        .await?;
+    assert_eq!(page.calls().len(), 2);
+    assert_eq!(page.calls()[0].scope, UsageCallScope::SessionTitle);
+    assert_eq!(page.calls()[0].tokens.input, Some(17));
+    assert_eq!(page.calls()[0].tokens.output, Some(5));
+    // Title calls compete for the same registered profiles as ordinary calls.
+    use crate::model_call_execution_and_recovery::{
+        active_credential_pool_fixture, prepare_and_authorize_pool_call,
+    };
+    use signalbox_persistence::{
+        credential_invocations, model_execution::CredentialPoolRuntimeExhaustion,
+    };
+    use std::num::NonZeroU32;
+    credential_invocations::replace_registrations(
+        &pool,
+        &[("available-title-home".to_owned(), NonZeroU32::new(1))],
+    )
+    .await?;
+    sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin) VALUES ('profile_quarantine', 'quarantined-title-home', 'codex_home')").execute(&pool).await?;
+    let policy = CredentialPoolRuntimePolicy::new(
+        "title-pool",
+        [
+            "quarantined-title-home",
+            "displaced-title-home",
+            "available-title-home",
+        ]
+        .into_iter()
+        .map(|reference| {
+            CredentialPoolRuntimeMember::new(reference, NonZeroU32::new(1).expect("priority"))
+        })
+        .collect::<Vec<_>>(),
+        CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    );
+    let pool_seed = seed + 0x1000;
+    let (pool_session, pool_turn, pool_repository) = active_credential_pool_fixture(
+        &pool,
+        pool_seed,
+        "title-pool",
+        &[
+            "displaced-title-home",
+            "quarantined-title-home",
+            "available-title-home",
+        ],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let pool_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(pool_seed + 4),
+    ));
+    let pools = std::collections::HashMap::from([(pool_target, policy)]);
+    let pool_repository = pool_repository.with_credential_pools(pools.clone());
+    let (ordinary, _) =
+        prepare_and_authorize_pool_call(&pool_repository, pool_session, pool_seed + 100).await?;
+    sqlx::query("INSERT INTO credential_pool_member_action (pool_name, credential_reference, action_kind, observed_session_id, observed_turn_id, observation_model_call_id, cause_kind) VALUES ('title-pool','displaced-title-home','switch_next_turn',$1,$2,$3,'credential_rejected')")
+        .bind(pool_session.into_uuid()).bind(pool_turn.into_uuid()).bind(ordinary.call().id().into_uuid()).execute(&pool).await?;
+    suggestion.session = pool_session;
+    suggestion.target = pool_target;
+
+    let mut admitted = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        ..suggestion.clone()
+    };
+    assert!(titles.prepare(&mut admitted, &pools).await?);
+    assert_eq!(admitted.credential_reference, "available-title-home");
+    let mut contended = SessionTitleCall {
+        call: ModelCallId::from_uuid(Uuid::now_v7()),
+        ..suggestion
+    };
+    assert!(
+        !titles.prepare(&mut contended, &pools).await?,
+        "a saturated pool cannot invoke a title model"
+    );
+    titles
+        .finish(
+            admitted.call,
+            None,
+            UsageTokenAxes {
+                input: None,
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+        )
+        .await?;
+    assert!(
+        titles.prepare(&mut contended, &pools).await?,
+        "an uninvoked terminal title releases its reservation"
+    );
+    titles.authorize(contended.call).await?;
+    credential_invocations::register_process(&pool, contended.call, 42, "title-process-fixture")
+        .await?;
+    titles.finish(contended.call, None, usage).await?;
+    assert_eq!(
+        credential_invocations::process_group(&pool, contended.call).await?,
+        Some((42, "title-process-fixture".to_owned()))
+    );
+    credential_invocations::release(&pool, contended.call).await?;
+    assert_eq!(
+        credential_invocations::process_group(&pool, contended.call).await?,
+        None
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn terminal_reported_usage_call(
     pool: &PgPool,
     seed: u128,

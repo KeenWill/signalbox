@@ -314,8 +314,8 @@ impl SessionMetadataSnapshot {
 ///
 /// Structural equality and hashing exclude `command_id` and cover every other
 /// caller-supplied semantic field. Construction admits only the user boundary
-/// and execution of one exact tool request; callers cannot supply an arbitrary
-/// actor.
+/// and execution of one exact tool request or daemon title generation; callers
+/// cannot supply an arbitrary actor.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionMetadata {
     command_id: DurableCommandId,
@@ -325,6 +325,20 @@ pub struct ReplaceSessionMetadata {
 }
 
 impl ReplaceSessionMetadata {
+    /// Constructs metadata installed by daemon title generation.
+    pub const fn for_title_generation(
+        command_id: DurableCommandId,
+        session: SessionId,
+        replacement: SessionMetadataContent,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            actor: Actor::Core,
+            replacement,
+        }
+    }
+
     /// Constructs the complete canonical user payload.
     pub const fn new(
         command_id: DurableCommandId,

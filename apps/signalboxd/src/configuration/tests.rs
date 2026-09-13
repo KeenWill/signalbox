@@ -891,6 +891,92 @@ fn absent_judge_selection_preserves_the_judged_model() {
 }
 
 #[test]
+fn session_titles_use_the_selected_models_settings_profile() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let executable = std::env::current_exe().expect("fixture executable");
+    let source = configuration_with_codex_paths(&executable, directory.path());
+    let source = format!(
+        r#"{source}
+[[model_settings_profiles]]
+name = "title-settings"
+reasoning_level = "low"
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "codex"
+provider_model = "gpt-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["low"]
+settings_profile = "title-settings"
+
+[session_titles]
+selection_id = "10000000-0000-4000-8000-000000000002"
+"#
+    );
+    let configured = HubModelConfiguration::parse(&source).expect("title model is configured");
+    let selection = configured
+        .session_title_selection()
+        .expect("title selection");
+    assert_eq!(
+        selection,
+        DirectModelSelection::from_uuid(uuid::uuid!("10000000-0000-4000-8000-000000000002"))
+    );
+    let settings = configured
+        .validate_session_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            ModelSettingsOverlay::inherit_all(),
+        )
+        .expect("configured selection")
+        .expect("supported settings");
+    assert_eq!(
+        settings.effective().reasoning_level(),
+        Some(ReasoningLevel::Low)
+    );
+    let (call_selection, target, call_settings) = configured
+        .session_title_settings()
+        .expect("resolved title operation");
+    assert_eq!(call_selection, selection);
+    assert_eq!(
+        target.identity().into_uuid(),
+        uuid::uuid!("20000000-0000-4000-8000-000000000002")
+    );
+    assert_eq!(
+        call_settings.reasoning_level,
+        Some(signalbox_model_runtime::ReasoningLevel::Low)
+    );
+}
+
+#[test]
+fn session_titles_have_no_implicit_model_selection() {
+    let configured = HubModelConfiguration::parse(CONFIGURATION).expect("configuration");
+    assert_eq!(configured.session_title_selection(), None);
+}
+
+#[test]
+fn session_titles_reject_invalid_or_unconfigured_selections() {
+    for table in [
+        "[session_titles]",
+        "[session_titles]\nselection_id = 1",
+        "[session_titles]\nselection_id = \"not-a-uuid\"",
+        "[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000002\"",
+        "[session_titles]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\nextra = true",
+    ] {
+        assert_eq!(
+            HubModelConfiguration::parse(&format!("{CONFIGURATION}\n{table}")).err(),
+            Some(HubModelConfigurationError::InvalidSessionTitles),
+            "invalid title configuration: {table}"
+        );
+    }
+    let scalar = CONFIGURATION.replacen("version = 1", "version = 1\nsession_titles = true", 1);
+    assert_eq!(
+        HubModelConfiguration::parse(&scalar).err(),
+        Some(HubModelConfigurationError::InvalidSessionTitles)
+    );
+}
+
+#[test]
 fn absent_repository_watch_configuration_starts_no_watch_tasks() {
     let configured =
         HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");

@@ -54,6 +54,7 @@
 | session_metadata | 5 | 0 | 0 | [session_metadata](session_metadata.md) |
 | session_placement | 3 | 0 | 0 | [session_placement](session_placement.md) |
 | session_timeline | 3 | 0 | 0 | [session_timeline](session_timeline.md) |
+| session_titles | 2 | 0 | 0 | [session_titles](session_titles.md) |
 | session_workspace | 1 | 0 | 1 | [session_workspace](session_workspace.md) |
 | start_eligible_turn | 9 | 0 | 0 | [start_eligible_turn](start_eligible_turn.md) |
 | startup | 4 | 0 | 0 | [startup](startup.md) |

@@ -310,6 +310,15 @@ pub(super) async fn load_durable_pool_exclusions(
     turn: TurnId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
+    load_pool_exclusions(connection, session, Some(turn), policy).await
+}
+
+async fn load_pool_exclusions(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: Option<TurnId>,
+    policy: &CredentialPoolRuntimePolicy,
+) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
     let members = credential_pool_member_references(policy);
     lock_credential_pool_action_heads(connection, policy).await?;
     let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
@@ -317,12 +326,12 @@ pub(super) async fn load_durable_pool_exclusions(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion AS chain
           WHERE session_id = $1
-            AND turn_id = $2
+            AND ($2::uuid IS NULL OR turn_id = $2)
             AND NOT EXISTS (SELECT 1 FROM credential_pool_exclusion_release released
                             WHERE released.predecessor_model_call_id = chain.predecessor_model_call_id)",
     )
     .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
+    .bind(turn.map(turn_id_to_uuid))
     .fetch_all(&mut *connection)
     .await?
     .into_iter()
@@ -372,7 +381,7 @@ pub(super) async fn load_durable_pool_exclusions(
             "avoid_new_sessions" => !completed_references.contains(&reference),
             "switch_next_turn" => {
                 observed_session == session_id_to_uuid(session)
-                    && observed_turn != turn_id_to_uuid(turn)
+                    && Some(observed_turn) != turn.map(turn_id_to_uuid)
             }
             _ => {
                 return Err(ModelCallCorruption::Unsupported {
@@ -494,6 +503,49 @@ pub(super) async fn select_runtime_pool_credential(
     default_reference: ModelCallCredentialReference,
     policies: &CredentialPoolRuntimeCatalog,
 ) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
+    select_pool_credential(
+        connection,
+        session,
+        Some((turn, attempt)),
+        serving_evidence,
+        default_reference,
+        policies,
+    )
+    .await
+}
+
+/// Session-level calls share ordinary admission without creating turn waits or successors.
+pub(crate) async fn select_session_pool_credential(
+    connection: &mut PgConnection,
+    session: SessionId,
+    target: ResolvedProviderTarget,
+    default_reference: ModelCallCredentialReference,
+    policies: &CredentialPoolRuntimeCatalog,
+) -> Result<Option<ModelCallCredentialReference>, ModelCallRepositoryError> {
+    Ok(select_pool_credential(
+        connection,
+        session,
+        None,
+        PreparedServingEvidence {
+            effective_target: target,
+            credential_model_family: None,
+            limit: None,
+        },
+        default_reference,
+        policies,
+    )
+    .await?
+    .reference)
+}
+
+async fn select_pool_credential(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn_attempt: Option<(TurnId, TurnAttemptId)>,
+    serving_evidence: PreparedServingEvidence<'_>,
+    default_reference: ModelCallCredentialReference,
+    policies: &CredentialPoolRuntimeCatalog,
+) -> Result<SelectedRuntimePoolCredential, ModelCallRepositoryError> {
     let predecessor: Option<(Uuid, bool)> = sqlx::query_as(
         "SELECT successor.predecessor_model_call_id,
                 successor.cause_kind = 'quota_exhausted' OR EXISTS (
@@ -506,7 +558,7 @@ pub(super) async fn select_runtime_pool_credential(
           WHERE successor.successor_turn_attempt_id = $1
           UNION ALL SELECT waiting.predecessor_model_call_id, EXISTS (SELECT 1 FROM model_call predecessor WHERE predecessor.model_call_id = waiting.predecessor_model_call_id AND predecessor.terminal_provider_failure_cause = 'quota_exhausted') OR EXISTS (SELECT 1 FROM credential_pool_chain_exclusion exclusion WHERE exclusion.predecessor_model_call_id = waiting.predecessor_model_call_id) FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL",
     )
-    .bind(attempt.into_uuid())
+    .bind(turn_attempt.map(|(_, attempt)| attempt.into_uuid()))
     .fetch_optional(&mut *connection)
     .await?;
     let (policy, predecessor_reference, predecessor_rotated) = match predecessor {
@@ -549,13 +601,18 @@ pub(super) async fn select_runtime_pool_credential(
             (Some(policy), Some(reference), rotated)
         }
         None => (
-            credential_pool_records::admission_policy(
-                connection,
-                attempt,
-                serving_evidence.effective_target,
-                policies,
-            )
-            .await?,
+            match turn_attempt {
+                Some((_, attempt)) => {
+                    credential_pool_records::admission_policy(
+                        connection,
+                        attempt,
+                        serving_evidence.effective_target,
+                        policies,
+                    )
+                    .await?
+                }
+                None => policies.get(&serving_evidence.effective_target).cloned(),
+            },
             None,
             false,
         ),
@@ -587,7 +644,13 @@ pub(super) async fn select_runtime_pool_credential(
             Some(Arc::new(|| false))
         };
     }
-    let durable = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
+    let durable = load_pool_exclusions(
+        connection,
+        session,
+        turn_attempt.map(|(turn, _)| turn),
+        &policy,
+    )
+    .await?;
     let observed_at = durable.observed_at;
     let profiles = policy
         .members()
@@ -681,7 +744,8 @@ pub(super) async fn select_runtime_pool_credential(
     let retry_contended = predecessor_reference
         .as_deref()
         .is_some_and(|reference| bounded.iter().any(|member| member.profile == reference));
-    let wait = if selected.is_none()
+    let wait = if let Some((turn, _)) = turn_attempt
+        && selected.is_none()
         && (predecessor_reference.is_none() || predecessor_rotated || retry_contended)
     {
         super::credential_wait::admission_snapshot(
@@ -698,8 +762,9 @@ pub(super) async fn select_runtime_pool_credential(
         None
     };
     let releasing_wait: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM credential_availability_wait WHERE wait_attempt_id = $1 AND consumed_by_attempt_id IS NULL) OR EXISTS (SELECT 1 FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL)")
-        .bind(attempt.into_uuid()).fetch_one(&mut *connection).await?;
-    if selected.is_none()
+        .bind(turn_attempt.map(|(_, attempt)| attempt.into_uuid())).fetch_one(&mut *connection).await?;
+    if let Some((turn, attempt)) = turn_attempt
+        && selected.is_none()
         && wait.is_none()
         && !releasing_wait
         && policy

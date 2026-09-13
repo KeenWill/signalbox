@@ -22,6 +22,51 @@ use super::{
     web_input_conflict,
 };
 
+pub(super) async fn suggest_title(
+    State(state): State<WebApiState>,
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
+    Path(session_id): Path<String>,
+    request: Request,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SuggestRequest {}
+    if let Err(response) = decode_bounded_json::<SuggestRequest>(request).await {
+        return response;
+    }
+    let Ok(session) = parse_canonical_session_id(&session_id) else {
+        return invalid_title();
+    };
+    let service = state
+        .pool
+        .and_then(|pool| reload.and_then(|reload| reload.0.session_titles(pool)));
+    let Some(service) = service else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_titles_unavailable",
+            "Session name suggestions are not configured.",
+        );
+    };
+    match service.generate(session, None).await {
+        Ok(Some(title)) => {
+            axum::Json(signalbox_web_contract::WebSessionTitleSuggestion { title }).into_response()
+        }
+        Ok(None) | Err(crate::session_titles::TitleError::NotFound) => application_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "The session does not exist.",
+        ),
+        Err(error) => {
+            tracing::warn!(session_id = %session.into_uuid(), ?error, "session title suggestion failed");
+            application_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_title_generation_failed",
+                "A name could not be suggested. Try again.",
+            )
+        }
+    }
+}
+
 pub(super) async fn replace_title(
     State(state): State<WebApiState>,
     Path(session_id): Path<String>,

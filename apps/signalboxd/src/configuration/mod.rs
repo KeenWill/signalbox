@@ -154,6 +154,7 @@ pub struct HubModelConfiguration {
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_wait_timeout: Option<std::time::Duration>,
     approval_judge_selection: Option<DirectModelSelection>,
+    session_title_selection: Option<DirectModelSelection>,
     convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
@@ -203,6 +204,7 @@ impl HubModelConfiguration {
             tool_approval_postures,
             approval_wait_timeout,
             approval_judge_selection,
+            session_title_selection,
             convergence,
             workspace_instructions,
             tool_proposal_limits,
@@ -523,6 +525,10 @@ impl HubModelConfiguration {
         {
             return Err(HubModelConfigurationError::DanglingApprovalJudgeSelection);
         }
+        if session_title_selection.is_some_and(|selection| !direct_selections.contains(&selection))
+        {
+            return Err(HubModelConfigurationError::InvalidSessionTitles);
+        }
 
         let mut aliases = HashMap::new();
         if let Some(alias_tables) = document
@@ -668,6 +674,7 @@ impl HubModelConfiguration {
             tool_approval_postures,
             approval_wait_timeout,
             approval_judge_selection,
+            session_title_selection,
             convergence,
             repository_watch,
             blob_storage,
@@ -1378,6 +1385,43 @@ impl HubModelConfiguration {
     /// call to supply the default when configuration omits the table.
     pub const fn configured_approval_judge_selection(&self) -> Option<DirectModelSelection> {
         self.approval_judge_selection
+    }
+
+    /// Returns the configured model selection for session title generation.
+    pub const fn session_title_selection(&self) -> Option<DirectModelSelection> {
+        self.session_title_selection
+    }
+
+    pub(crate) fn session_title_settings(
+        &self,
+    ) -> Option<(
+        DirectModelSelection,
+        ResolvedProviderTarget,
+        signalbox_model_runtime::ModelSettings,
+    )> {
+        let selection = self.session_title_selection?;
+        let validated = self
+            .validate_session_model_settings(
+                ModelSelectionRequest::Direct(selection),
+                ModelSettingsOverlay::inherit_all(),
+            )?
+            .ok()?;
+        let effective = validated.effective();
+        let route = self.resolve_direct_model(selection)?;
+        let target = self
+            .model_capabilities
+            .resolve(selection)?
+            .serving_target(route.target(), effective.fast_mode())?;
+        let definition = self.runtime_models.resolve(target)?;
+        let mut settings =
+            signalbox_model_runtime::ModelSettings::new(definition.max_output_tokens());
+        settings.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
+        settings.service_tier = effective.service_tier().map(runtime_service_tier);
+        settings.fast_mode = match effective.fast_mode() {
+            FastMode::Disabled => signalbox_model_runtime::FastMode::Disabled,
+            FastMode::Enabled => signalbox_model_runtime::FastMode::Enabled,
+        };
+        Some((selection, target, settings))
     }
 
     /// Returns the human approval deadline duration; `None` disables expiry.

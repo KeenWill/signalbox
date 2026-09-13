@@ -2464,6 +2464,7 @@ async fn run_hub_incarnation(
     })?;
     let configuration_reload = configuration_reload
         .with_runtime_factory(runtime_factory.clone())
+        .with_title_invocation_processes(invocation_processes.clone())
         .with_github_tool_credential(configuration.github_token_file())
         .with_integration_credentials(integration_credentials);
     let goal_disposition = PostgresGoalPassDisposition::new(

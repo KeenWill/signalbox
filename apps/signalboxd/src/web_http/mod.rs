@@ -565,6 +565,10 @@ fn production_router_with_budget(
             "/sessions/{session_id}/metadata",
             patch(metadata::replace_title),
         )
+        .route(
+            "/sessions/{session_id}/title/suggest",
+            post(metadata::suggest_title),
+        )
         .route("/sessions/{session_id}/input", post(session_submit_input))
         .route_layer(middleware::from_fn(validate_json_mutation))
         .route_layer(middleware::from_fn(validate_admitted_host))

@@ -115,6 +115,8 @@ pub struct ConfigurationReload {
     startup: toml::Table,
     watch: Option<RepositoryWatchRuntime>,
     runtime_factory: Option<crate::model_catalog_runtime::ModelRuntimeFactory>,
+    title_invocation_processes:
+        Option<crate::credential_invocations::CredentialInvocationProcesses>,
     github_tool_credential: Option<PathBuf>,
     integration_credentials: crate::FileCredentialAccess,
     convergence: PostgresConvergenceSweepStore,
@@ -260,6 +262,7 @@ impl ConfigurationReload {
             pool,
             watch: None,
             runtime_factory: None,
+            title_invocation_processes: None,
             github_tool_credential: None,
             integration_credentials: crate::FileCredentialAccess::from_files([]),
             model_path,
@@ -295,6 +298,29 @@ impl ConfigurationReload {
     pub fn with_github_tool_credential(mut self, path: PathBuf) -> Self {
         self.github_tool_credential = Some(path);
         self
+    }
+
+    /// Shares ordinary invocation supervision with session-title calls.
+    pub fn with_title_invocation_processes(
+        mut self,
+        processes: crate::credential_invocations::CredentialInvocationProcesses,
+    ) -> Self {
+        self.title_invocation_processes = Some(processes);
+        self
+    }
+
+    pub(crate) fn session_titles(
+        &self,
+        pool: sqlx::PgPool,
+    ) -> Option<crate::session_titles::SessionTitles> {
+        let models = self.catalogs().models;
+        models.session_title_selection()?;
+        Some(crate::session_titles::SessionTitles::new(
+            pool,
+            models,
+            self.runtime_factory.clone()?,
+            self.title_invocation_processes.clone()?,
+        ))
     }
 
     /// Rechecks the startup integration credential files on each reload.
