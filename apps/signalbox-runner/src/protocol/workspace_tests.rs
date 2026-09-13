@@ -33,6 +33,7 @@ fn connection(
         last_recorded: None,
         workspace: None,
         last_workspace_recorded: None,
+        last_provision_failure: None,
         receipt,
         advertisement: config.advertisement().clone(),
         configuration: Some(config),
@@ -42,6 +43,12 @@ fn connection(
     }
 }
 fn enrolled(directory: &TempDir) -> RunnerStateRoot {
+    enrolled_with_configuration(directory, &configuration())
+}
+fn enrolled_with_configuration(
+    directory: &TempDir,
+    config: &crate::RunnerConfiguration,
+) -> RunnerStateRoot {
     let mut state = RunnerStateRoot::open(&directory.path().join("state")).expect("private root");
     state
         .record_receipt(EnrollmentReceipt::new(
@@ -50,7 +57,7 @@ fn enrolled(directory: &TempDir) -> RunnerStateRoot {
             identity(),
             identity(),
             positive(),
-            advertisement_digest(configuration().advertisement()).expect("digest"),
+            advertisement_digest(config.advertisement()).expect("digest"),
             EnrollmentAuthority::Active,
         ))
         .expect("enrollment receipt");
@@ -211,4 +218,170 @@ async fn unknown_credential_profile_is_rejected_before_journaling_provision() {
         ))
     ));
     assert!(state.retained_provision().is_none());
+}
+
+#[tokio::test]
+async fn anonymous_clone_failure_is_retained_while_the_runner_keeps_serving() {
+    failed_anonymous_clone(false).await;
+}
+
+#[tokio::test]
+async fn missing_repository_revision_is_a_retained_provisioning_refusal() {
+    failed_anonymous_clone(true).await;
+}
+
+async fn failed_anonymous_clone(missing_revision: bool) {
+    use signalbox_runner_wire::{FailureCategory, Heartbeat, OperationFailureRecorded};
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let config = crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", ""),
+    )
+    .expect("anonymous repository");
+    let mut state = enrolled_with_configuration(&directory, &config);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let mut request = provision(&receipt);
+    request.correlation.repository = Some(
+        signalbox_runner_wire::RepositoryKey::try_new("signalbox".to_owned())
+            .expect("advertised repository"),
+    );
+    request.recovery = Some(signalbox_runner_wire::Recovery::Commit {
+        revision: "a".repeat(40),
+    });
+    let source = directory.path().join("source");
+    if missing_revision {
+        assert!(
+            tokio::process::Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&source)
+                .output()
+                .await
+                .expect("local Git")
+                .status
+                .success()
+        );
+    }
+    let checked = crate::workspace::provision::CheckedProvision::check(&config, request.clone())
+        .expect("advertised anonymous acquisition")
+        .with_local_clone_fixture(source.to_str().expect("fixture path").to_owned());
+    state
+        .record_provision(request.clone())
+        .expect("durable authorization before clone");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt.clone()).with_configuration(config.clone());
+    runner.advertisement = config.advertisement().clone();
+    runner.workspace = Some(workspaces::WorkspaceExecution::Preparing(tokio::spawn(
+        checked.prepare(state.workspace_store().expect("store")),
+    )));
+    let mut hub = BufReader::new(hub);
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("expected clone failure keeps serving");
+    let failed = receive_message(&mut hub).await.expect("typed refusal");
+    let Message::OperationFailed(failure) = &failed else {
+        panic!("operation failure")
+    };
+    assert_eq!(
+        failure.failure.category,
+        FailureCategory::RepositoryUnavailable
+    );
+    assert_eq!(
+        state.reconnect_inventory().operation_failure.as_ref(),
+        Some(&failure.failure)
+    );
+    send_message(
+        &mut hub,
+        Message::Heartbeat(Heartbeat {
+            sequence: positive(),
+            last_accepted_peer_sequence: 0,
+        }),
+    )
+    .await
+    .expect("heartbeat after failure");
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("runner still serves");
+    assert!(matches!(
+        receive_message(&mut hub)
+            .await
+            .expect("heartbeat acknowledgement"),
+        Message::HeartbeatAck(_)
+    ));
+    assert_eq!(
+        receive_message(&mut hub).await.expect("failure replay"),
+        failed
+    );
+    drop(runner);
+    drop(state);
+    let mut state =
+        RunnerStateRoot::open(&directory.path().join("state")).expect("restart retains failure");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut hub = BufReader::new(hub);
+    let resumed = async {
+        RunnerConnection::establish(stream, &mut state, config.advertisement())
+            .await
+            .expect("recorded failure resumes")
+            .with_configuration(config)
+    };
+    let daemon = async {
+        let Message::Resume(resume) = receive_message(&mut hub).await.expect("resume inventory")
+        else {
+            panic!("resume")
+        };
+        assert_eq!(
+            resume.inventory.operation_failure.as_ref(),
+            Some(&failure.failure)
+        );
+        let directive = Directive {
+            correlation: failure.failure.correlation.clone(),
+            action: DirectiveAction::DiscardAsRecorded,
+        };
+        send_message(
+            &mut hub,
+            Message::Resumed(Box::new(Resumed {
+                registration_revision: receipt.registration_revision(),
+                connection_epoch: positive(),
+                directives: ReconnectDirectives {
+                    workspace_operation: Some(directive.clone()),
+                    operation_failure: Some(directive),
+                    ..Default::default()
+                },
+            })),
+        )
+        .await
+        .expect("durably recorded failure");
+    };
+    let (mut runner, ()) = tokio::join!(resumed, daemon);
+    assert!(state.reconnect_inventory().workspace_operation.is_none());
+    let mut next = request;
+    next.correlation.authorization_id = identity();
+    next.correlation.session_id = identity();
+    next.correlation.repository = None;
+    next.recovery = None;
+    runner
+        .serve_message(&mut state, Message::WorkspaceProvision(next))
+        .await
+        .expect("next operation is accepted after refusal");
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("next private root ready");
+    assert!(matches!(
+        receive_message(&mut hub).await.expect("next receipt"),
+        Message::WorkspaceReady(_)
+    ));
+    // A provision-success receipt cannot be retired with an unrelated failure acknowledgement.
+    assert!(
+        runner
+            .serve_message(
+                &mut state,
+                Message::OperationFailureRecorded(OperationFailureRecorded {
+                    correlation: failure.failure.correlation.clone()
+                })
+            )
+            .await
+            .is_err()
+    );
 }

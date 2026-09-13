@@ -477,7 +477,7 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::UnsupportedDigestVersion,
             ));
         }
-        if request.inventory.operation_failure.is_some() || request.inventory.leak_page.is_some() {
+        if request.inventory.leak_page.is_some() {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
                 correlation,
@@ -512,6 +512,17 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             )
         };
+        if let Some(failure) = &request.inventory.operation_failure
+            && (request.inventory.lease.is_some()
+                || request.inventory.result.is_some()
+                || !matches!(
+                    &request.inventory.workspace_operation,
+                    Some(signalbox_runner_wire::WorkspaceOperation::Provision { correlation, phase: signalbox_runner_wire::ProvisionPhase::Provisioning })
+                        if failure.correlation == signalbox_runner_wire::OperationCorrelation::Provision(correlation.clone())
+                ))
+        {
+            return Err(invalid_inventory());
+        }
         let evidence = match (&request.inventory.lease, &request.inventory.result) {
             (None, None) => None,
             (Some(lease), result) => {
@@ -641,9 +652,33 @@ impl PostgresRunnerRegistrationService {
             {
                 return Err(invalid_inventory());
             }
+            let operation_correlation = OperationCorrelation::Provision(provision.clone());
+            let action = if let Some(failure) = &request.inventory.operation_failure {
+                if failure.correlation != operation_correlation
+                    || !matches!(
+                        operation,
+                        WorkspaceOperation::Provision {
+                            phase: signalbox_runner_wire::ProvisionPhase::Provisioning,
+                            ..
+                        }
+                    )
+                {
+                    return Err(invalid_inventory());
+                }
+                self.provisioning_failed_durably(
+                    request.enrollment_id,
+                    signalbox_runner_wire::OperationFailed {
+                        failure: failure.clone(),
+                    },
+                )
+                .await?;
+                DirectiveAction::DiscardAsRecorded
+            } else {
+                DirectiveAction::Await
+            };
             Some(signalbox_runner_wire::Directive {
-                correlation: OperationCorrelation::Provision(provision.clone()),
-                action: DirectiveAction::Await,
+                correlation: operation_correlation,
+                action,
             })
         } else {
             None
@@ -671,6 +706,12 @@ impl PostgresRunnerRegistrationService {
                 })
         };
         let mut directives = ReconnectDirectives {
+            operation_failure: request
+                .inventory
+                .operation_failure
+                .as_ref()
+                .map(|_| workspace_directive.clone().ok_or_else(invalid_inventory))
+                .transpose()?,
             workspace_operation: workspace_directive,
             lease: request
                 .inventory

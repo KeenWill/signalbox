@@ -515,6 +515,26 @@ impl RunnerStateRoot {
         self.journal.record_provision(&self.directory, request)
     }
 
+    pub(crate) fn retained_provision_failure(
+        &self,
+    ) -> Option<&signalbox_runner_wire::OperationFailure> {
+        self.journal.provision_failure()
+    }
+    pub(crate) fn record_provision_failure(
+        &mut self,
+        failure: signalbox_runner_wire::OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .record_provision_failure(&self.directory, failure)
+    }
+    pub(crate) fn acknowledge_provision_failure(
+        &mut self,
+        correlation: &signalbox_runner_wire::OperationCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_provision_failure(&self.directory, correlation)
+    }
+
     pub(crate) fn record_workspace_ready(
         &mut self,
         ready: signalbox_runner_wire::WorkspaceReady,

@@ -149,6 +149,7 @@ fn fixture(
         configuration: None,
         workspace: None,
         last_workspace_recorded: None,
+        last_provision_failure: None,
         receipt,
         advertisement,
         outcome: EnrollmentOutcome::Enrolled,

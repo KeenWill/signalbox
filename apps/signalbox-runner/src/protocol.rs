@@ -534,6 +534,7 @@ pub struct RunnerConnection<S> {
     configuration: Option<crate::RunnerConfiguration>,
     workspace: Option<workspaces::WorkspaceExecution>,
     last_workspace_recorded: Option<signalbox_runner_wire::WorkspaceRecorded>,
+    last_provision_failure: Option<signalbox_runner_wire::OperationCorrelation>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
@@ -544,7 +545,7 @@ pub struct RunnerConnection<S> {
 enum RunnerEvent {
     Message(Message),
     Result(RetainedResult),
-    WorkspaceReady(signalbox_runner_wire::WorkspaceReady),
+    WorkspaceReady(Result<signalbox_runner_wire::WorkspaceReady, crate::WorkspaceProvisionError>),
 }
 
 struct RunnerExecution {
@@ -695,15 +696,27 @@ where
                         }
                     }
                 }
-                if resumed
-                    .directives
-                    .workspace_operation
-                    .as_ref()
-                    .is_some_and(|directive| directive.action != DirectiveAction::Await)
-                {
-                    return Err(RunnerConnectionError::Violation(
-                        ProtocolViolation::ResumeDirectives,
-                    ));
+                if let Some(directive) = &resumed.directives.workspace_operation {
+                    let failed = resumed.directives.operation_failure.as_ref();
+                    match directive.action {
+                        DirectiveAction::Await if failed.is_none() => {}
+                        DirectiveAction::Resend
+                            if failed.is_some_and(|failure| {
+                                failure.action == DirectiveAction::Resend
+                            }) => {}
+                        DirectiveAction::DiscardAsRecorded
+                            if failed.is_some_and(|failure| {
+                                failure.action == DirectiveAction::DiscardAsRecorded
+                            }) =>
+                        {
+                            state.acknowledge_provision_failure(&directive.correlation)?
+                        }
+                        _ => {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::ResumeDirectives,
+                            ));
+                        }
+                    }
                 }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 if let Some(correlation) = &resumed_lease {
@@ -732,6 +745,7 @@ where
             configuration: None,
             workspace: None,
             last_workspace_recorded: None,
+            last_provision_failure: None,
             receipt,
             advertisement: advertisement.clone(),
             outcome,
@@ -903,8 +917,7 @@ where
         match event {
             RunnerEvent::Message(message) => self.serve_message(state, message).await,
             RunnerEvent::WorkspaceReady(ready) => {
-                state.record_workspace_ready(ready)?;
-                self.workspace = Some(workspaces::WorkspaceExecution::Ready);
+                self.finish_provision(state, ready)?;
                 self.send_retained_workspace(state).await?;
                 Ok(None)
             }
@@ -988,6 +1001,17 @@ where
                 state.record_provision(provision)?;
                 self.ensure_workspace(state)?;
                 self.send_retained_workspace(state).await?;
+                Ok(None)
+            }
+            Message::OperationFailureRecorded(recorded) => {
+                if self.last_provision_failure.as_ref() == Some(&recorded.correlation)
+                    && state.retained_provision_failure().is_none()
+                {
+                    return Ok(None);
+                }
+                state.acknowledge_provision_failure(&recorded.correlation)?;
+                self.workspace = None;
+                self.last_provision_failure = Some(recorded.correlation);
                 Ok(None)
             }
             Message::WorkspaceRecorded(recorded) => {

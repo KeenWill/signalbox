@@ -141,7 +141,9 @@ identity and ready receipt. A changed repository mapping fails as
 under the unchanged registration, and the runner resends its authenticated
 receipt until acknowledgement activates the manifest and clears the journal. The
 daemon serializes provisioning and lease delivery on each connection until the
-corresponding durable outcome is acknowledged.
+corresponding durable outcome is acknowledged. Expected acquisition refusals are
+journaled as `operation_failed` and retained through heartbeat and reconnect
+until acknowledged; the runner keeps serving.
 
 ## Boundary contracts
 

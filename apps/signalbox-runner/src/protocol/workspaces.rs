@@ -19,13 +19,12 @@ impl Drop for WorkspaceExecution {
 
 pub(super) async fn workspace_finished(
     workspace: &mut Option<WorkspaceExecution>,
-) -> Result<WorkspaceReady, RunnerConnectionError> {
+) -> Result<Result<WorkspaceReady, crate::WorkspaceProvisionError>, RunnerConnectionError> {
     let Some(WorkspaceExecution::Preparing(task)) = workspace else {
         return std::future::pending().await;
     };
     task.await
-        .map_err(|_| RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage))?
-        .map_err(RunnerConnectionError::Workspace)
+        .map_err(|_| RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage))
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
@@ -49,6 +48,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         if self.workspace.is_some() {
             return Ok(());
         }
+        if state.retained_provision_failure().is_some() {
+            self.workspace = Some(WorkspaceExecution::Ready);
+            return Ok(());
+        }
         let Some((request, _)) = state.retained_provision() else {
             return Ok(());
         };
@@ -69,6 +72,65 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         {
             send_message(&mut self.io, Message::WorkspaceReady(ready.clone())).await?;
         }
+        if let Some(failure) = state.retained_provision_failure() {
+            send_message(
+                &mut self.io,
+                Message::OperationFailed(signalbox_runner_wire::OperationFailed {
+                    failure: failure.clone(),
+                }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_provision(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        result: Result<WorkspaceReady, crate::WorkspaceProvisionError>,
+    ) -> Result<(), RunnerConnectionError> {
+        use signalbox_runner_wire::{
+            DetailName, FailureCategory, FailureDetail, OperationCorrelation, OperationFailure,
+        };
+        match result {
+            Ok(ready) => state.record_workspace_ready(ready)?,
+            Err(error) => {
+                use crate::WorkspaceProvisionError as Error;
+                let (category, code) = match error {
+                    Error::RepositoryUnavailable => (
+                        FailureCategory::RepositoryUnavailable,
+                        "repository-unavailable",
+                    ),
+                    Error::CredentialUnavailable => (
+                        FailureCategory::CredentialUnavailable,
+                        "credential-unavailable",
+                    ),
+                    Error::SandboxUnavailable => {
+                        (FailureCategory::SandboxUnavailable, "sandbox-unavailable")
+                    }
+                    Error::ManifestConflict => {
+                        (FailureCategory::WorkspaceConflict, "manifest-conflict")
+                    }
+                    Error::Storage => return Err(RunnerConnectionError::Workspace(error)),
+                };
+                let (request, _) = state
+                    .retained_provision()
+                    .ok_or(RunnerStateError::InvalidTransition)?;
+                let failure = OperationFailure {
+                    correlation: OperationCorrelation::Provision(request.correlation.clone()),
+                    category,
+                    detail: FailureDetail::try_new(
+                        DetailName::try_new(code.to_owned())
+                            .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+                        error.to_string(),
+                        serde_json::json!({}),
+                    )
+                    .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+                };
+                state.record_provision_failure(failure)?;
+            }
+        }
+        self.workspace = Some(WorkspaceExecution::Ready);
         Ok(())
     }
 

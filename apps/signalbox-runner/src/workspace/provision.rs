@@ -59,6 +59,12 @@ pub(crate) struct CheckedProvision {
 }
 
 impl CheckedProvision {
+    #[cfg(test)]
+    pub(crate) fn with_local_clone_fixture(mut self, path: String) -> Self {
+        self.clone_url = Some(path);
+        self
+    }
+
     pub(crate) fn check(
         configuration: &RunnerConfiguration,
         operation: WorkspaceProvision,
