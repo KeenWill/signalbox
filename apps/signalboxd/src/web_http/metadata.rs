@@ -42,11 +42,11 @@ pub(super) async fn replace_title(
     else {
         return invalid_title();
     };
-    if SessionMetadataContent::try_new(Some(request.title.clone()), Vec::new(), Vec::new(), false)
-        .is_err()
-    {
+    let Ok(mut replacement) =
+        SessionMetadataContent::try_new(Some(request.title.clone()), Vec::new(), Vec::new(), false)
+    else {
         return invalid_title();
-    }
+    };
     let Some(pool) = state.pool else {
         return title_unconfirmed();
     };
@@ -68,29 +68,25 @@ pub(super) async fn replace_title(
         }
         Err(_) => return title_unconfirmed(),
     }
-    let current = match repository.load_session_metadata(session).await {
-        Ok(Some(current)) => current,
-        Ok(None) => {
-            return application_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "the requested session does not exist",
-            );
+    match repository.load_session_metadata(session).await {
+        Ok(Some(current)) => {
+            let content = current.content();
+            replacement = match SessionMetadataContent::try_new(
+                Some(request.title),
+                content.tags().map(str::to_owned).collect(),
+                content
+                    .attributes()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect(),
+                content.archived(),
+            ) {
+                Ok(replacement) => replacement,
+                Err(_) => return invalid_title(),
+            };
         }
+        Ok(None) => {}
         Err(_) => return title_unconfirmed(),
-    };
-    let content = current.content();
-    let Ok(replacement) = SessionMetadataContent::try_new(
-        Some(request.title),
-        content.tags().map(str::to_owned).collect(),
-        content
-            .attributes()
-            .map(|(key, value)| (key.to_owned(), value.to_owned()))
-            .collect(),
-        content.archived(),
-    ) else {
-        return invalid_title();
-    };
+    }
     let Ok(request) = ReplaceSessionMetadataRequest::try_new(command, session, replacement) else {
         return invalid_title();
     };
@@ -362,6 +358,64 @@ mod tests {
                 .expect("raced full replacement"),
             ReplaceSessionMetadataOutcome::ConflictingReuse { .. }
         ));
+        pool.close().await;
+    }
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn missing_session_title_rejection_retains_command_identity() {
+        let (_container, pool, _) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(8)
+                .await
+                .expect("PostgreSQL fixture");
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let command = DurableCommandId::from_uuid(Uuid::now_v7());
+        let router =
+            super::super::production_router(None, Some(pool.clone()), None, None, None, None, None);
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(session, command, "Missing"))
+                .await
+                .expect("first rejection")
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let recorded = SessionMetadataRepository::for_title_update(pool.clone())
+            .load_command(command)
+            .await
+            .expect("load rejection")
+            .expect("durable rejection");
+        assert!(matches!(
+            recorded.result(),
+            ReplaceSessionMetadataResult::Rejected(_)
+        ));
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(session, command, "Missing"))
+                .await
+                .expect("replayed rejection")
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(session, command, "Different"))
+                .await
+                .expect("conflicting title")
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let other_session = SessionId::from_uuid(Uuid::now_v7());
+        assert_eq!(
+            router
+                .oneshot(request(other_session, command, "Missing"))
+                .await
+                .expect("conflicting target")
+                .status(),
+            StatusCode::CONFLICT
+        );
         pool.close().await;
     }
 }
