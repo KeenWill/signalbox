@@ -1044,22 +1044,37 @@ test('releases the rename editor while the acknowledged catalog refresh is stall
   page,
 }) => {
   await useCatalogFixture(page)
+  const requests: Array<{ command_id: string; title: string }> = []
   let reads = 0
   await page.route('**/api/sessions?**', async (route) => {
     reads += 1
     if (reads === 1) await route.fulfill({ json: firstPage })
   })
-  await page.route(`**/api/sessions/${firstSessionId}/metadata`, (route) =>
-    route.fulfill({ status: 204 }),
-  )
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, (route) => {
+    requests.push(route.request().postDataJSON())
+    return route.fulfill({ status: 204 })
+  })
   await page.goto('/sessions')
   const rename = page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
   await rename.click()
+  await page.getByRole('textbox', { name: 'Session title', exact: true }).fill('Acknowledged title')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect.poll(() => reads).toBe(2)
   await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveCount(0)
   await expect(rename).toBeEnabled()
   await expect(rename).toBeFocused()
+  await expect(page.getByRole('button', { name: /Acknowledged title/ })).toBeVisible()
+  await rename.click()
+  await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveValue(
+    'Acknowledged title',
+  )
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  expect(requests.map((request) => request.title)).toEqual([
+    'Acknowledged title',
+    'Acknowledged title',
+  ])
+  expect(requests[1]?.command_id).not.toBe(requests[0]?.command_id)
 })
 
 for (const leaveCatalog of [false, true]) {
@@ -1128,9 +1143,7 @@ for (const leaveCatalog of [false, true]) {
   })
 }
 
-test('a 413 rename rejection permits a corrected title with a new identity', async ({
-  page,
-}) => {
+test('a 413 rename rejection permits a corrected title with a new identity', async ({ page }) => {
   await useCatalogFixture(page)
   const requests: Array<{ command_id: string; title: string }> = []
   await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {

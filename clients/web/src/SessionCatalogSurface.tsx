@@ -135,6 +135,23 @@ const SessionMetadata = ({
         intent.current = { command_id: createRenameCommandId(), title }
       }
       await renameSession(summary.session_id, intent.current)
+      const scalars = Array.from(intent.current.title)
+      queryClient.setQueriesData<WebSessionCatalogSnapshot>(
+        { queryKey: ['production', 'sessions'] },
+        (snapshot) =>
+          snapshot && {
+            ...snapshot,
+            summaries: snapshot.summaries.map((row) =>
+              row.session_id === summary.session_id
+                ? {
+                    ...row,
+                    title_summary: scalars.slice(0, MAX_SESSION_SUMMARY_SCALARS).join(''),
+                    title_truncated: scalars.length > MAX_SESSION_SUMMARY_SCALARS,
+                  }
+                : row,
+            ),
+          },
+      )
       intent.current = null
       close()
       void queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
