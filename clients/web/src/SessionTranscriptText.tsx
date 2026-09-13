@@ -653,7 +653,6 @@ function TurnSummary({
 
 function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
-  const failed = evidence?.state === 'known_failed' || evidence?.failure_present
   return (
     <section aria-label={`${tool.tool_name} details`}>
       <strong>{tool.tool_name}</strong>
@@ -661,10 +660,11 @@ function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
       {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
       {evidence?.result && <ToolText label="Output" excerpt={evidence.result} />}
       {evidence?.failure && <ToolText label="Failure" excerpt={evidence.failure} />}
-      {evidence && !evidence.failure && (failed || !evidence.result) && (
+      {evidence && !evidence.result && !evidence.failure && (
         <p className="session-turn-outcome">
-          {failed && 'Failure · '}
-          {enumLabel(evidence.cause ?? evidence.state)}
+          {evidence.state === 'known_failed' || evidence.failure_present
+            ? `Failure · ${enumLabel(evidence.cause ?? evidence.state)}`
+            : enumLabel(evidence.state)}
         </p>
       )}
       {[tool.arguments, evidence?.result, evidence?.failure].some(
