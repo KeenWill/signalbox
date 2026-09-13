@@ -502,7 +502,8 @@ evidence. They use ordinary credential-pool admission and invocation capacity; a
 terminal report naming another call leaves usage unreported. Startup closes
 abandoned title calls without retrying generation and releases unregistered
 invocation reservations. Pre-send title cleanup failures remain registered with
-periodic invocation recovery until terminal cleanup succeeds.
+periodic invocation recovery until terminal cleanup succeeds. Title requests cap
+output at 256 tokens, within the configured model limit.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete
