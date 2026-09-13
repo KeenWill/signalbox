@@ -39,9 +39,17 @@ Native review publication and thread replies retain their returned review IDs
 and reply comment IDs before releasing the repository frontier lock. Review
 submissions and new thread openings retain their source review ID with
 `gh_event`; matching native receipts exclude them from `gh_readable_event`.
-Other reviews by the same login and subsequent thread reopenings remain
-eligible. Receipts are permanent; writes without a retained acknowledgement have
-no self-write provenance.
+Startup and reload pause repository event evaluation until observation resolves
+its authenticated GitHub account. Pausing and initial command admission
+serialize with the repository frontier; admission rechecks readiness in its
+transaction. Identity resolution consumes one bounded partial attempt, then
+immediately observes the same triggering producer in a separate bounded attempt
+with the same authenticated client. Each observation resolves its loaded
+credential’s identity before reading provider events. Review submissions by that
+account are permanently marked at ingestion and excluded from rule evaluation
+and retries. Credential rotation does not reclassify already observed reviews.
+Subsequent thread reopenings remain eligible. Receipts are permanent; writes
+without a retained acknowledgement have no receipt provenance.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the
@@ -57,7 +65,7 @@ conflicts. The example `merge-forward` template finishes without edits,
 publication or a pull request comment unless the metadata tool reports
 `mergeable: false`.
 
-The module schema contains eighteen tables:
+The module schema retains these projections and records:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -299,6 +307,10 @@ preceding dispatch and evaluated event context, and pass through the existing
 singleton and dispatch admission limits; they do not create GitHub change
 events.
 
+A matching review received during a released dispatch's cooldown remains
+eligible after cooldown when unfinished matching work remains, including when
+that dispatch pushed. Admission retains the new review's event provenance.
+
 For `labeled-review-response`, completed check runs and suites admit at most one
 initial dispatch per provisioned pull-request head within a rule revision, using
 the existing cooldown. Later check completions on that head are consumed without
@@ -533,25 +545,28 @@ a durable nonsticky stop, preserving the rejected kickoff command for diagnosis.
 Failed provisioning submits no input. `labeled-review-response` requests thread
 repair, validation, commit, push with `git_push_configured`, replies naming the
 commit, and thread resolution; a stored observation with no unresolved threads
-instead requests a one-turn mergeability and gating-check convergence check, a
-plain pull request reply, and a clean finish. `renovate-merge-forward` requests
-merging the base forward, resolving conflicts and integration errors caused by
-combining the branches, validating, committing, pushing, and reporting the
-result. When no merge-forward is needed, it finishes without a pull request
-comment. The example merge-forward rule matches only observed conflicts, so
-unresolved threads or failing checks alone cannot keep it retryable. Push
-instructions require the same configured authority as `git_push_configured`: a
-configured push credential file, a GitHub HTTPS destination with a `github_app`
-credential profile, or an SSH destination with an available host agent on Linux,
-and a head in the watched repository. Without that authority, kickoff states
-that push is unavailable and requests a reviewable diff in a plain pull request
-reply, leaving unresolved threads open for the owner to apply the diff. The
-publication instruction is retained with the kickoff command identity and
-remains unchanged on replay.
+instead requests a one-turn mergeability and gating-check convergence check and
+a clean finish without a pull request comment when the head is unchanged.
+`renovate-merge-forward` requests merging the base forward, resolving conflicts
+and integration errors caused by combining the branches, validating, committing,
+pushing, and reporting the result. When no merge-forward is needed, it finishes
+without a pull request comment. The example merge-forward rule matches only
+observed conflicts, so unresolved threads or failing checks alone cannot keep it
+retryable. Push instructions require the same configured authority as
+`git_push_configured`: a configured push credential file, a GitHub HTTPS
+destination with a `github_app` credential profile, or an SSH destination with
+an available host agent on Linux, and a head in the watched repository. Without
+that authority, kickoff states that push is unavailable and requests a
+reviewable diff in a plain pull request reply, leaving unresolved threads open
+for the owner to apply the diff. The publication instruction is retained with
+the kickoff command identity and remains unchanged on replay.
 
 During checkout provisioning, non-repository-watch input admission is deferred
 without claiming its command identity, so the kickoff is the first queued input.
 Clients can retry the same command after provisioning completes.
+
+Review-response sessions submit no pull request review and post no completion
+comment when no thread was fixed and the head is unchanged.
 
 ## Planned
 

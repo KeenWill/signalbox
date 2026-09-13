@@ -10,7 +10,10 @@ use std::{
 };
 
 use serde::Deserialize;
-use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueError};
+use signalbox_runner_wire::{
+    Advertisement, CapabilityName, ProfileName, RepositoryKey, SandboxProfile, ValueError,
+    WireToolName,
+};
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
@@ -99,7 +102,7 @@ impl fmt::Display for ArgumentError {
 
 impl Error for ArgumentError {}
 
-/// Complete immutable startup configuration for the registration-only runtime.
+/// Complete immutable startup configuration for the local runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerConfiguration {
     daemon_socket_path: PathBuf,
@@ -190,16 +193,32 @@ impl RunnerConfiguration {
         let repositories =
             validate_repositories(&raw.repositories, &credentials, &raw.allowed_network_hosts)?;
 
-        // Every inventory is constructed independently from an actual compiled
-        // provider. This registration-only milestone compiles no workspace,
-        // sandbox, tool, or capability-class provider. Credential and repository
-        // availability is the exact validated configuration projection.
         let advertisement = Advertisement {
             default_working_directory: None,
-            capability_classes: Vec::new(),
-            tools: Vec::new(),
+            capability_classes: raw
+                .capability_classes
+                .into_iter()
+                .map(|class| match class {
+                    ConfiguredClass::Echo => CapabilityName::try_new("echo".to_owned()),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RunnerConfigurationError::InvalidAdvertisement)?,
+            tools: raw
+                .tools
+                .into_iter()
+                .map(|tool| match tool {
+                    ConfiguredTool::Echo => WireToolName::try_new("echo".to_owned()),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RunnerConfigurationError::InvalidAdvertisement)?,
             workspace_capabilities: Vec::new(),
-            sandbox_profiles: Vec::new(),
+            sandbox_profiles: raw
+                .sandbox_profiles
+                .into_iter()
+                .map(|profile| match profile {
+                    ConfiguredSandbox::Ambient => SandboxProfile::Ambient,
+                })
+                .collect(),
             credential_profiles: credentials.keys().cloned().collect(),
             repositories: repositories
                 .iter()
@@ -501,6 +520,9 @@ fn validate_clone_url(value: &str) -> Result<(), RunnerConfigurationError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfiguration {
+    capability_classes: Vec<ConfiguredClass>,
+    tools: Vec<ConfiguredTool>,
+    sandbox_profiles: Vec<ConfiguredSandbox>,
     version: u64,
     daemon_socket_path: PathBuf,
     runner_root: PathBuf,
@@ -511,6 +533,24 @@ struct RawConfiguration {
     git_author_email: String,
     repositories: BTreeMap<String, RawRepository>,
     credentials: BTreeMap<String, RawCredential>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfiguredClass {
+    Echo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfiguredTool {
+    Echo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfiguredSandbox {
+    Ambient,
 }
 
 /// Closed configured network-host inventory.
@@ -641,6 +681,9 @@ mod tests {
     const CHECKED_IN_EXAMPLE: &str = include_str!("../../../config/signalbox-runner.example.toml");
     const EMPTY_CONFIGURATION: &str = r#"
 version = 1
+capability_classes = []
+tools = []
+sandbox_profiles = []
 daemon_socket_path = "/run/user/1000/signalbox-runner.sock"
 runner_root = "/var/lib/signalbox-runner"
 bubblewrap_path = "/usr/bin/bwrap"
@@ -686,6 +729,49 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
                 .expect("the configured profile name is valid"),
             repository: RepositoryKey::try_new(CONFIGURED_REPOSITORY.to_owned())
                 .expect("the configured repository key is valid"),
+        }
+    }
+
+    #[test]
+    fn configuration_advertises_only_the_selected_echo_and_ambient() {
+        let document = EMPTY_CONFIGURATION
+            .replace("capability_classes = []", "capability_classes = [\"echo\"]")
+            .replace("tools = []", "tools = [\"echo\"]")
+            .replace("sandbox_profiles = []", "sandbox_profiles = [\"ambient\"]");
+        let configuration = RunnerConfiguration::parse(&document).expect("configured inventory");
+        assert_eq!(
+            configuration.advertisement().tools,
+            [WireToolName::try_new("echo".to_owned()).expect("shipped tool name")]
+        );
+        assert_eq!(
+            configuration.advertisement().sandbox_profiles,
+            [SandboxProfile::Ambient]
+        );
+        assert!(
+            configuration
+                .advertisement()
+                .workspace_capabilities
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_uncompiled_tools_and_sandbox_profiles() {
+        for document in [
+            EMPTY_CONFIGURATION.replace(
+                "capability_classes = []",
+                "capability_classes = [\"uncompiled\"]",
+            ),
+            EMPTY_CONFIGURATION.replace("tools = []", "tools = [\"current_time\"]"),
+            EMPTY_CONFIGURATION.replace(
+                "sandbox_profiles = []",
+                "sandbox_profiles = [\"restricted\"]",
+            ),
+        ] {
+            assert!(matches!(
+                RunnerConfiguration::parse(&document),
+                Err(RunnerConfigurationError::InvalidDocument)
+            ));
         }
     }
 
@@ -854,6 +940,9 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
         let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
+capability_classes = []
+tools = []
+sandbox_profiles = []
 daemon_socket_path = "{}"
 runner_root = "{}"
 bubblewrap_path = "{}"
@@ -890,6 +979,9 @@ credentials = {{}}
         let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
+capability_classes = []
+tools = []
+sandbox_profiles = []
 daemon_socket_path = "{}"
 runner_root = "{}"
 bubblewrap_path = "{}"
@@ -932,6 +1024,9 @@ credentials = {{}}
         let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
+capability_classes = []
+tools = []
+sandbox_profiles = []
 daemon_socket_path = "{}"
 runner_root = "{}"
 bubblewrap_path = "{}"

@@ -146,6 +146,7 @@ impl From<sqlx::Error> for CommissionedDispatchRepositoryError {
 pub struct PostgresCommissionedDispatchStore {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
+    runner_placement_catalog: Option<signalbox_domain::RunnerCatalog>,
 }
 
 impl PostgresCommissionedDispatchStore {
@@ -154,7 +155,17 @@ impl PostgresCommissionedDispatchStore {
         Self {
             pool,
             credential_pin,
+            runner_placement_catalog: None,
         }
+    }
+
+    /// Checks requested runner placement under locks held through commission commit.
+    pub fn with_runner_placement_catalog(
+        mut self,
+        catalog: signalbox_domain::RunnerCatalog,
+    ) -> Self {
+        self.runner_placement_catalog = Some(catalog);
+        self
     }
 
     /// Loads the committed commission a create-command identity names, if any.
@@ -197,7 +208,7 @@ impl PostgresCommissionedDispatchStore {
     /// Commits the complete commission, replaying an already-committed equal one.
     ///
     /// Replay equality binds the create-command identity to the recorded
-    /// template, fence, commissioned statement, and the digest of the initial
+    /// template, fence, runner placement, commissioned statement, and the digest of the initial
     /// content. A command identity claimed by anything other than a committed
     /// commission — another command kind, or an ordinary session creation with
     /// no fence row — is a conflicting reuse rather than corruption, because
@@ -246,6 +257,7 @@ impl PostgresCommissionedDispatchStore {
         let mut transaction = self.pool.begin().await?;
         let command = prepared.prepared_session().command();
         let command_id = command.command_id();
+        let runner_placement = command.runner_placement().cloned();
         let provenance = command.template_provenance().ok_or(
             CommissionedDispatchRepositoryError::Corruption(
                 "commissioned session lacks template provenance",
@@ -267,6 +279,7 @@ impl PostgresCommissionedDispatchStore {
                 prepared.fence(),
                 &statement,
                 &content_digest,
+                runner_placement.as_ref(),
             ));
         }
         let live_target = lock_live_pull_request_target(&mut transaction, prepared.fence()).await?;
@@ -280,6 +293,7 @@ impl PostgresCommissionedDispatchStore {
                 prepared.fence(),
                 &statement,
                 &content_digest,
+                runner_placement.as_ref(),
             ));
         }
         if let Some(session) = live_target {
@@ -330,6 +344,7 @@ impl PostgresCommissionedDispatchStore {
                     &fence,
                     &statement,
                     &content_digest,
+                    runner_placement.as_ref(),
                 ),
                 None => CommissionDispatchOutcome::ConflictingReuse,
             });
@@ -338,6 +353,7 @@ impl PostgresCommissionedDispatchStore {
             &mut transaction,
             prepared_session,
             &self.credential_pin,
+            self.runner_placement_catalog.as_ref(),
         )
         .await
         .map_err(CommissionedDispatchRepositoryError::SessionCreation)?;
@@ -532,11 +548,13 @@ fn replay_or_conflict(
     fence: &CommissionedDispatchFence,
     statement: &str,
     content_digest: &[u8; 32],
+    runner_placement: Option<&signalbox_domain::SessionRunnerPlacementRequest>,
 ) -> CommissionDispatchOutcome {
     let equal = recorded.template_name == template_name
         && recorded.fence_matches(fence)
         && recorded.statement.as_deref() == Some(statement)
-        && recorded.initial_content_digest == content_digest;
+        && recorded.initial_content_digest == content_digest
+        && recorded.runner_placement.as_ref() == runner_placement;
     if equal {
         CommissionDispatchOutcome::Replayed {
             dispatch: recorded.dispatch,
@@ -573,7 +591,7 @@ impl RecordedCommissionedDispatch {
     /// Reports whether this record is the request's exact committed equal.
     ///
     /// The comparison is the same replay equality `commission` enforces:
-    /// template name, fence, commissioned statement, and the digest of the
+    /// template name, fence, runner placement, commissioned statement, and the digest of the
     /// initial content.
     #[must_use]
     pub fn matches(&self, request: &CommissionDispatchRequest) -> bool {
@@ -584,6 +602,7 @@ impl RecordedCommissionedDispatch {
                 request.fence(),
                 request.statement().as_str(),
                 &request.initial_content_digest(),
+                request.runner_placement(),
             ),
             CommissionDispatchOutcome::Replayed { .. }
         )
@@ -606,6 +625,7 @@ struct RecordedCommission {
     branch: Option<String>,
     statement: Option<String>,
     initial_content_digest: Vec<u8>,
+    runner_placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
 }
 
 impl RecordedCommission {
@@ -645,8 +665,14 @@ async fn load_recorded_commission(
                 dispatch.target_kind, dispatch.repository, dispatch.pull_request_number,
                 dispatch.head_sha, dispatch.head_repository, dispatch.head_branch,
                 dispatch.base_branch, dispatch.branch, dispatch.initial_content_digest,
-                commissioned.statement
+                commissioned.statement, creation.storage_version,
+                creation.runner_selector_kind, creation.runner_selector_id,
+                creation.runner_selector_class, creation.runner_directory_kind,
+                creation.runner_directory, creation.runner_credential_profile,
+                creation.runner_workspace_kind, creation.runner_repository,
+                creation.runner_sandbox, creation.runner_permission_overrides
            FROM commissioned_dispatch AS dispatch
+           JOIN create_session_command AS creation ON creation.command_id = dispatch.create_command_id
            LEFT JOIN goal_event AS commissioned
              ON commissioned.session_id = dispatch.session_id
             AND commissioned.generation = 1
@@ -673,6 +699,15 @@ async fn load_recorded_commission(
         branch: row.try_get("branch")?,
         statement: row.try_get("statement")?,
         initial_content_digest: row.try_get("initial_content_digest")?,
+        runner_placement:
+            <crate::creation_runner_placement::RunnerPlacementColumns as sqlx::FromRow<
+                sqlx::postgres::PgRow,
+            >>::from_row(&row)?
+            .decode(
+                row.try_get("storage_version")?,
+                crate::create_session::RUNNER_PLACEMENT_FROM_STORAGE_VERSION,
+            )
+            .map_err(CommissionedDispatchRepositoryError::Corruption)?,
     }))
 }
 

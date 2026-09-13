@@ -91,6 +91,7 @@ pub enum ClientRequest {
         target: CredentialExclusionTarget,
     },
     CreateSession {
+        runner_placement: option::Option<RunnerPlacementRequest>,
         command_id: CommandId,
         initial_model_selection: ModelSelection,
         model_settings: ModelSettingsOverlay,
@@ -99,12 +100,14 @@ pub enum ClientRequest {
         lifecycle: SessionLifecycleMembers,
     },
     CreateSessionFromTemplate {
+        runner_placement: option::Option<RunnerPlacementRequest>,
         command_id: CommandId,
         template_name: string::String,
         placement: SessionPlacement,
         lifecycle: SessionLifecycleMembers,
     },
     CommissionSession {
+        runner_placement: option::Option<RunnerPlacementRequest>,
         command_id: CommandId,
         template_name: string::String,
         fence: CommissionedSessionFence,
