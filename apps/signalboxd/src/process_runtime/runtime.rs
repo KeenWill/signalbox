@@ -217,7 +217,7 @@ impl ProcessRuntime {
         let fanouts = self.fanouts;
         let recovery_store = signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
             self.pool.clone(),
-            crate::runner_protocol_runtime::registration_only_catalog().map_err(|error| {
+            crate::runner_protocol_runtime::local_runner_catalog().map_err(|error| {
                 ProcessRuntimeError::RunnerRecoveryCommands(
                     signalbox_persistence::runner_protocol::RunnerProtocolStoreError::Domain(error)
                         .into(),
@@ -690,7 +690,7 @@ mod runner_recovery_tests {
         let (shutdown, receiver) = watch::channel(false);
         let store = signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
             pool.clone(),
-            crate::runner_protocol_runtime::registration_only_catalog()
+            crate::runner_protocol_runtime::local_runner_catalog()
                 .expect("registration catalog is valid"),
         );
         resume_runner_replacements_and_notify(&store, &notifications).await?;

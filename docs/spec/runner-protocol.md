@@ -17,14 +17,15 @@ handshake the runner advertises its availability and answers heartbeat
 challenges. The daemon records each connection under a durable connection epoch,
 marks a runner suspect and then lost when heartbeats stop, and propagates the
 loss to the sessions pinned to that runner. The runner recovery commands also
-have durable request, receipt, and daemon handlers. The runner advertises only
-the credential-profile names and repository entries its strict configuration
-carries, and no capability class, tool, workspace capability, or sandbox
-profile; the daemon catalog that would admit such claims is empty, and the
-runner derives its empty reconnect inventory from a versioned, fsynced,
-atomically published private journal and executes nothing. An initialized state
-root without that journal fails startup. Leases, dispatch, runner workspace
-execution, and sandboxes are listed under Planned.
+have durable request, receipt, and daemon handlers. The local catalog admits the
+`echo` capability class, the `ambient` profile, and the existing daemon `echo`
+tool as a combined-locus pure declaration with the identical model definition
+and permission default. The runner advertises configured availability for those
+entries, credential profiles, and repositories, with no workspace capability. It
+derives its empty reconnect inventory from a versioned, fsynced, atomically
+published private journal and executes nothing. An initialized state root
+without that journal fails startup. Leases, dispatch, runner workspace
+execution, and sandbox supervision are listed under Planned.
 
 The domain lives in `crates/domain/src/runner/` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,

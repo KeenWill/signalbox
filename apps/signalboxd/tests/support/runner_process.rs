@@ -123,6 +123,9 @@ impl RunnerProcesses {
         let runner_binary = fs::canonicalize(runner_binary())?;
         let configuration = toml::toml! {
             version = 1
+            capability_classes = ["echo"]
+            tools = ["echo"]
+            sandbox_profiles = ["ambient"]
             daemon_socket_path = (socket.to_str().ok_or("socket path is not UTF-8")?)
             runner_root = (runner_root.to_str().ok_or("runner root is not UTF-8")?)
             bubblewrap_path = (runner_binary.to_str().ok_or("runner binary path is not UTF-8")?)
