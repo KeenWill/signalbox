@@ -65,15 +65,6 @@ terminal transaction also moves the turn out of the runner-recovery wait when it
 is still parked there: to running with a fresh attempt when the loss interrupted
 no tool attempt, and otherwise to the phase the retained tool attempt justifies.
 
-Recovery-only startup binds the runner socket in recovery-only mode after
-migrations, reconciles retained runner inventory, evidence, and nonterminal
-replacement commands, completes the generic startup scan, binds the process
-socket, and only then enables ordinary runner enrollment and scheduling. The
-generic scan skips runner-owned attempts until that phase has resolved them,
-then classifies only the remaining daemon-owned tenure. With no retained runner
-work the phase completes immediately. Recovery-only admission precedes the blob
-namespace checks that [blob-storage](../spec/blob-storage.md) runs after the
-generic scan, and no recovery frame touches blob state.
 [Configuration and credentials](../spec/configuration-and-credentials.md)
 commits retained OAuth-marker resolution, scratch-home scavenging, prior-process
 capacity-reservation recovery, and the legacy family-to-policy backfill. Those

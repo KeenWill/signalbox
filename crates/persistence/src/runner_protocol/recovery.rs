@@ -108,6 +108,18 @@ async fn claim(
 }
 
 impl RunnerProtocolStore {
+    /// Reports execution authority that startup must reconcile before the generic scan.
+    pub async fn has_unsettled_execution(&self) -> Result<bool, RunnerProtocolStoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM runner_current_lease_event AS head
+                JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+                WHERE event.state_kind IN ('offered', 'claimed'))",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Loads current active authority for an explicitly promoted pending candidate.
     pub async fn promoted_runner_receipt(
         &self,

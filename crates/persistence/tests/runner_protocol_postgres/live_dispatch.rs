@@ -94,6 +94,54 @@ fn success(text: &str) -> ToolAttemptObservation {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn generic_startup_scan_leaves_runner_owned_attempts_for_reconciliation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, enrollment, _, pin, epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let correlation = pin.lease.correlation();
+    let repository = signalbox_persistence::startup::PostgresStartupScanRepository::new(pool);
+    assert!(store.has_unsettled_execution().await?);
+    assert!(
+        !repository
+            .sessions()
+            .await?
+            .contains(&correlation.dispatch.session())
+    );
+    store
+        .claim_tool_lease(enrollment.enrollment(), epoch, correlation.clone())
+        .await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        repository.clone(),
+    );
+    assert_eq!(scan.execute().await?.recovered_turn_count(), 0);
+    assert_eq!(
+        store
+            .record_tool_lease_result(
+                enrollment.enrollment(),
+                epoch,
+                correlation.clone(),
+                success("recovered result")
+            )
+            .await?
+            .state(),
+        RunnerLeaseState::Completed,
+        "the scan leaves the physical attempt live for its runner result"
+    );
+    assert!(!store.has_unsettled_execution().await?);
+    assert!(
+        repository
+            .sessions()
+            .await?
+            .contains(&correlation.dispatch.session())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn runner_wait_reread_requires_the_exact_lost_dispatch_and_yielded_turn()
 -> Result<(), Box<dyn Error>> {
     use signalbox_application::ToolExecutionTransaction as _;

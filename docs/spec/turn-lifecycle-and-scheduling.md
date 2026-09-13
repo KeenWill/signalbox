@@ -59,8 +59,8 @@ Two more checks run on their own timers at the same interval: one inventories
 turns that hold a live operation past every deadline, and one retries
 reconciliation of ambiguous operations.
 
-At startup, before it admits any request, the daemon runs one transaction per
-session, validates its projection, and classifies abandoned active turns or
+At startup, before it admits ordinary requests, the daemon runs one transaction
+per session, validates its projection, and classifies abandoned active turns or
 nonterminal standalone compaction calls from durable evidence
 (`crates/persistence/src/startup.rs`). The liveness watchdogs and the
 scheduler's pass-expiry handoff hand turns to that same classification.
@@ -127,8 +127,8 @@ completion, refusal, or confirmed-interrupt evidence and no path retries a call
 automatically ([model-call-execution](model-call-execution.md)).
 
 There is no process-incarnation column and no lease: under the single-daemon
-contract every nonterminal attempt observed at startup is an abandonment from
-the preceding fenced runtime incarnation.
+contract every daemon-owned nonterminal attempt observed at startup is an
+abandonment from the preceding fenced runtime incarnation.
 
 Frontier equality is identity rather than content, because two independently
 created snapshots may hold equal entries without being the same fixed frontier.
@@ -274,15 +274,19 @@ remains unchanged, the process transcript sets operator action required, and an
 operation.
 
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
-the fence migration has run, runs the remaining migrations, marks prior-process
-runner connections lost and propagates their loss before the generic scan,
-initializes every available configured blob store, binds the runner socket,
-binds the process socket, and then starts enrollment, admission, dispatch, and
-scheduling concurrently. No request, dispatch cursor advance, scheduler pass, or
-runner admission occurs before recovery completes. A blob-store initialization
-failure makes that store unavailable and does not fail the phase. Any other
-phase failure is a failed startup with a classified, key-bearing log line and a
-failure exit code.
+the fence migration has run, runs the remaining migrations, and binds the runner
+socket in recovery-only mode. Authenticated resume reconciles retained leases
+and results before the generic scan; ordinary enrollment is retryably refused.
+Recovery waits for outstanding execution authority and in-progress resume to
+settle, rechecks retained replacement commands, and marks only unreplaced
+prior-process connection epochs lost. With no retained execution it completes
+immediately. The generic scan excludes unsettled runner-owned attempts. Recovery
+admission precedes blob namespace checks and recovery frames access no blob
+state. After the generic scan, startup initializes configured blob stores, binds
+the process socket, and enables ordinary enrollment and scheduling. A blob-store
+initialization failure makes that store unavailable and does not fail the phase.
+Any other phase failure is a failed startup with a classified, key-bearing log
+line and a failure exit code.
 
 Each scan transaction classifies the lost tenure by its durable evidence and
 never fabricates a live end. A running turn with no model call ends its attempt
@@ -305,27 +309,28 @@ whose requests are all resolved with no current tool attempt is returned as
 resumable work for a scheduler pass. In the two failing branches only, one
 failure entry is appended, preceded in the tool branch by one correlated result
 entry per request in proposal order. Identity collisions are retried with fresh
-candidates. The startup inventory covers every session. A non-retriable,
-session-scoped reconstitution failure receives a durable operator item and its
-session is skipped; non-terminal sessions with valid lifecycle projections are
-parked, while terminal sessions retain their outcome. Missing or undecodable
-lifecycle projections retain independent operator evidence and remain suspended
-without automatic repair. Operator status exposes both kinds of pending
-supervision item. Successful startup reconstitution settles repaired terminal
-items without resuming them. Other sessions continue. Session-scoped recovery
-failures, including failed operator-item writes, remain suspended in the
-execution supervisor while operator parking retries. Runtime components that
-read durable lifecycle state launch only after those failures are parked
-durably. Only failures without session scope stop initial startup visibly.
-Fenced migrations and the startup scan run under guard monitoring, including
-operator-item identity reconciliation. Observed guard loss starts the recovery
-clock even while pool drain waits, so the elapsed bound and shutdown can
-interrupt that wait. During guard recovery, unscoped database failures
-throughout incarnation reconstruction, including repository-watch startup,
-continue reacquisition with the same capped backoff and elapsed bound, after
-closing the failed incarnation’s fenced pool. Migration validation, fence
-corruption, and reload corruption failures stop recovery visibly. Recovery is
-idempotent, and a stale observation rolls back.
+candidates. The generic startup inventory excludes sessions with an offered or
+claimed runner lease. A non-retriable, session-scoped reconstitution failure
+receives a durable operator item and its session is skipped; non-terminal
+sessions with valid lifecycle projections are parked, while terminal sessions
+retain their outcome. Missing or undecodable lifecycle projections retain
+independent operator evidence and remain suspended without automatic repair.
+Operator status exposes both kinds of pending supervision item. Successful
+startup reconstitution settles repaired terminal items without resuming them.
+Other sessions continue. Session-scoped recovery failures, including failed
+operator-item writes, remain suspended in the execution supervisor while
+operator parking retries. Runtime components that read durable lifecycle state
+launch only after those failures are parked durably. Only failures without
+session scope stop initial startup visibly. Fenced migrations and the startup
+scan run under guard monitoring, including operator-item identity
+reconciliation. Observed guard loss starts the recovery clock even while pool
+drain waits, so the elapsed bound and shutdown can interrupt that wait. During
+guard recovery, unscoped database failures throughout incarnation
+reconstruction, including repository-watch startup, continue reacquisition with
+the same capped backoff and elapsed bound, after closing the failed
+incarnation’s fenced pool. Migration validation, fence corruption, and reload
+corruption failures stop recovery visibly. Recovery is idempotent, and a stale
+observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering
@@ -511,16 +516,13 @@ A queued turn cannot activate while its placement is lost. Replacement and
 abandonment outbox events wake queued work, retaining hints when the eligibility
 channel is full. Committed turn and runner authority changes resume retained
 replacement commands without requiring a connected command client. Startup
-rechecks them after the generic scan and before client admission. Abandonment
-with an active turn records the existing-control result and creates no
-cancellation.
+rechecks them before and after the generic scan, before client admission.
+Abandonment with an active turn records the existing-control result and creates
+no cancellation.
 
 ## Planned
 
 - Pre-continuation runner takeover and retry supersession; design in
-  [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- Recovery-only startup: a runner reconciliation phase between migrations and
-  the generic scan; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in

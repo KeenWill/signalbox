@@ -178,12 +178,20 @@ impl PostgresStartupScanRepository {
         Self { pool }
     }
 
-    /// Reads the finite session inventory in deterministic order.
+    /// Reads the finite inventory excluding unsettled runner-owned execution.
     pub async fn sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
-        let rows =
-            sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM session ORDER BY session_id")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            "SELECT session.session_id FROM session
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM runner_lease_generation AS generation
+                    JOIN runner_current_lease_event AS head USING (lease_id, generation)
+                    JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+                    WHERE generation.session_id = session.session_id
+                        AND event.state_kind IN ('offered', 'claimed'))
+                 ORDER BY session.session_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(session_id_from_uuid)

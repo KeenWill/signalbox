@@ -29,6 +29,11 @@ reconciles the retained lease phase and terminal result against durable daemon
 state. Workspace reconciliation and sandbox supervision are listed under
 Planned.
 
+The daemon admits authenticated runner recovery after migrations and before the
+generic startup scan or blob checks. Ordinary enrollment waits until the process
+socket is bound and startup enables scheduling; sequencing is owned by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md).
+
 The three process-wire creation commands retain optional runner placement and
 initialize its unpinned status in the creation transaction. Creation validates
 the request against the active registration without pinning or issuing a grant
@@ -360,8 +365,6 @@ release dispatch.
 - Failure spooling and workspace, failure, and leak reconnect-inventory
   reconciliation over the wire:
   [runner protocol design](../design/runner-protocol.md).
-- Recovery-only startup before the generic scan:
-  [turn lifecycle design](../design/turn-lifecycle-and-scheduling.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:
