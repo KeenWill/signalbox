@@ -156,7 +156,8 @@ export function SessionWorkspaceSurface({
   const [refetchRequest, setRefetchRequest] = useState(0)
   const [showEvents, setShowEvents] = useState(initialAround !== undefined)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const workspaceRef = useRef<HTMLDivElement>(null)
+  const workspaceRef = useRef<HTMLElement>(null)
+  const detailsRef = useRef<HTMLDetailsElement>(null)
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(
     initialAround ? { kind: 'around', eventSequence: initialAround } : null,
@@ -435,7 +436,22 @@ export function SessionWorkspaceSurface({
   }, [session.error])
 
   return (
-    <div ref={workspaceRef} tabIndex={-1} className="surface-body session-workspace-surface">
+    <section
+      ref={workspaceRef}
+      tabIndex={-1}
+      aria-label="Session workspace"
+      className="surface-body session-workspace-surface"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || !detailsRef.current?.open) return
+        const nearest =
+          event.target instanceof Element ? event.target.closest('details[open]') : null
+        const details = nearest instanceof HTMLDetailsElement ? nearest : detailsRef.current
+        event.preventDefault()
+        event.stopPropagation()
+        details.open = false
+        details.querySelector('summary')?.focus()
+      }}
+    >
       {sessionId === null || timelineCapability !== 'available' ? (
         <p className="session-entry" role="status">
           {timelineCapability === 'checking' ? (
@@ -504,19 +520,7 @@ export function SessionWorkspaceSurface({
                       ? 'Live'
                       : 'Connecting…'}
               </span>
-              <details
-                className="session-header-details"
-                onKeyDown={(event) => {
-                  if (event.key !== 'Escape' || !event.currentTarget.open) return
-                  const details =
-                    event.target instanceof Element ? event.target.closest('details[open]') : null
-                  if (!(details instanceof HTMLDetailsElement)) return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  details.open = false
-                  details.querySelector('summary')?.focus()
-                }}
-              >
+              <details ref={detailsRef} className="session-header-details">
                 <summary>Session details</summary>
                 <div className="session-header-detail-content">
                   <p>Session {sessionId}</p>
@@ -783,6 +787,6 @@ export function SessionWorkspaceSurface({
           onEscape={() => (timelineRef.current ?? workspaceRef.current)?.focus()}
         />
       )}
-    </div>
+    </section>
   )
 }
