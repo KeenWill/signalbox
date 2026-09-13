@@ -54,9 +54,25 @@ impl RunnerDispatchService {
         {
             return Ok(RunnerDispatchOutcome::Daemon);
         }
-        let _permit = self.permit.acquire().await.map_err(|_| {
-            RunnerProtocolStoreError::Domain(signalbox_domain::RunnerDomainError::InvalidState)
-        })?;
+        let permit = Arc::clone(&self.permit)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                RunnerProtocolStoreError::Domain(signalbox_domain::RunnerDomainError::InvalidState)
+            })?;
+        let service = self.clone();
+        let authority = authority.clone();
+        finish_with_permit(
+            permit,
+            async move { service.execute_admitted(&authority).await },
+        )
+        .await
+    }
+
+    async fn execute_admitted(
+        &self,
+        authority: &ToolDispatchAuthority,
+    ) -> Result<RunnerDispatchOutcome, RunnerProtocolStoreError> {
         let mut changes = self.subscribe();
         let offered = {
             let _admission = self.lock_admission().await;
@@ -106,6 +122,57 @@ impl RunnerDispatchService {
                 lease = current;
             }
         }
+    }
+}
+
+// Once admission can write a lease, caller cancellation cannot release its slot.
+async fn finish_with_permit<F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    completion: F,
+) -> Result<RunnerDispatchOutcome, RunnerProtocolStoreError>
+where
+    F: std::future::Future<Output = Result<RunnerDispatchOutcome, RunnerProtocolStoreError>>
+        + Send
+        + 'static,
+{
+    tokio::spawn(async move {
+        let _permit = permit;
+        completion.await
+    })
+    .await
+    .map_err(|_| {
+        RunnerProtocolStoreError::Domain(signalbox_domain::RunnerDomainError::InvalidState)
+    })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_the_caller_keeps_the_slot_until_completion() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.expect("single slot");
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(finish_with_permit(permit, async move {
+            entered.send(()).expect("caller waiting");
+            completion.await.expect("durable completion");
+            Ok(RunnerDispatchOutcome::Completed)
+        }));
+        started.await.expect("admission started");
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert!(
+            slots.clone().try_acquire_owned().is_err(),
+            "pending durable work owns the slot"
+        );
+        complete.send(()).expect("completion survives cancellation");
+        let _successor =
+            tokio::time::timeout(std::time::Duration::from_secs(5), slots.acquire_owned())
+                .await
+                .expect("completed work releases the slot")
+                .expect("successor owns slot");
     }
 }
 
