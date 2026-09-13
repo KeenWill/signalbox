@@ -364,6 +364,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let label = LabelName::try_new(String::from("ready"))?;
     let comparison_pull_request =
         ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            required_check_conclusions: None,
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number: PullRequestNumber::new(NonZeroU64::new(7).expect("seven is positive")),
                 head_sha: default_head.clone(),
@@ -2124,6 +2125,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
             .await?;
         let source = &terminal_observation.observation.state().pull_requests()[0];
         let terminal = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            required_check_conclusions: None,
             context: source.context().clone(),
             lifecycle,
             mergeable_state: source.mergeable_state(),
@@ -2203,6 +2205,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     let compact_repository = RepositorySlug::try_new(String::from("compacted-restart/project"))?;
     let source = &comparison_baseline.state().pull_requests()[0];
     let merged = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_conclusions: None,
         context: source.context().clone(),
         lifecycle: RepoWatchPullRequestLifecycle::Merged,
         mergeable_state: source.mergeable_state(),
@@ -2267,6 +2270,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         CheckConclusion::Success,
     ));
     let changed = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_conclusions: None,
         context: merged.context().clone(),
         lifecycle: RepoWatchPullRequestLifecycle::Merged,
         mergeable_state: merged.mergeable_state(),
@@ -4306,6 +4310,7 @@ struct ConditionalPollFixture {
     requests: std::sync::Mutex<Vec<ConditionalRequest>>,
     changed: bool,
     thread_requests: std::sync::atomic::AtomicUsize,
+    check_requests: std::sync::atomic::AtomicUsize,
     thread_nodes: Vec<serde_json::Value>,
 }
 
@@ -4337,6 +4342,7 @@ impl ConditionalPollFixture {
             requests: std::sync::Mutex::new(Vec::new()),
             changed: false,
             thread_requests: std::sync::atomic::AtomicUsize::new(0),
+            check_requests: std::sync::atomic::AtomicUsize::new(0),
             thread_nodes: Vec::new(),
         }
     }
@@ -4408,6 +4414,41 @@ impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
         Ok(
             serde_json::json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":self.thread_nodes,"pageInfo":{"hasNextPage":false}}}}}}),
         )
+    }
+    async fn required_checks(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<
+        signalbox_module_repo_watch_v2::required_checks::RequiredCheckPage,
+        signalbox_module_repo_watch_v2::provider::ObservationError,
+    > {
+        use signalbox_module_repo_watch_v2::{
+            provider::ObservationError, required_checks::RequiredCheckPage,
+        };
+        self.check_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let v = &request["variables"];
+        let path = format!(
+            "/repos/{}/{}/pulls/{}",
+            v["owner"].as_str().expect("owner"),
+            v["name"].as_str().expect("name"),
+            v["number"].as_u64().expect("number")
+        );
+        let (pull, _) = self
+            .pages
+            .get(&path)
+            .ok_or(ObservationError::InvalidResponse)?;
+        Ok(RequiredCheckPage {
+            head: CommitSha::try_new(
+                pull["head"]["sha"]
+                    .as_str()
+                    .expect("fixture head")
+                    .to_owned(),
+            )
+            .expect("head"),
+            conclusions: vec![],
+            after: None,
+        })
     }
 }
 
@@ -4564,6 +4605,7 @@ async fn rejected_legacy_thread_snapshot_clears_durable_cursor() -> Result<(), B
                \"pageInfo\": {\"hasNextPage\": false, \"endCursor\": null}
              }
            },
+           \"checks\": {},
            \"retained\": []
          }'::jsonb)",
     )
@@ -4955,6 +4997,7 @@ fn goal_review_observation(
 ) -> signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
     let mut observed = dispatch_observation(repository, 1, OffsetDateTime::now_utc());
     let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        required_check_conclusions: None,
         context: PullRequestEventContext::new(PullRequestEventContextInput {
             number: PullRequestNumber::new(NonZeroU64::MIN),
             head_sha: observed.default_head.clone(),
@@ -5317,7 +5360,8 @@ async fn drain_bounded_polls(
     loop {
         let before = io.requests.lock().expect("requests").len()
             + io.thread_requests
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed)
+            + io.check_requests.load(std::sync::atomic::Ordering::Relaxed);
         let complete = signalbox_module_repo_watch_v2::poll_cache::poll_with_cache(
             io,
             store,
@@ -5329,7 +5373,8 @@ async fn drain_bounded_polls(
         .await?;
         let after = io.requests.lock().expect("requests").len()
             + io.thread_requests
-                .load(std::sync::atomic::Ordering::Relaxed);
+                .load(std::sync::atomic::Ordering::Relaxed)
+            + io.check_requests.load(std::sync::atomic::Ordering::Relaxed);
         assert!(
             after - before <= budget.get(),
             "attempt spent {} requests with budget {budget}",
@@ -6006,5 +6051,67 @@ async fn reopening_a_closed_pull_does_not_repeat_its_initial_snapshot_facts()
         ]
     );
     drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn a_head_change_during_required_check_observation_restarts_the_partial_pull()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::{poll_cache::poll_with_cache, provider::ObservationError};
+    let (_container, _core, url) = postgres().await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new("example/project".to_owned())?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let mut io = bounded_poll_fixture();
+    assert!(
+        !poll_with_cache(
+            &io,
+            &store,
+            &repository,
+            &[],
+            MERGED_RETENTION,
+            std::num::NonZeroUsize::new(7).expect("partial budget")
+        )
+        .await?
+    );
+    let newer_head = "4444444444444444444444444444444444444444";
+    io.pages
+        .get_mut("/repos/example/project/pulls/1")
+        .expect("pull")
+        .0["head"]["sha"] = serde_json::json!(newer_head);
+    io.changed = true;
+    let budget = std::num::NonZeroUsize::new(100).expect("complete budget");
+    assert!(matches!(
+        poll_with_cache(&io, &store, &repository, &[], MERGED_RETENTION, budget).await,
+        Err(ObservationError::HeadChanged)
+    ));
+    // The second attempt must re-read the staged REST head instead of remaining stuck on it.
+    let original_head = "1111111111111111111111111111111111111111";
+    let replacements: Vec<_> = io
+        .pages
+        .iter()
+        .filter(|(path, _)| path.contains(original_head))
+        .map(|(path, page)| (path.replace(original_head, newer_head), page.clone()))
+        .collect();
+    io.pages.extend(replacements);
+    assert!(poll_with_cache(&io, &store, &repository, &[], MERGED_RETENTION, budget).await?);
+    let baseline = store
+        .ingest_baseline(&repository)
+        .await?
+        .observation
+        .expect("complete baseline");
+    assert_eq!(
+        baseline.state().pull_requests()[0]
+            .context()
+            .head_sha()
+            .as_str(),
+        newer_head
+    );
+    assert_eq!(
+        baseline.state().pull_requests()[0].required_check_conclusions(),
+        Some([].as_slice())
+    );
     Ok(())
 }

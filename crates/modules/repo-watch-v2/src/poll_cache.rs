@@ -34,6 +34,10 @@ pub trait ConditionalObservationRead: Send + Sync {
         &self,
         request: Value,
     ) -> impl Future<Output = Result<Value, ObservationError>> + Send;
+    fn required_checks(
+        &self,
+        request: Value,
+    ) -> impl Future<Output = Result<crate::required_checks::RequiredCheckPage, ObservationError>> + Send;
 }
 
 impl ConditionalObservationRead for GitHubClient {
@@ -55,6 +59,12 @@ impl ConditionalObservationRead for GitHubClient {
     }
     async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
         GitHubObservationRead::threads(self, request).await
+    }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+        GitHubObservationRead::required_checks(self, request).await
     }
 }
 
@@ -935,6 +945,12 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
     async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
         self.io.threads(request).await
     }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+        self.io.required_checks(request).await
+    }
 }
 
 const WEBHOOK_PULL_ATTEMPT_LIMIT: i32 = 3;
@@ -1040,6 +1056,14 @@ impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadCounts<'
         self.requests
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.io.threads(request).await
+    }
+    async fn required_checks(
+        &self,
+        request: Value,
+    ) -> Result<crate::required_checks::RequiredCheckPage, ObservationError> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.io.required_checks(request).await
     }
 }
 

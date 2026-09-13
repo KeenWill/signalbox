@@ -702,6 +702,7 @@ mod tests {
                     .into_iter()
                     .map(|context| {
                         RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+                            required_check_conclusions: None,
                             context: context.clone(),
                             lifecycle: RepoWatchPullRequestLifecycle::Open,
                             mergeable_state: MergeableState::Unknown,
