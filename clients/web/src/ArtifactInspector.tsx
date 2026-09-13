@@ -52,10 +52,19 @@ export const inspectedArtifact = (
       descriptor.display_filename[0] ??
       attachmentTypeLabel(descriptor.declared_media_type, presentationKind),
   }
+  if (presentationKind === 'document')
+    return {
+      ...identity,
+      kind: 'document',
+      source: { kind: 'signalbox_blob', descriptor },
+      documentKind:
+        descriptor.declared_media_type.split(';', 1)[0]?.toLowerCase() === 'application/pdf'
+          ? 'pdf'
+          : 'document',
+    }
   return presentationKind === 'image' ||
-    (presentationKind !== 'document' &&
-      (selectImageView(descriptor) !== undefined ||
-        selectBoundedOriginalView(descriptor) !== undefined))
+    selectImageView(descriptor) !== undefined ||
+    selectBoundedOriginalView(descriptor) !== undefined
     ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
     : { ...identity, kind: 'blob', descriptor }
 }

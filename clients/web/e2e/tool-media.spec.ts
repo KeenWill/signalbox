@@ -131,6 +131,8 @@ for (const [mediaType, label, source] of [
     await expect(
       pane.getByRole('article', { name: `Artifact ${label}`, exact: true }),
     ).toBeVisible()
+    if (source === 'tool')
+      await expect(pane.locator('.artifact-document-placeholder')).toHaveText('PDF document')
     await expect(pane.getByRole('link', { name: 'Download' })).toBeVisible()
     await expect(pane).not.toContainText('sha256:')
   })
