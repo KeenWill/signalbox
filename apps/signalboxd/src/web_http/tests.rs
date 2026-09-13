@@ -360,6 +360,48 @@ fn example_model_configuration() -> HubModelConfiguration {
         .expect("the shared model configuration fixture is valid")
 }
 
+#[tokio::test]
+async fn session_title_rejects_other_metadata_fields() {
+    let session = Uuid::now_v7();
+    let command = Uuid::now_v7();
+    for field in ["tags", "attributes", "archived"] {
+        let mut body =
+            serde_json::json!({"command_id": command.to_string(), "title": "Review fixes"});
+        body[field] = serde_json::Value::Null;
+        let response = production_router(None, None, None, None, None)
+            .oneshot(
+                Request::patch(format!("/api/sessions/{session}/metadata"))
+                    .header(header::HOST, "localhost")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("valid HTTP request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "unadmitted field {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_title_rejects_cross_origin_before_command_handling() {
+    let response = production_router(None, None, None, None, None)
+        .oneshot(
+            Request::patch(format!("/api/sessions/{}/metadata", Uuid::now_v7()))
+                .header(header::HOST, "localhost")
+                .header(header::ORIGIN, "http://other.example")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("valid HTTP request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
 fn rated_example_target() -> ResolvedProviderTarget {
     ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid::uuid!(
         "20000000-0000-4000-8000-000000000001"

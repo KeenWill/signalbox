@@ -7,3 +7,9 @@
 ```rust
 pub fn image_presentation_capability() -> signalbox_model_runtime::ImagePresentationCapability;
 ```
+
+## document_presentation_capability
+
+```rust
+pub fn document_presentation_capability() -> signalbox_model_runtime::DocumentPresentationCapability;
+```

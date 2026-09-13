@@ -57,6 +57,7 @@ impl DaemonFileMediaExecutor {
     pub async fn compose(
         pool: PgPool,
         stores: Arc<BlobStoreRegistry>,
+        maximum_raster_dimension: u32,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let executable =
             std::env::current_exe().map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -66,7 +67,17 @@ impl DaemonFileMediaExecutor {
             .join("signalbox-file-media-text-worker");
         let image_worker = worker.with_file_name("signalbox-file-media-image-worker");
         let pdf_worker = worker.with_file_name("signalbox-file-media-pdf-worker");
-        Self::compose_with_workers(pool, stores, worker, image_worker, pdf_worker).await
+        let svg_worker = worker.with_file_name("signalbox-file-media-svg-worker");
+        Self::compose_with_workers(
+            pool,
+            stores,
+            worker,
+            image_worker,
+            pdf_worker,
+            svg_worker,
+            maximum_raster_dimension,
+        )
+        .await
     }
 
     async fn compose_with_workers(
@@ -75,6 +86,8 @@ impl DaemonFileMediaExecutor {
         worker: std::path::PathBuf,
         image_worker: std::path::PathBuf,
         pdf_worker: std::path::PathBuf,
+        svg_worker: std::path::PathBuf,
+        maximum_raster_dimension: u32,
     ) -> Result<(CompiledToolCatalog, Self), DaemonToolExecutorError> {
         let declaration = signalbox_file_media_adapters_text::text_family_declaration()
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
@@ -98,7 +111,24 @@ impl DaemonFileMediaExecutor {
             WorkerBinding::try_new(pdf_worker, pdf.clone())
                 .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
         );
-        declarations.push(pdf);
+        declarations.push(
+            signalbox_file_media_adapter_pdf::declaration_with_raster_dimension(
+                maximum_raster_dimension,
+            )
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
+        let svg = signalbox_file_media_adapter_svg::declaration()
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
+        bindings.push(
+            WorkerBinding::try_new(svg_worker, svg.clone())
+                .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
+        declarations.push(
+            signalbox_file_media_adapter_svg::declaration_with_raster_dimension(
+                maximum_raster_dimension,
+            )
+            .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
+        );
         let processor = SandboxedFileMediaProcessor::try_new(
             "/usr/bin/bwrap",
             bindings,
@@ -259,7 +289,7 @@ impl FileUseResolver for DaemonFileUseResolver {
                 .await
                 .map_err(catalog_resolution_error)?
                 .ok_or(FileUseResolutionError::BlobMissing)?;
-            let image_target = if let Some(models) = &self.models {
+            let presentation_target = if let Some(models) = &self.models {
                 let target = self
                     .visibility
                     .file_use_target(self.request.as_ref().ok_or_else(invalid)?)
@@ -270,13 +300,14 @@ impl FileUseResolver for DaemonFileUseResolver {
                         )
                     })?;
                 let model = models.resolve(target).ok_or_else(invalid)?;
-                self.capabilities
-                    .resolve(&signalbox_model_runtime::ResolvedTarget::new(
-                        model.provider_model().to_owned(),
-                    ))
-                    .ok_or_else(invalid)?
-                    .image_presentation()
-                    .cloned()
+                Some(
+                    self.capabilities
+                        .resolve(&signalbox_model_runtime::ResolvedTarget::new(
+                            model.provider_model().to_owned(),
+                        ))
+                        .ok_or_else(invalid)?
+                        .clone(),
+                )
             } else {
                 None
             };
@@ -315,7 +346,18 @@ impl FileUseResolver for DaemonFileUseResolver {
                 },
                 selector,
             )
-            .with_image_target(image_target))
+            .with_image_target(
+                presentation_target
+                    .as_ref()
+                    .and_then(|target| target.image_presentation())
+                    .cloned(),
+            )
+            .with_document_target(
+                presentation_target
+                    .as_ref()
+                    .and_then(|target| target.document_presentation())
+                    .cloned(),
+            ))
         })
     }
 }
@@ -548,12 +590,17 @@ generated_artifact = "fixture"
         let pdf_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_pdf_worker")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-pdf-worker"));
+        let svg_worker = std::env::var_os("NEXTEST_BIN_EXE_signalbox_file_media_svg_worker")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| worker.with_file_name("signalbox-file-media-svg-worker"));
         let (family, executor) = DaemonFileMediaExecutor::compose_with_workers(
             pool.clone(),
             stores,
             worker,
             image_worker,
             pdf_worker,
+            svg_worker,
+            signalbox_file_media_runtime::MAX_IMAGE_AXIS,
         )
         .await?;
         let composed = base.with_compiled_catalog(family)?;

@@ -42,7 +42,7 @@ untrusted until the registry has reparsed and cross-checked it.
 
 With `file_media = true` and blob storage configured, the daemon registers
 `file_inspect` and `file_read` as external-effect tools. Startup verifies the
-compiled text, image and PDF workers beside the daemon executable through
+compiled text, image, PDF and SVG workers beside the daemon executable through
 `/usr/bin/bwrap` and the delegated `SIGNALBOX_FILE_MEDIA_CGROUP_ROOT`. The
 resolver reuses `blob_read`'s projected-frontier attachment proof and completes
 catalog work before source or worker I/O. A digest outside that frontier is
@@ -77,8 +77,8 @@ Format adapters add no MIME branch to the tool executor, the bridge, or the
 daemon, for the same reason.
 
 Registry construction admits image views with a declared direct or generated
-kind and a finite set of output media types. Audio and general-file views are
-rejected.
+kind and a finite set of output media types, and direct PDF document views.
+Audio and other general-file views are rejected.
 
 An empty registry is valid, so the daemon boots with no adapters.
 
@@ -121,10 +121,10 @@ Image output bytes use a separate bounded binary channel on worker stderr; other
 stderr is drained and discarded. Diagnostics are never parser evidence,
 telemetry content, or model-visible output.
 
-No adapter renders, executes active content, follows links, extracts embedded
-files, fetches external resources, or recurses into embedded containers.
-Recognized encrypted or locked content is a terminal outcome, and no password
-channel exists.
+No adapter executes active content, follows links, extracts embedded files,
+fetches external resources, or recurses into embedded containers. Recognized
+encrypted or locked content is a terminal outcome, and no password channel
+exists.
 
 A reader revision is immutable. An earlier durable tool result keeps what the
 model saw while a later request may use a newer revision. Why: a durable result
@@ -168,11 +168,27 @@ recovery is registered as part of the reader's validation.
 
 ## Planned
 
-- Audio and general-file views, whose derived bytes publish and register before
+- Derived audio and general-file views, whose bytes publish and register before
   the read's result commits and leave no dangling result on failure. See the
   [design](../design/file-and-media.md).
 
-## Image presentation
+## Rich media presentation
+
+The PDF reader's `document` view returns a direct validated PDF reference for
+native document presentation on Claude Code CLI. Codex CLI and the HTTP adapters
+do not present documents. `numeric_bounds.max_document_presentation_bytes`
+lowers Claude's document byte bound under the complete request bound.
+
+The PDF reader's `page_image` view renders one page inside its sandboxed worker.
+`page` is one-based; optional positive `scale` defaults to 1 and is reduced to
+fit the raster dimension and pixel bounds. The derived PNG retains its PDF
+source identity and follows generated-image validation and publication.
+
+The SVG reader's `raster` view renders a PNG inside its sandboxed worker, with
+an embedded fallback font. It preserves the SVG source identity and presents the
+independently validated image reader identity through generated-image
+publication. `numeric_bounds.max_raster_dimension` lowers the output-axis bound;
+`"none"` retains the compiled image-axis ceiling.
 
 PNG, JPEG and WebP readers offer direct image, downscale/compress and crop
 views. Inspection reads at most a 64 KiB prefix. A presentation read validates
@@ -198,18 +214,18 @@ unreferenced blob may remain after publication. Direct reads publish and
 register nothing.
 
 Codex CLI presents image parts through `turn/start` RPC inputs; Claude Code CLI
-uses base64 image blocks in stream-JSON input. Adapters encode authenticated
-bytes without format detection. Their capability records bound accepted types,
-one image and the complete encoded request. Daemon
+restores base64 image and PDF document blocks in native JSONL history. Adapters
+encode authenticated bytes without format detection. Their capability records
+bound accepted types, one media part and the complete encoded request. Daemon
 `max_image_presentation_bytes` and `max_image_request_bytes` lower these limits;
-`"none"` leaves the adapter limits. The process admits at most 16 image
+`"none"` leaves the adapter limits. The process admits at most 16 media
 references, eight MiB each and 32 MiB in aggregate. Encoding and request framing
 count against the request bound.
 
 Preparation authenticates each rendered reference against its terminal tool
 attempt and catalog length before source I/O. It materializes only admitted
-bounded images and runs no reader. Unsupported presentations fail before send
-authorization. Database unavailability retains infrastructure failure, absent
-replicas retain missing-blob failure, and inconsistent authority or blob-store
-integrity remains fail-closed corruption. Ordinary JSON cannot issue image
-authority.
+bounded images or documents and runs no reader. Unsupported presentations fail
+before send authorization. Database unavailability retains infrastructure
+failure, absent replicas retain missing-blob failure, and inconsistent authority
+or blob-store integrity remains fail-closed corruption. Ordinary JSON cannot
+issue media authority.

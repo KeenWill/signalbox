@@ -31,7 +31,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use futures_util::{Stream, StreamExt, stream};
 use headers::{
@@ -560,6 +560,10 @@ fn production_router_with_budget(
     // `same_origin_router` additionally gates the whole listener, `/bootstrap`
     // and the static assets included, so this route layer is the inner of two.
     let session_inputs = Router::new()
+        .route(
+            "/sessions/{session_id}/metadata",
+            patch(metadata::replace_title),
+        )
         .route("/sessions/{session_id}/input", post(session_submit_input))
         .route_layer(middleware::from_fn(validate_json_mutation))
         .route_layer(middleware::from_fn(validate_admitted_host))
@@ -573,6 +577,11 @@ fn production_router_with_budget(
         .route("/sessions/{session_id}/live", get(session_live_snapshot))
         .route("/sessions/{session_id}/follow", get(session_live_follow))
         .route("/sessions", get(session_catalog))
+        .route("/templates", get(templates::list))
+        .route(
+            "/templates/{name}",
+            get(templates::detail).put(templates::save),
+        )
         .route("/sessions/rates", get(session_rates))
         .route("/search", get(search))
         .route("/usage/summary", get(usage_summary))
@@ -1041,6 +1050,7 @@ async fn wait_for_web_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
 }
 
 mod response;
+mod templates;
 use response::{api_not_found, static_assets_not_configured};
 pub(crate) use response::{application_error, transport_error};
 
@@ -1077,6 +1087,7 @@ mod usage;
 use usage::{usage_aggregate_cost_dto, usage_cost_dto};
 use usage::{usage_calls, usage_summary};
 
+mod metadata;
 mod timeline;
 #[cfg(test)]
 use timeline::{TimelineDetailQuery, parse_detail_query};

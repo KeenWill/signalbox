@@ -39,6 +39,7 @@ mod capability;
 #[cfg(feature = "cli-process")]
 mod cli_process;
 mod credential;
+mod document;
 mod evidence;
 mod image;
 mod input_count;
@@ -72,6 +73,9 @@ pub use cli_process::{
 pub use credential::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
     CredentialValue,
+};
+pub use document::{
+    DocumentInput, DocumentPresentationCapability, DocumentReference, document_request_byte_limit,
 };
 pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,

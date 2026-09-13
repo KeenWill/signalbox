@@ -232,3 +232,66 @@ fn suppressed_proposal_forces_runtime_safety_denial() {
         [InitialToolApproval::RuntimeSafetyDeny]
     );
 }
+
+#[test]
+fn declared_credential_authority_requires_a_fresh_judge_for_each_request() {
+    use signalbox_domain::{
+        ModelCallId, NormalizedToolArguments, RecordedUserOverride, SessionId, ToolName,
+    };
+    let arguments = r#"{"credential_purpose":"fixture-authority"}"#;
+    let name = ToolName::try_new("guarded".to_owned()).expect("name");
+    let definition = crate::ToolDefinition::new(
+        name.clone(),
+        "fixture".to_owned(),
+        crate::ToolInputSchema::try_new(r#"{"type":"object"}"#.to_owned()).expect("schema"),
+        signalbox_domain::ToolPermissionDefault::Auto,
+        signalbox_domain::ToolEffectClass::ExternalEffect,
+    )
+    .with_judge_required_argument("credential_purpose".to_owned());
+    let prior = recorded_guarded_override();
+    let recorded = RecordedUserOverride::new(
+        prior.command(),
+        identity(1, SessionId::from_uuid),
+        prior.denied_request(),
+        identity(2, ModelCallId::from_uuid),
+        name,
+        NormalizedToolArguments::try_from_provider_text(arguments.to_owned()).expect("arguments"),
+    );
+    let service = ModelCallExecutionService::new(
+        FixedIds::baseline(),
+        FakePrepare {
+            outcomes: VecDeque::new(),
+            calls: 0,
+        },
+        UnusedFailure,
+        UnusedAuthorization,
+        UnusedObservation,
+        UnusedProvider,
+        InProcessAttemptDispatchGate::default(),
+        None,
+    );
+    let response = super::support::completed_with_tools(vec![
+        guarded_proposal(arguments),
+        guarded_proposal(arguments),
+        guarded_proposal("{}"),
+    ]);
+    for posture in [
+        DangerousToolAutoApproval::Disabled,
+        DangerousToolAutoApproval::ApproveAll,
+    ] {
+        let approvals = service.tool_approvals(
+            &response,
+            posture,
+            std::slice::from_ref(&definition),
+            std::slice::from_ref(&recorded),
+        );
+        assert_eq!(
+            &approvals[..2],
+            &[
+                InitialToolApproval::Delegated,
+                InitialToolApproval::Delegated
+            ]
+        );
+        assert_ne!(approvals[2], InitialToolApproval::Delegated);
+    }
+}
