@@ -1,5 +1,8 @@
 import type { WebTimelineTextExcerpt } from '../../generated/web-contract.mjs'
-import { ARTIFACT_EXPANDED_CHARACTERS, boundArtifactText } from '../artifacts/artifactTypes'
+import { boundArtifactText } from '../artifacts/artifactTypes'
+
+// The generated decodeWebSessionTimelineDetailPage contract bounds projected bodies to 64 KiB.
+const MAX_TOOL_EXCERPT_BYTES = 64 * 1024
 
 export type Fields = Record<string, unknown>
 
@@ -17,7 +20,8 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
   if (
     excerpt?.offset_bytes !== '0' ||
     excerpt.continuation != null ||
-    excerpt.text.length > ARTIFACT_EXPANDED_CHARACTERS
+    excerpt.text.length > MAX_TOOL_EXCERPT_BYTES ||
+    new TextEncoder().encode(excerpt.text).byteLength > MAX_TOOL_EXCERPT_BYTES
   )
     return {}
   try {

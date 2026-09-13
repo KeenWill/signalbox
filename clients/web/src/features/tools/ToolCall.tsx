@@ -155,7 +155,11 @@ function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
     <>
       <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
       {typeof result.content === 'string' ? (
-        <TextPreview text={result.content} label="File contents" />
+        result.content === '' ? (
+          <p>No content in this read</p>
+        ) : (
+          <TextPreview text={result.content} label="File contents" />
+        )
       ) : (
         <Result result={result} resultExcerpt={resultExcerpt} />
       )}

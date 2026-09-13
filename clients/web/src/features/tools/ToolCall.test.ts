@@ -11,6 +11,77 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it('summarizes a complete large file result without dropping its partial-file evidence', () => {
+    const markup = render(
+      toolExample(
+        'read_file',
+        { path: 'file.txt' },
+        {
+          content: 'x'.repeat(20 * 1024),
+          truncated: true,
+          next_offset: 20 * 1024,
+        },
+      ),
+    )
+    expect(markup).toContain('aria-label="File contents"')
+    expect(markup).toContain('Showing part of the file')
+    expect(markup.length).toBeLessThan(6_000)
+  })
+
+  it('retains the outcome after large complete command output', () => {
+    const markup = render(
+      toolExample(
+        'sandboxed_exec',
+        { program: 'tool' },
+        {
+          stdout: { text: 'x'.repeat(20 * 1024) },
+          outcome: { kind: 'exited', code: 7 },
+        },
+      ),
+    )
+    expect(markup).toContain('Exit 7')
+    expect(markup.length).toBeLessThan(6_000)
+  })
+
+  it('retains links in complete large search results', () => {
+    const markup = render(
+      toolExample(
+        'web_search',
+        { query: 'example' },
+        {
+          results: [
+            { snippet: 'x'.repeat(20 * 1024), title: 'Example', url: 'https://example.com/' },
+          ],
+        },
+      ),
+    )
+    expect(markup).toContain('href="https://example.com/"')
+    expect(markup.length).toBeLessThan(6_000)
+  })
+
+  it('bounds structured parsing by UTF-8 bytes instead of display characters', () => {
+    // The generated timeline-detail body contract admits at most 64 KiB.
+    const limit = 64 * 1024
+    const envelope = JSON.stringify({ value: '' }).length
+    const text = JSON.stringify({ value: 'x'.repeat(limit - envelope) })
+    expect(excerptFields(toolExcerpt(text))).toHaveProperty('value')
+    expect(excerptFields(toolExcerpt(`${text} `))).toEqual({})
+    expect(excerptFields(toolExcerpt(JSON.stringify({ value: '😀'.repeat(limit / 4) })))).toEqual(
+      {},
+    )
+  })
+
+  it('labels a successful empty file read on the result page', () => {
+    const [, tool] = toolExample(
+      'read_file',
+      { path: 'empty.txt' },
+      { content: '', offset: 0, truncated: false },
+    )
+    const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+    expect(markup).toContain('No content in this read')
+    expect(markup).not.toContain('Showing part of the file')
+  })
+
   it('retains generic arguments when a familiar tool name is unknown to the catalog', () => {
     const [tool] = toolExample('read_file', { resource: 'x' }, {})
     if (tool.evidence.type !== 'physical_attempt') throw new Error('Physical fixture required')
