@@ -13,7 +13,12 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
-import { createRenameCommandId, renameSession, retainedRename } from './session-metadata'
+import {
+  createRenameCommandId,
+  renameSession,
+  retainedRename,
+  suggestSessionTitle,
+} from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
@@ -102,6 +107,14 @@ const SessionMetadata = ({
 }) => {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
+  const [suggesting, setSuggesting] = useState(false)
+  const [suggestion, setSuggestion] = useState<string | null>(null)
+  const suggestionRequest = useRef<AbortController | null>(null)
+  const suggestButton = useRef<HTMLButtonElement>(null)
+  const acceptButton = useRef<HTMLButtonElement>(null)
+  const cancelButton = useRef<HTMLButtonElement>(null)
+  const returnToSuggestion = useRef(false)
+  useEffect(() => () => suggestionRequest.current?.abort(), [])
   const [title, setTitle] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -111,11 +124,14 @@ const SessionMetadata = ({
   const returnRenameFocus = useRef(false)
   useEffect(() => {
     if (editing) titleInput.current?.focus()
-    else if (returnRenameFocus.current) {
+    else if (suggestion) acceptButton.current?.focus()
+    else if (suggesting) cancelButton.current?.focus()
+    else if (returnRenameFocus.current && error === null) {
       returnRenameFocus.current = false
-      renameButton.current?.focus()
+      const target = returnToSuggestion.current ? suggestButton : renameButton
+      target.current?.focus()
     }
-  }, [editing])
+  }, [editing, suggestion, suggesting, error])
   const provenance = summary.repository_watch
   const repositoryUrl = provenance
     ? `https://github.com/${provenance.repository.split('/').map(encodeURIComponent).join('/')}`
@@ -125,7 +141,36 @@ const SessionMetadata = ({
     : undefined
   const close = () => {
     returnRenameFocus.current = true
+    suggestionRequest.current?.abort()
+    suggestionRequest.current = null
+    setSuggesting(false)
+    setSuggestion(null)
+    setError(null)
     setEditing(false)
+  }
+  const suggest = async () => {
+    if (suggestionRequest.current) return
+    const request = new AbortController()
+    suggestionRequest.current = request
+    returnToSuggestion.current = true
+    setError(null)
+    setSuggesting(true)
+    try {
+      const result = await suggestSessionTitle(summary.session_id, request.signal)
+      if (suggestionRequest.current !== request) return
+      setTitle(result.title)
+      setSuggestion(result.title)
+    } catch (failure) {
+      if (request.signal.aborted) return
+      setError(
+        failure instanceof Error ? failure.message : 'A name could not be suggested. Try again.',
+      )
+    } finally {
+      if (suggestionRequest.current === request) {
+        suggestionRequest.current = null
+        setSuggesting(false)
+      }
+    }
   }
   const save = async (event: FormEvent) => {
     event.preventDefault()
@@ -182,6 +227,7 @@ const SessionMetadata = ({
         aria-label={`Rename session ${summary.session_id}`}
         onClick={() => {
           onRename()
+          returnToSuggestion.current = false
           intent.current = retainedRename(summary.session_id)
           setTitle(
             intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
@@ -191,11 +237,29 @@ const SessionMetadata = ({
           )
           setEditing(true)
         }}
-        disabled={editing || !canRename}
+        disabled={editing || suggesting || suggestion !== null || !canRename}
       >
         Rename
       </button>
-      {editing && (
+      <button
+        type="button"
+        ref={suggestButton}
+        aria-label={`Suggest a name for session ${summary.session_id}`}
+        onClick={() => {
+          onRename()
+          intent.current = retainedRename(summary.session_id)
+          if (intent.current) {
+            returnToSuggestion.current = true
+            setTitle(intent.current.title)
+            setError('A previous rename is unconfirmed. Save retries that title.')
+            setEditing(true)
+          } else void suggest()
+        }}
+        disabled={editing || suggesting || suggestion !== null || !canRename}
+      >
+        Suggest a name
+      </button>
+      {(editing || suggesting || suggestion !== null || error !== null) && (
         <form
           className="catalog-rename"
           onSubmit={save}
@@ -206,21 +270,40 @@ const SessionMetadata = ({
             if (!saving) close()
           }}
         >
-          <label>
-            Session title
-            <input
-              ref={titleInput}
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              disabled={saving}
-              readOnly={intent.current !== null}
-              required
-            />
-          </label>
-          <button type="submit" disabled={saving || title.length === 0}>
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-          <button type="button" disabled={saving} onClick={close}>
+          {suggesting ? (
+            <p role="status">Suggesting a name…</p>
+          ) : suggestion && !editing ? (
+            <p role="status" className="catalog-suggested-title">
+              {suggestion}
+            </p>
+          ) : editing ? (
+            <label>
+              Session title
+              <input
+                ref={titleInput}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                disabled={saving}
+                readOnly={intent.current !== null}
+                required
+              />
+            </label>
+          ) : null}
+          {(editing || suggestion !== null) && (
+            <button ref={acceptButton} type="submit" disabled={saving || title.length === 0}>
+              {saving ? 'Saving…' : suggestion && !editing ? 'Accept' : 'Save'}
+            </button>
+          )}
+          {suggestion && !editing && (
+            <button
+              type="button"
+              disabled={saving || intent.current !== null}
+              onClick={() => setEditing(true)}
+            >
+              Edit
+            </button>
+          )}
+          <button ref={cancelButton} type="button" disabled={saving} onClick={close}>
             Cancel
           </button>
           {error && <p role="alert">{error}</p>}

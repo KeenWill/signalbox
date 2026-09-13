@@ -96,7 +96,7 @@
   padding: 0 var(--product-space) var(--product-space);
 }
 
-.catalog-metadata > button {
+.catalog-metadata > button:first-of-type {
   margin-left: auto;
 }
 
@@ -160,4 +160,10 @@
 
 .catalog-metadata > a:hover {
   background: var(--surface-3);
+}
+
+.catalog-suggested-title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

@@ -1199,3 +1199,186 @@ for (const finish of ['Save', 'Cancel', 'Escape']) {
       .toBe(continuationSummaries[0]?.session_id)
   })
 }
+
+test('suggests a title inline and saves only after keyboard acceptance', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  const patches: Array<{ command_id: string; title: string }> = []
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, async (route) => {
+    expect(route.request().method()).toBe('POST')
+    expect(route.request().postDataJSON()).toEqual({})
+    await route.fulfill({ json: { title: 'Verify the release' } })
+  })
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    patches.push(route.request().postDataJSON())
+    await route.fulfill({ status: 204 })
+  })
+  await page.goto('/sessions')
+  const suggest = page.getByRole('button', {
+    name: `Suggest a name for session ${firstSessionId}`,
+    exact: true,
+  })
+  await suggest.focus()
+  await page.keyboard.press('Enter')
+  const accept = page.getByRole('button', { name: 'Accept', exact: true })
+  await expect(accept).toBeFocused()
+  await expect(page.getByText('Verify the release', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
+  expect(patches).toEqual([])
+  const desktop = testInfo.outputPath('suggested-title-desktop-dark.png')
+  await page.screenshot({ path: desktop })
+  await testInfo.attach('suggested-title-desktop-dark', { path: desktop, contentType: 'image/png' })
+  await page.getByRole('button', { name: 'Use light theme' }).click()
+  const light = testInfo.outputPath('suggested-title-desktop-light.png')
+  await page.screenshot({ path: light })
+  await testInfo.attach('suggested-title-desktop-light', { path: light, contentType: 'image/png' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  const phone = testInfo.outputPath('suggested-title-phone.png')
+  await page.screenshot({ path: phone })
+  await testInfo.attach('suggested-title-phone', { path: phone, contentType: 'image/png' })
+  await accept.press('Enter')
+  await expect(accept).toBeHidden()
+  await expect(suggest).toBeFocused()
+  expect(patches).toHaveLength(1)
+  expect(patches[0]?.title).toBe('Verify the release')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('edits a suggested title before saving and preserves rename retry identity', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  const patches: Array<{ command_id: string; title: string }> = []
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, (route) =>
+    route.fulfill({ json: { title: 'Verify the release' } }),
+  )
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    patches.push(route.request().postDataJSON())
+    if (patches.length === 1) {
+      await route.fulfill({
+        status: 503,
+        json: {
+          error: {
+            kind: 'application',
+            code: 'metadata_outcome_unconfirmed',
+            message: 'Retry to confirm the title.',
+          },
+        },
+      })
+    } else await route.fulfill({ status: 204 })
+  })
+  await page.goto('/sessions')
+  const suggest = page.getByRole('button', {
+    name: `Suggest a name for session ${firstSessionId}`,
+    exact: true,
+  })
+  await suggest.click()
+  await page.getByRole('button', { name: 'Edit', exact: true }).click()
+  const input = page.getByRole('textbox', { name: 'Session title', exact: true })
+  await expect(input).toBeFocused()
+  await expect(input).toHaveValue('Verify the release')
+  await input.fill('Release checklist review')
+  await input.press('Enter')
+  await expect(page.getByRole('alert')).toContainText('Retry to confirm the title.')
+  await expect(input).toHaveAttribute('readonly', '')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(input).toBeHidden()
+  await expect(suggest).toBeFocused()
+  expect(patches).toHaveLength(2)
+  expect(patches[0]?.title).toBe('Release checklist review')
+  expect(patches[1]).toEqual(patches[0])
+})
+
+test('reports suggestion failures without changing the title and permits retry', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'session_title_generation_failed',
+          message: 'A name could not be suggested. Try again.',
+        },
+      },
+    }),
+  )
+  await page.goto('/sessions')
+  const suggest = page.getByRole('button', {
+    name: `Suggest a name for session ${firstSessionId}`,
+    exact: true,
+  })
+  await suggest.click()
+  await expect(page.getByRole('alert')).toContainText('A name could not be suggested. Try again.')
+  await expect(page.getByRole('button', { name: 'Accept', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Escape')
+  await expect(suggest).toBeFocused()
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, (route) =>
+    route.fulfill({ json: { title: 'Verify the release' } }),
+  )
+  await suggest.click()
+  await expect(page.getByRole('button', { name: 'Accept', exact: true })).toBeFocused()
+  await page.getByRole('button', { name: 'Accept', exact: true }).press('Escape')
+  await expect(suggest).toBeFocused()
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
+  expect(problems.pageErrors).toEqual([])
+  expect(problems.consoleErrors.filter((message) => !message.includes('503'))).toEqual([])
+})
+
+test('rejects a malformed suggestion instead of offering to save it', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, (route) =>
+    route.fulfill({ json: { title: '' } }),
+  )
+  await page.goto('/sessions')
+  await page
+    .getByRole('button', { name: `Suggest a name for session ${firstSessionId}`, exact: true })
+    .click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Accept', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Release verification/ })).toBeVisible()
+})
+
+test('cancels a pending suggestion without reopening the editor when it completes', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  const pending = Promise.withResolvers<void>()
+  const answered = Promise.withResolvers<void>()
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, async (route) => {
+    await pending.promise
+    await route.fulfill({ json: { title: 'Late generated title' } })
+    answered.resolve()
+  })
+  await page.goto('/sessions')
+  const suggest = page.getByRole('button', {
+    name: `Suggest a name for session ${firstSessionId}`,
+    exact: true,
+  })
+  try {
+    await suggest.click()
+    const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
+    await expect(cancel).toBeFocused()
+    await expect(page.getByText('Suggesting a name…', { exact: true })).toBeVisible()
+    await cancel.press('Escape')
+    await expect(suggest).toBeFocused()
+    pending.resolve()
+    await answered.promise
+    await page
+      .getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
+      .click()
+    await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveValue(
+      'Release verification',
+    )
+    await expect(page.getByText('Late generated title', { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Accept', exact: true })).toHaveCount(0)
+  } finally {
+    pending.resolve()
+  }
+})

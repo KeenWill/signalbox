@@ -102,6 +102,15 @@ pub struct WebCreateSessionResponse {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebSessionTitleSuggestion
+
+```rust
+pub struct WebSessionTitleSuggestion {
+    pub title: string::String,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebSessionTitleRequest
 
 ```rust

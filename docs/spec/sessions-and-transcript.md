@@ -154,6 +154,10 @@ activity category and timestamp, including for archived sessions. Both members
 are required; the title may be null and activity is non-null. These header facts
 are read separately from the timeline bounds.
 
+The catalog's Suggest a name action requests a generated title and displays it
+inline with Accept and Edit. Accept and edited suggestions use the title PATCH;
+cancelling leaves the saved title unchanged.
+
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command
 service. It loads and preserves tags, attributes, and the archive flag under the
