@@ -2207,11 +2207,11 @@ where
                             write_message(&mut writer, Message::Enrolled(receipt)).await?;
                             sent_promotion = true;
                         }
-                        let operations = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?;
-                        for operation in operations {
-                            if sent_provisions.insert(operation.correlation.authorization_id) {
-                                write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
-                            }
+                        let operation = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next();
+                        if let Some(operation) = operation
+                            && sent_provisions.insert(operation.correlation.authorization_id)
+                        {
+                            write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
                         }
                         for release in service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
                             write_message(&mut writer, Message::WorkspaceRelease(release)).await?;
