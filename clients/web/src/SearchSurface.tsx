@@ -264,7 +264,12 @@ export function SearchSurface({
       {state.session && (
         <p className="search-notice">
           Searching within this session ·{' '}
-          <button type="button" onClick={() => onStateChange({ q: state.q })}>
+          <button
+            type="button"
+            onClick={() =>
+              onStateChange({ q: state.q, queryParameterIsValid: state.queryParameterIsValid })
+            }
+          >
             Search all sessions
           </button>
         </p>

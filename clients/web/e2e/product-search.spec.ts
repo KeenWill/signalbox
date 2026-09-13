@@ -673,3 +673,19 @@ test('searches a session from its URL and can return to all sessions', async ({ 
   await expect.poll(() => requestedSessions.at(-1)).toBeNull()
   await expect(page).not.toHaveURL(/session=/)
 })
+
+test('keeps an oversized query rejected when clearing its session filter', async ({ page }) => {
+  await useSearchFixture(page)
+  let requests = 0
+  await page.route('**/api/search?**', (route) => {
+    requests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto(`/search?q=${'x'.repeat(513)}&session=${sessionId}`)
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
+  await page.getByRole('button', { name: 'Search all sessions' }).click()
+  await expect(page).not.toHaveURL(/session=/)
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
+  await expect(page.getByRole('heading', { name: '2 results' })).toHaveCount(0)
+  expect(requests).toBe(0)
+})
