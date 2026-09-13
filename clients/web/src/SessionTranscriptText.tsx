@@ -28,6 +28,7 @@ import {
 } from './session-timeline/transcript'
 import {
   groupTranscriptTurns,
+  isToolBodyContinuation,
   isVisibleTurnEvent,
   type TranscriptTurn,
   toolContinuations,
@@ -553,6 +554,7 @@ function TurnSummary({
                       const item = candidate.items.at(-1)
                       return (
                         cursor?.type === 'more_body' &&
+                        isToolBodyContinuation(cursor.body) &&
                         !advancesToolMember(candidate) &&
                         ((item?.body.type === 'tool_batch' &&
                           item.body.tools.some(

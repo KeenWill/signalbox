@@ -44,6 +44,14 @@ export function toolDisclosureKeys(
   return keys
 }
 
+export function isToolBodyContinuation(continuation: WebTimelineBodyContinuation): boolean {
+  return (
+    continuation.field === 'tool_arguments' ||
+    continuation.field === 'tool_result' ||
+    continuation.field === 'tool_failure'
+  )
+}
+
 function projectedTool(tools: WebTimelineToolAttempt[], evidence: WebTimelineToolAttempt) {
   return tools.find((tool) =>
     evidence.evidence.type === 'request_only'
@@ -104,13 +112,14 @@ export function groupTranscriptTurns(
       }
     }
     if (
-      item.body.type === 'reconciliation' ||
-      (item.body.type === 'event_fact' &&
-        (item.body.kind === 'goal_turn_retired' ||
-          item.body.kind === 'automatic_reconciliation_exhausted')) ||
-      (item.body.type === 'turn_lifecycle' &&
-        item.body.lifecycle === 'terminalized' &&
-        item.body.cause_code !== 'completed')
+      !group.outcome &&
+      (item.body.type === 'reconciliation' ||
+        (item.body.type === 'event_fact' &&
+          (item.body.kind === 'goal_turn_retired' ||
+            item.body.kind === 'automatic_reconciliation_exhausted')) ||
+        (item.body.type === 'turn_lifecycle' &&
+          item.body.lifecycle === 'terminalized' &&
+          item.body.cause_code !== 'completed'))
     ) {
       group.outcome = item
     }
