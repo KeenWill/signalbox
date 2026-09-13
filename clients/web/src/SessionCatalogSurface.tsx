@@ -168,19 +168,22 @@ const SessionMetadata = ({
         Rename
       </button>
       {editing && (
-        <form className="catalog-rename" onSubmit={save}>
+        <form
+          className="catalog-rename"
+          onSubmit={save}
+          onKeyDownCapture={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            if (!saving) close()
+          }}
+        >
           <label>
             Session title
             <input
               ref={titleInput}
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== 'Escape' || saving) return
-                event.preventDefault()
-                event.stopPropagation()
-                close()
-              }}
               disabled={saving}
               required
             />

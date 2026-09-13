@@ -968,3 +968,72 @@ test('links catalog pull request and trigger chips and retains a PR title fallba
   )
   await page.screenshot({ path: testInfo.outputPath('catalog-rename-mobile.png') })
 })
+
+for (const control of ['Save', 'Cancel']) {
+  test(`Escape cancels rename from ${control}`, async ({ page }) => {
+    await useCatalogFixture(page)
+    await page.goto('/sessions')
+    const rename = page.getByRole('button', {
+      name: `Rename session ${firstSessionId}`,
+      exact: true,
+    })
+    await rename.click()
+    await page.getByRole('button', { name: control, exact: true }).focus()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('textbox', { name: 'Session title', exact: true })).toHaveCount(0)
+    await expect(rename).toBeFocused()
+  })
+}
+
+test('shows the daemon rename rejection and retains the retry identity', async ({ page }) => {
+  await useCatalogFixture(page)
+  const requests: unknown[] = []
+  const message = 'The rename outcome is unconfirmed. Retry with the same command ID.'
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    requests.push(route.request().postDataJSON())
+    await route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'unconfirmed',
+          message,
+        },
+      },
+    })
+  })
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true }).click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText(message)
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  await expect(page.getByRole('alert')).toHaveText(message)
+  expect(requests[1]).toEqual(requests[0])
+})
+
+test('a stalled rename releases the form and retries the same intent', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.clock.install()
+  const requests: unknown[] = []
+  await page.route(`**/api/sessions/${firstSessionId}/metadata`, async (route) => {
+    requests.push(route.request().postDataJSON())
+    if (requests.length > 1) await route.abort('failed')
+  })
+  await page.goto('/sessions')
+  const rename = page.getByRole('button', { name: `Rename session ${firstSessionId}`, exact: true })
+  await rename.click()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => requests.length).toBe(1)
+  await page.clock.fastForward(30_000)
+  await expect(page.getByRole('alert')).toHaveText(
+    'Rename timed out. Retry to confirm the same title.',
+  )
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(() => requests.length).toBe(2)
+  await expect(page.getByRole('alert')).toBeVisible()
+  expect(requests[1]).toEqual(requests[0])
+  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Escape')
+  await expect(rename).toBeFocused()
+})
