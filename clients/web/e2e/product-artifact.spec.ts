@@ -266,3 +266,31 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
   await expect(page.locator('body')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('keeps an event row expanded while operating and dismissing attachment details', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await useArtifactScenario(page, admittedOriginalArtifact)
+  await openAttachmentConversation(page, admittedOriginalArtifact)
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  const row = page.getByRole('row', { includeHidden: true }).filter({ hasText: 'Message accepted' })
+  await row.click()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  const chip = row.getByRole('list', { name: 'Attachments' }).getByRole('button').first()
+  await chip.click()
+  await pane(page).getByRole('button', { name: 'Load original', exact: true }).click()
+  await expect(pane(page).getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  await pane(page).getByRole('button', { name: 'Close attachment details' }).click()
+  await expect(pane(page)).toBeHidden()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  await chip.click()
+  await expect(pane(page)).toBeVisible()
+  // At desktop width this point lies on the modal overlay, outside the right-hand pane.
+  await page.mouse.click(5, 5)
+  await expect(pane(page)).toBeHidden()
+  await expect(row).toHaveAttribute('aria-expanded', 'true')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})

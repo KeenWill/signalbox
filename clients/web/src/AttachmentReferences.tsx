@@ -184,7 +184,10 @@ function AttachmentReference({
         )}
       </div>
       <Dialog.Portal>
-        <Dialog.Overlay className="attachment-detail-overlay" />
+        <Dialog.Overlay
+          className="attachment-detail-overlay"
+          onClick={(event) => event.stopPropagation()}
+        />
         <Dialog.Content
           className="attachment-detail-pane"
           aria-describedby={undefined}
@@ -196,6 +199,7 @@ function AttachmentReference({
           }}
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
         >
           <Dialog.Title className="sr-only">Attachment details</Dialog.Title>
           <ArtifactInspector
