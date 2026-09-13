@@ -170,6 +170,84 @@ test('a whitespace-only cancellation successor is submitted exactly', async ({ p
   ])
 })
 
+for (const action of [
+  {
+    button: 'Set goal',
+    field: 'Goal',
+    path: 'goal',
+    contentKey: 'statement',
+    payload: { statement: goalStatement },
+  },
+  {
+    button: 'Cancel turn',
+    field: 'Message to continue with',
+    path: 'cancel',
+    contentKey: 'message',
+    payload: { message: successorMessage, expected_active_turn_id: turnId },
+  },
+  {
+    button: 'Deny',
+    field: 'Note (optional)',
+    path: `approvals/${requestId}`,
+    contentKey: 'note',
+    payload: { note: '\u00a0Outside the requested work\u00a0', decision: 'deny' },
+  },
+]) {
+  test(`a rejected ${action.button} retry restores the editable draft after navigation`, async ({
+    page,
+  }) => {
+    const api = await sessionApi(page, true)
+    if (action.button === 'Deny') {
+      api.state.activeState = { kind: 'awaiting_tool_approval', tool_request_id: requestId }
+    }
+    const requests: Record<string, unknown>[] = []
+    await page.route(`**/api/sessions/${sessionId}/${action.path}`, (route) => {
+      requests.push(route.request().postDataJSON())
+      if (requests.length === 1) return route.abort('failed')
+      if (requests.length === 2)
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              kind: 'application',
+              code: 'action_refused',
+              message: 'The action was refused.',
+            },
+          },
+        })
+      return route.fulfill({ status: 204 })
+    })
+    await openSession(page)
+    await page.getByRole('button', { name: action.button, exact: true }).click()
+    const field = page.getByRole('textbox', { name: action.field, exact: true })
+    const originalText = action.payload[action.contentKey as keyof typeof action.payload] as string
+    await field.fill(originalText)
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('Outcome unconfirmed')
+    await page.getByRole('link', { name: 'Settings', exact: true }).click()
+    await expect(page).toHaveURL(/\/settings$/)
+    await page.goBack()
+    await expect(field).toHaveValue(originalText)
+    await expect(field).toBeDisabled()
+    await page.getByRole('button', { name: 'Retry same action' }).click()
+    await expect(page.getByRole('alert')).toContainText('action_refused: The action was refused.')
+    expect(requests).toEqual([{ command_id: expect.any(String), ...action.payload }, requests[0]])
+    await expect(field).toHaveValue(originalText)
+    await expect(field).toBeEnabled()
+    const revisedText = 'Revised request'
+    await field.fill(revisedText)
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await expect(page.getByText('Action accepted', { exact: true })).toBeVisible()
+    expect(requests).toHaveLength(3)
+    expect(requests[2]).toEqual({
+      ...action.payload,
+      [action.contentKey]: revisedText,
+      command_id: expect.any(String),
+    })
+    expect(requests[2]?.command_id).not.toBe(requests[0]?.command_id)
+  })
+}
+
 test('an idle session does not offer cancel', async ({ page }) => {
   await sessionApi(page)
   await openSession(page)

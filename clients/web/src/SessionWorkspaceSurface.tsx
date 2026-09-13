@@ -125,6 +125,21 @@ function SessionActions({
         error instanceof ProductInputError ||
         (error instanceof ProductRequestError && error.status < 500)
       ) {
+        if (error) {
+          // A definitive refusal releases the command identity, but keeps an editable draft.
+          setChoice(action.kind === 'approval' ? action.input.decision : action.kind)
+          setText(
+            action.kind === 'cancel'
+              ? action.input.message
+              : action.kind === 'set-goal'
+                ? action.input.statement
+                : action.kind === 'approval'
+                  ? (action.input.note ?? '')
+                  : '',
+          )
+          setChosenRequest(action.kind === 'approval' ? action.requestId : null)
+          setChosenTurn(action.kind === 'cancel' ? action.input.expected_active_turn_id : null)
+        }
         for (const mutation of queryClient
           .getMutationCache()
           .findAll({ mutationKey: ['session-action', sessionId] })) {
