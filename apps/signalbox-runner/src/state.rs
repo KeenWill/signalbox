@@ -323,8 +323,8 @@ impl RunnerStateRoot {
         if !path.is_absolute() || path.file_name().is_none() {
             return Err(RunnerStateError::InvalidRootPath);
         }
-        let created_root = match fs::symlink_metadata(path) {
-            Ok(_) => false,
+        match fs::symlink_metadata(path) {
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut builder = fs::DirBuilder::new();
                 builder.mode(ROOT_MODE);
@@ -360,7 +360,6 @@ impl RunnerStateRoot {
                     resource: StateResource::RootParent,
                     source,
                 })?;
-                true
             }
             Err(source) => {
                 return Err(RunnerStateError::Io {
@@ -369,7 +368,7 @@ impl RunnerStateRoot {
                     source,
                 });
             }
-        };
+        }
 
         let path_metadata = fs::symlink_metadata(path).map_err(|source| RunnerStateError::Io {
             operation: StateOperation::Inspect,
@@ -419,24 +418,23 @@ impl RunnerStateRoot {
             }
         })?;
 
-        let journal = if created_root {
-            Journal::initialize(&directory)?
-        } else {
-            Journal::open(&directory)?
-        };
-        let state = match openat(
+        let (state, journal) = match openat(
             &directory,
             STATE_FILE,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
-            Ok(descriptor) => read_state(File::from(descriptor), effective_user)?,
+            Ok(descriptor) => (
+                read_state(File::from(descriptor), effective_user)?,
+                Journal::open(&directory)?,
+            ),
             Err(rustix::io::Errno::NOENT) => {
+                let journal = Journal::initialize(&directory)?;
                 let state = RunnerState::Pristine {
                     request_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
                 };
                 write_state(&directory, &state)?;
-                state
+                (state, journal)
             }
             Err(error) => {
                 return Err(RunnerStateError::Io {
@@ -724,6 +722,21 @@ mod tests {
         let reopened = RunnerStateRoot::open(&path).expect("the private root reopens");
 
         assert_eq!(reopened.state().request_id(), request_id);
+    }
+
+    #[test]
+    fn precreated_empty_private_root_is_initialized() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        fs::create_dir(&path).expect("the provisioned root is created");
+        fs::set_permissions(&path, fs::Permissions::from_mode(ROOT_MODE))
+            .expect("the provisioned root is owner-private");
+
+        let root = RunnerStateRoot::open(&path).expect("the provisioned root is initialized");
+
+        assert!(matches!(root.state(), RunnerState::Pristine { .. }));
+        assert!(path.join(STATE_FILE).is_file());
+        assert!(path.join(DocumentKind::Journal.file_name()).is_file());
     }
 
     #[test]
