@@ -127,7 +127,7 @@ const SessionMetadata = ({
   }
   const save = async (event: FormEvent) => {
     event.preventDefault()
-    if (saving || !title.trim()) return
+    if (saving || title.length === 0) return
     if (intent.current?.title !== title) intent.current = { command_id: crypto.randomUUID(), title }
     setSaving(true)
     setError(null)
@@ -185,7 +185,7 @@ const SessionMetadata = ({
               required
             />
           </label>
-          <button type="submit" disabled={saving || !title.trim()}>
+          <button type="submit" disabled={saving || title.length === 0}>
             {saving ? 'Saving…' : 'Save'}
           </button>
           <button type="button" disabled={saving} onClick={close}>
