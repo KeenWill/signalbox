@@ -22,10 +22,11 @@ have durable request, receipt, and daemon handlers. The local catalog admits the
 tool as a combined-locus pure declaration with the identical model definition
 and permission default. The runner advertises configured availability for those
 entries, credential profiles, and repositories, with no workspace capability. It
-derives its empty reconnect inventory from a versioned, fsynced, atomically
-published private journal and executes nothing. An initialized state root
-without that journal fails startup. Leases, dispatch, runner workspace
-execution, and sandbox supervision are listed under Planned.
+executes `echo` in a plain child process under `ambient` and retains the claimed
+phase and terminal result in a versioned, fsynced, atomically published private
+journal. An initialized state root without that journal fails startup. Nonempty
+reconnect reconciliation, workspaces, and sandbox supervision are listed under
+Planned.
 
 The three process-wire creation commands retain optional runner placement and
 initialize its unpinned status in the creation transaction. Creation validates
@@ -58,13 +59,13 @@ unpinned; the first dispatch pins it to one runner, snapshots the registration
 it was validated against, and creates a `CredentialProfileGrant` when a profile
 was selected. Pinning records the tool names the validated registration admits
 and their runner-only subset. A `RunnerLease` is the domain record of one tool
-attempt offered to that runner; its offer, claim, loss, and retry transitions
-are domain code, and the wire dispatch that would drive them is listed under
-Planned. A placement changes only by explicit transition: replacing a lost
-runner and replacing the pinned credential profile each advance its revision.
-When a pinned runner is lost, the placement enters a lost state that only two
-user commands leave: replace, which installs a successor placement, and abandon,
-which retires the placement.
+attempt offered to that runner; its offer, claim, and completion drive the local
+wire exchange. Loss and retry transitions are domain code; reconnect
+reconciliation is listed under Planned. A placement changes only by explicit
+transition: replacing a lost runner and replacing the pinned credential profile
+each advance its revision. When a pinned runner is lost, the placement enters a
+lost state that only two user commands leave: replace, which installs a
+successor placement, and abandon, which retires the placement.
 
 ## Design decisions
 
@@ -186,9 +187,47 @@ complete, or discard a lease from an advertisement. Re-leasing continues one
 logical tool request and one lease lineage; its successor `RunnerGeneration` is
 distinct from the fresh physical attempt's `ToolDispatchGeneration`, which
 starts at first. A lease claim or completion requires the exact lease, runner,
-tool, tool-attempt dispatch correlation, and lease generation. A runner
-generation with no representable successor fails closed as generation
-exhaustion.
+tool, tool-attempt dispatch correlation, lease generation, offer-time
+registration revision, placement revision, working directory, and sandbox
+profile. The offer retains the canonical tool arguments independently of the
+pin's registration snapshot. A runner generation with no representable successor
+fails closed as generation exhaustion.
+
+The local `echo` path atomically stores the initial pin, optional grant, and
+first offered lease under the connected runner's current registration. It uses
+the requested runner approval posture; `Confirm` requires a human decision even
+under daemon blanket approval. The pure child resolves no credential path and
+injects no credential value.
+
+The local tool loop is serial: at most one live lease per session, one runner
+dispatch at a time, and one durable terminal attempt before the next dispatch. A
+runner holds one global execution permit, so tools of different sessions never
+execute concurrently on it. A combined-locus tool runs on the session's attached
+runner when that runner advertises it and otherwise runs on the daemon. An
+unpinned placement that the connected runner cannot satisfy, or a placement lost
+before its first pin, retains daemon fallback. A lost lease releases the global
+dispatch permit; the tool loop accepts the recovery wait only after rereading
+the exact lost lease and its issuing turn attempt's durable yield.
+
+The daemon sends `lease_offer` with the complete lease correlation and the
+immutable dispatch payload. The runner admits the exact tool, sandbox profile,
+and optional credential profile, then replies `lease_claim`. The daemon commits
+the claim before it sends `lease_claimed`, and receipt of that acknowledgement
+is the runner's execution capability; an offer or a sent claim without it
+authorizes nothing. Before accepting `dispatch` the runner fsyncs the complete
+claimed correlation and the `waiting_dispatch` phase below its private state
+root. The runner executes only when the claimed capability and the dispatch
+carry the same complete correlation. It fsyncs `dispatch_received` before
+acknowledging the frame internally and `execution_may_have_started` immediately
+before it invokes the executor. The runner retains one terminal evidence
+envelope and resends it until the daemon commits the matching attempt and lease
+transition and replies `result_recorded`, then discards it. Local runner
+shutdown waits for admitted execution and its result acknowledgement before
+sending the shutdown frame. Either shutdown direction checks for offered or
+claimed leases under the enrollment lock. With unsettled execution it records
+connection loss and closes the transport without a clean shutdown frame;
+otherwise it records clean shutdown. Connection loss propagates to the lease and
+runner recovery wait.
 
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
@@ -307,9 +346,8 @@ release dispatch.
 
 ## Planned
 
-- Lease offer, claim, dispatch, result and failure spooling, and
-  reconnect-inventory reconciliation over the wire, under one global execution
-  permit per runner: [runner protocol design](../design/runner-protocol.md).
+- Failure spooling and nonempty reconnect-inventory reconciliation over the
+  wire: [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:

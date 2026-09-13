@@ -306,6 +306,7 @@ pub enum ToolExecutorDisposition {
     Completed(CorrelatedToolExecutorEvidence),
     DurableCompletion(CorrelatedDurableToolCompletion),
     DurableChildWait(CorrelatedDurableChildWait),
+    DurableRunnerWait(signalbox_domain::ToolAttemptDispatchCorrelation),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
@@ -477,6 +478,8 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     DurableCompletionMismatch,
     ChildWaitReconciliation(TransactionError),
     ChildWaitMismatch,
+    RunnerWaitReconciliation(TransactionError),
+    RunnerWaitMismatch,
     CrashClassification(TransactionError),
     RecoveredFatalExecutorFailure {
         failure_class: OperatorFailureClass,

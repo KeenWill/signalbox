@@ -365,6 +365,10 @@ impl signalbox_application::ToolExecutionTransaction for tool_loop::PostgresTool
         &mut self,
         wait: signalbox_application::CorrelatedDurableChildWait,
     ) -> result::Result<bool, <Self as signalbox_application::ToolExecutionTransaction>::Error>;
+    async fn reread_durable_runner_wait(
+        &mut self,
+        correlation: signalbox_domain::ToolAttemptDispatchCorrelation,
+    ) -> result::Result<bool, <Self as signalbox_application::ToolExecutionTransaction>::Error>;
     async fn classify_crash_loss<NextTurn>(
         &mut self,
         session: signalbox_domain::SessionId,

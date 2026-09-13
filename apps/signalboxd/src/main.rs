@@ -2124,6 +2124,8 @@ async fn run_hub_incarnation(
             return startup_failure_after_close(failure, database.close().await);
         }
     };
+    let runner_dispatch = runner_service.dispatch_service();
+    tool_executor = tool_executor.with_runner_dispatch(runner_dispatch.clone());
     let scan_runner_service = runner_service.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
     let invocation_registrations = model_configuration.credential_invocation_registrations();
@@ -2851,6 +2853,7 @@ async fn run_hub_incarnation(
                 tool_catalog.clone(),
                 tool_executor.clone(),
             )
+            .with_runner_dispatch(runner_dispatch.clone())
             .with_workflow_tool_policy(workflow_tool_policy.clone())
             .with_workspace_instructions(workspace_instruction_runtime.clone())
             .with_approval_judge(

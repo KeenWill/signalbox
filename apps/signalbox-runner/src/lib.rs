@@ -1,9 +1,12 @@
-//! Enrollment, registration, and liveness runtime for `signalbox-runner`.
+//! Enrollment, liveness, and serial pure-tool execution runtime for `signalbox-runner`.
 
 mod configuration;
+mod executor;
 mod journal;
 mod protocol;
 mod state;
+
+pub use executor::{ECHO_CHILD_ARGUMENT, run_echo_child};
 
 pub use configuration::{
     AllowedNetworkHost, ArgumentError, RunnerConfiguration, RunnerConfigurationError,
