@@ -163,34 +163,26 @@ impl SessionTitleRepository {
         else {
             return Ok(String::new());
         };
-        let mut remaining = usize::try_from(max_utf8_bytes).unwrap_or_default();
-        let mut parts = Vec::new();
-        // Every retained row consumes at least one output byte. Restrict the
-        // frontier suffix before ordering so a bounded title request never
-        // sorts an entire, potentially unbounded conversation.
-        let first_member_position = source
-            .member_count
-            .saturating_sub(u64::try_from(max_utf8_bytes).unwrap_or_default());
+        let members = crate::context_compaction::projected_title_frontier_membership(
+            &mut tx,
+            session,
+            source.frontier,
+            max_utf8_bytes,
+        )
+        .await
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let sources = members
+            .iter()
+            .map(|member| member.source_session().into_uuid())
+            .collect::<Vec<_>>();
+        let entries = members
+            .iter()
+            .map(|member| member.entry().into_uuid())
+            .collect::<Vec<_>>();
         let mut rows = sqlx::query(
-            "WITH RECURSIVE ancestry (context_frontier_id, prefix_context_frontier_id) AS (
-                SELECT context_frontier_id, prefix_context_frontier_id
-                  FROM context_frontier
-                 WHERE owning_session_id = $1 AND context_frontier_id = $4
-                UNION
-                SELECT prefix.context_frontier_id, prefix.prefix_context_frontier_id
-                  FROM ancestry
-                  JOIN context_frontier AS prefix
-                    ON prefix.owning_session_id = $1
-                   AND prefix.context_frontier_id = ancestry.prefix_context_frontier_id
-                   AND prefix.member_count > $5
-             )
-             SELECT LEFT(COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value), $2) AS value,
+            "SELECT LEFT(COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value), $2) AS value,
                     substring(imported.content_encoding FROM 1 FOR $3) AS content_encoding
-             FROM ancestry
-             JOIN context_frontier_delta AS member
-               ON member.owning_session_id = $1
-              AND member.context_frontier_id = ancestry.context_frontier_id
-              AND member.member_position > $5
+             FROM unnest($1::uuid[], $4::uuid[]) WITH ORDINALITY AS member(source_session_id, semantic_entry_id, member_position)
              JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
              LEFT JOIN accepted_input_content_part AS part
                ON part.accepted_input_id = entry.origin_accepted_input_id AND part.part_kind = 'text'
@@ -198,19 +190,15 @@ impl SessionTitleRepository {
                ON imported.imported_conversation_id = entry.imported_conversation_id
               AND imported.imported_transcript_entry_id = entry.imported_transcript_entry_id
               AND imported.content_kind = 1
-             WHERE (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) IS NOT NULL
-                OR imported.content_encoding IS NOT NULL)
-             ORDER BY member.member_position DESC, part.position DESC NULLS LAST",
-        )
-        .bind(session.into_uuid())
-        .bind(max_utf8_bytes)
-        .bind(
-            max_utf8_bytes
-                .saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES),
-        )
-        .bind(source.frontier.into_uuid())
-        .bind(Decimal::from(first_member_position))
-        .fetch(&mut *tx);
+             WHERE (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) <> ''
+                OR octet_length(imported.content_encoding) > $5)
+             ORDER BY member.member_position DESC, part.position DESC NULLS LAST
+             LIMIT $2")
+            .bind(sources).bind(max_utf8_bytes)
+            .bind(max_utf8_bytes.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
+            .bind(entries).bind(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES).fetch(&mut *tx);
+        let mut remaining = usize::try_from(max_utf8_bytes).unwrap_or_default();
+        let mut parts = Vec::new();
         while remaining > 0 {
             let Some(row) = rows.try_next().await? else {
                 break;

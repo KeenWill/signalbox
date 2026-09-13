@@ -1,3 +1,5 @@
+import { attachmentDescriptorMediaType } from './features/artifacts/attachmentMetadata'
+
 const labels = new Map<string, string>(
   Object.entries({
     anthropic: 'Anthropic',
@@ -28,6 +30,9 @@ const labels = new Map<string, string>(
     attachment_media_metadata: 'Attachment details',
     automatic_reconciliation_exhausted: 'Automatic reconciliation exhausted',
     audio: 'Audio',
+    file: 'File',
+    pdf: 'PDF',
+    text_file: 'Text file',
     authorization_required: 'Authorization required',
     auto: 'Auto',
     awaiting_approval: 'Approval required',
@@ -269,3 +274,15 @@ export const productLabels = {
   openSession: 'Open session',
   preview: 'Preview',
 } as const
+
+export const attachmentTypeLabel = (mediaType?: string | null): string => {
+  const normalizedMediaType = attachmentDescriptorMediaType(mediaType)
+    .split(';', 1)[0]
+    ?.toLowerCase()
+  if (normalizedMediaType?.startsWith('image/')) return enumLabel('image')
+  if (normalizedMediaType?.startsWith('audio/')) return enumLabel('audio')
+  if (normalizedMediaType?.startsWith('video/')) return enumLabel('video')
+  if (normalizedMediaType === 'application/pdf') return enumLabel('pdf')
+  if (normalizedMediaType?.startsWith('text/')) return enumLabel('text_file')
+  return enumLabel('file')
+}

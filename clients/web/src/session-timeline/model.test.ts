@@ -870,13 +870,24 @@ describe('BoundedSessionHistory', () => {
     const described = await history.describe()
     const mutableDescribed = described as unknown as {
       first_address: { event_sequence: string }
+      last_activity: { kind: string; unix_microseconds: string }
     }
 
     mutableDescribed.first_address.event_sequence = '999'
+    mutableDescribed.last_activity.kind = 'turn'
+    mutableDescribed.last_activity.unix_microseconds = '999'
     const cached = history.descriptor
     expect(cached).toBeDefined()
-    const mutableCached = cached as unknown as { latest_address: { event_sequence: string } }
+    expect(cached?.last_activity).toEqual({ kind: 'session', unix_microseconds: '1' })
+    const mutableCached = cached as unknown as {
+      latest_address: { event_sequence: string }
+      last_activity: { kind: string; unix_microseconds: string }
+    }
     mutableCached.latest_address.event_sequence = '999'
+    mutableCached.last_activity.kind = 'turn'
+    mutableCached.last_activity.unix_microseconds = '999'
+
+    expect(history.descriptor?.last_activity).toEqual({ kind: 'session', unix_microseconds: '1' })
 
     expect(history.descriptor?.first_address.event_sequence).toBe('1')
     expect(history.descriptor?.latest_address.event_sequence).toBe(String(SESSION_FOUNDATION_TOTAL))

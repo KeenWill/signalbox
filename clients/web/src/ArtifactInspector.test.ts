@@ -5,8 +5,14 @@ import {
   imageArtifact,
   jpegDescriptor,
 } from './features/artifacts/artifactScenario'
+import { attachmentTypeLabel } from './labels'
 
 describe('artifact inspector resolution identity', () => {
+  it('labels MIME types case-insensitively', () => {
+    expect(attachmentTypeLabel('IMAGE/PNG')).toBe('Image')
+    expect(attachmentTypeLabel('APPLICATION/PDF')).toBe('PDF')
+  })
+
   it('keeps an image declaration without admitted image views in the blob renderer', () => {
     const descriptor = { ...fallbackDescriptor, declared_media_type: 'image/svg+xml' }
     expect(inspectedArtifact(descriptor, nextResolutionSequence()).kind).toBe('blob')
