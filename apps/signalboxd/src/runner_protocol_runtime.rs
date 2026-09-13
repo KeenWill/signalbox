@@ -1,6 +1,6 @@
 //! Hub-side serial registration and lifecycle runtime for the local runner wire.
 
-use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
+use std::{error::Error, fmt, future::Future, io, pin::Pin, time::Duration};
 
 use rustix::process::geteuid;
 use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge, ToolCatalog as _};
@@ -15,21 +15,21 @@ use signalbox_persistence::runner_protocol::{
     PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
     RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
     RunnerConnectionTransitionOutcome, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
-    RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
-    RunnerRegistrationRevision,
+    RunnerEnrollmentRequestId, RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome,
+    RunnerProtocolStore, RunnerProtocolStoreError, RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
-    Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
-    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, MAX_FRAME_BYTES, Message,
-    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed,
-    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest, decode_line,
-    encode_line,
+    Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
+    Enroll, Enrolled, Frame, FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase,
+    LeasePhaseKind, MAX_FRAME_BYTES, Message, PositiveU64, ReconnectDirectives, Registered,
+    Rejected, RejectionCode, Resume, Resumed, Shutdown, ShutdownReason,
+    WorkspaceFailureCorrelation, advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    sync::{Mutex, watch},
+    sync::watch,
     task::{JoinError, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -191,7 +191,6 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
 pub struct PostgresRunnerRegistrationService {
     store: RunnerProtocolStore,
     allowed_classes: Vec<RunnerCapabilityClass>,
-    registration_admission: Arc<Mutex<()>>,
     dispatch: crate::runner_dispatch::RunnerDispatchService,
     eligibility_nudge: Option<InProcessEligibilityNudge>,
 }
@@ -207,7 +206,6 @@ impl PostgresRunnerRegistrationService {
             store,
             dispatch,
             allowed_classes: allowed_classes.into_iter().collect(),
-            registration_admission: Arc::new(Mutex::new(())),
             eligibility_nudge: None,
         }
     }
@@ -325,7 +323,7 @@ impl PostgresRunnerRegistrationService {
         &self,
         request: Enroll,
     ) -> Result<RunnerEnrollmentResponse, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -424,7 +422,7 @@ impl PostgresRunnerRegistrationService {
     }
 
     async fn resume_durably(&self, request: Resume) -> Result<Resumed, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -433,7 +431,10 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::UnsupportedDigestVersion,
             ));
         }
-        if request.inventory != Default::default() {
+        if request.inventory.workspace_operation.is_some()
+            || request.inventory.operation_failure.is_some()
+            || request.inventory.leak_page.is_some()
+        {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
                 correlation,
@@ -461,6 +462,113 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
+        let invalid_inventory = || {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Resume,
+                correlation.clone(),
+                RejectionCode::CorrelationMismatch,
+            )
+        };
+        let evidence = match (&request.inventory.lease, &request.inventory.result) {
+            (None, None) => None,
+            (Some(lease), result) => {
+                let domain =
+                    crate::runner_dispatch_wire::domain_correlation(lease.correlation.clone())
+                        .map_err(|_| invalid_inventory())?;
+                Some(match result {
+                    Some(result)
+                        if result.correlation == lease.correlation
+                            && lease.phase == LeasePhaseKind::ExecutionMayHaveStarted =>
+                    {
+                        RunnerLeaseResumeEvidence::Result {
+                            correlation: domain,
+                            observation: result
+                                .result
+                                .clone()
+                                .into_observation()
+                                .map_err(|_| invalid_inventory())?,
+                        }
+                    }
+                    Some(_) => return Err(invalid_inventory()),
+                    None => match lease.phase {
+                        LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived => {
+                            RunnerLeaseResumeEvidence::AwaitingDispatch(domain)
+                        }
+                        LeasePhaseKind::ExecutionMayHaveStarted => {
+                            RunnerLeaseResumeEvidence::ExecutionPossible(domain)
+                        }
+                    },
+                })
+            }
+            (None, Some(_)) => return Err(invalid_inventory()),
+        };
+        let mut resolution = self
+            .store
+            .reconcile_tool_resume(
+                RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                identities,
+                prior,
+                &advertisement,
+                evidence.clone(),
+            )
+            .await
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })?;
+        if let RunnerLeaseResumeOutcome::LoseConnection(connection) = resolution {
+            self.resolve_resume_loss(request.enrollment_id, connection)
+                .await?;
+            resolution = self
+                .store
+                .reconcile_tool_resume(
+                    RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                    identities,
+                    prior,
+                    &advertisement,
+                    evidence.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?;
+        }
+        let action = match resolution {
+            RunnerLeaseResumeOutcome::Empty => None,
+            RunnerLeaseResumeOutcome::AwaitingDispatch => Some(DirectiveAction::Await),
+            RunnerLeaseResumeOutcome::Recorded => Some(DirectiveAction::DiscardAsRecorded),
+            RunnerLeaseResumeOutcome::Lost => Some(DirectiveAction::FailStale),
+            RunnerLeaseResumeOutcome::LoseConnection(_) => {
+                return Err(RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Resume,
+                    correlation,
+                    RejectionCode::Unavailable,
+                ));
+            }
+        };
+        self.dispatch.changed();
+        let directive = |correlation| {
+            action
+                .ok_or_else(invalid_inventory)
+                .map(|action| Directive {
+                    correlation,
+                    action,
+                })
+        };
+        let mut directives = ReconnectDirectives {
+            lease: request
+                .inventory
+                .lease
+                .as_ref()
+                .map(|lease| directive(lease.correlation.clone()))
+                .transpose()?,
+            result: request
+                .inventory
+                .result
+                .as_ref()
+                .map(|result| directive(result.correlation.clone()))
+                .transpose()?,
+            ..ReconnectDirectives::default()
+        };
         let previous_registration_revision = match self
             .store
             .load_enrollment(identities.enrollment())
@@ -484,7 +592,7 @@ impl PostgresRunnerRegistrationService {
                 RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
                 identities,
                 prior,
-                advertisement,
+                advertisement.clone(),
             )
             .await
             .map_err(|error| {
@@ -504,7 +612,44 @@ impl PostgresRunnerRegistrationService {
             .store
             .open_connection(receipt.enrollment().enrollment())
             .await
-            .map_err(|error| store_failure(RunnerInboundFrameKind::Resume, correlation, error))?;
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })?;
+        if action == Some(DirectiveAction::Await) {
+            // Opening the new epoch fences prior physical connections. Re-read
+            // after it in case a prior connection committed loss during admission.
+            let current = self
+                .store
+                .reconcile_tool_resume(
+                    RunnerEnrollmentRequestId::from_uuid(request.request_id.into_uuid()),
+                    identities,
+                    receipt.registration().revision(),
+                    &advertisement,
+                    evidence,
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                })?;
+            match current {
+                RunnerLeaseResumeOutcome::AwaitingDispatch => {}
+                RunnerLeaseResumeOutcome::Lost => {
+                    if let Some(directive) = &mut directives.lease {
+                        directive.action = DirectiveAction::FailStale;
+                    }
+                }
+                RunnerLeaseResumeOutcome::LoseConnection(_) => {
+                    self.resolve_resume_loss(request.enrollment_id, connection)
+                        .await?;
+                    return Err(RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        correlation,
+                        RejectionCode::Unavailable,
+                    ));
+                }
+                _ => return Err(invalid_inventory()),
+            }
+        }
         tracing::info!(
             enrollment_id = %receipt.enrollment().enrollment().into_uuid(),
             runner_id = %receipt.enrollment().runner().into_uuid(),
@@ -515,8 +660,35 @@ impl PostgresRunnerRegistrationService {
         Ok(Resumed {
             registration_revision: positive_revision(receipt.registration().revision())?,
             connection_epoch: positive_epoch(connection.epoch())?,
-            directives: ReconnectDirectives::default(),
+            directives,
         })
+    }
+
+    async fn resolve_resume_loss(
+        &self,
+        enrollment: CanonicalUuid,
+        connection: signalbox_persistence::runner_protocol::RunnerConnectionSnapshot,
+    ) -> Result<(), RunnerRegistrationFailure> {
+        let prior_epoch = positive_epoch(connection.epoch())?;
+        let retry = || {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Resume,
+                AvailableCorrelation::ConnectionEpoch(prior_epoch),
+                RejectionCode::Unavailable,
+            )
+        };
+        let outcome = self
+            .transition_connection_durably(
+                enrollment,
+                positive_epoch(connection.epoch())?,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        if !matches!(outcome, RunnerConnectionTransitionOutcome::Current(snapshot) if snapshot.state() == RunnerConnectionState::Lost)
+        {
+            return Err(retry());
+        }
+        Ok(())
     }
 
     async fn advertise_durably(
@@ -532,7 +704,7 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             ));
         }
-        let _admission = self.registration_admission.lock().await;
+        let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Registration(request.registration_revision);
         let observed_epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
             RunnerRegistrationFailure::new(

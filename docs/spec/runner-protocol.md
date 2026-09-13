@@ -24,8 +24,9 @@ and permission default. The runner advertises configured availability for those
 entries, credential profiles, and repositories, with no workspace capability. It
 executes `echo` in a plain child process under `ambient` and retains the claimed
 phase and terminal result in a versioned, fsynced, atomically published private
-journal. An initialized state root without that journal fails startup. Nonempty
-reconnect reconciliation, workspaces, and sandbox supervision are listed under
+journal. An initialized state root without that journal fails startup. Resume
+reconciles the retained lease phase and terminal result against durable daemon
+state. Workspace reconciliation and sandbox supervision are listed under
 Planned.
 
 The three process-wire creation commands retain optional runner placement and
@@ -60,12 +61,11 @@ it was validated against, and creates a `CredentialProfileGrant` when a profile
 was selected. Pinning records the tool names the validated registration admits
 and their runner-only subset. A `RunnerLease` is the domain record of one tool
 attempt offered to that runner; its offer, claim, and completion drive the local
-wire exchange. Loss and retry transitions are domain code; reconnect
-reconciliation is listed under Planned. A placement changes only by explicit
-transition: replacing a lost runner and replacing the pinned credential profile
-each advance its revision. When a pinned runner is lost, the placement enters a
-lost state that only two user commands leave: replace, which installs a
-successor placement, and abandon, which retires the placement.
+wire exchange. Loss and retry transitions are domain code. A placement changes
+only by explicit transition: replacing a lost runner and replacing the pinned
+credential profile each advance its revision. When a pinned runner is lost, the
+placement enters a lost state that only two user commands leave: replace, which
+installs a successor placement, and abandon, which retires the placement.
 
 ## Design decisions
 
@@ -229,6 +229,19 @@ connection loss and closes the transport without a clean shutdown frame;
 otherwise it records clean shutdown. Connection loss propagates to the lease and
 runner recovery wait.
 
+Resume authenticates the enrollment receipt before changing registration or
+recording retained terminal evidence. Canonical lease state determines its exact
+inventory directives. An intact claimed lease in `waiting_dispatch` or
+`dispatch_received` permits replay of the claim acknowledgement and unchanged
+dispatch; neither phase permits replay after committed connection loss. A claim
+reported as `execution_may_have_started` without a retained result, or omitted
+from inventory, is durably lost under the effect-class ambiguity law, including
+when inventory names a different historical lease. An equal recorded result is
+acknowledged; an unequal duplicate is fatal. The runner discards its journal
+entry only on the exact recorded or stale directive and never invokes a started
+lease again. Fresh offers wait until reconnect establishes the resumed
+connection; prior physical connections cannot issue authority after a new epoch.
+
 Workspace, repository, credentials, and sandbox are independent axes of one
 session: a choice on any axis constrains no other, and no axis is inferred from
 another. Workspace, credentials, and sandbox are each a stated choice at
@@ -346,8 +359,11 @@ release dispatch.
 
 ## Planned
 
-- Failure spooling and nonempty reconnect-inventory reconciliation over the
-  wire: [runner protocol design](../design/runner-protocol.md).
+- Failure spooling and workspace, failure, and leak reconnect-inventory
+  reconciliation over the wire:
+  [runner protocol design](../design/runner-protocol.md).
+- Recovery-only startup before the generic scan:
+  [turn lifecycle design](../design/turn-lifecycle-and-scheduling.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:

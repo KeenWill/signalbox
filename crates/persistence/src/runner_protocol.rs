@@ -42,6 +42,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, ty
 pub use signalbox_domain::RunnerEnrollmentRequestId;
 
 mod dispatch;
+mod resume;
+pub use resume::{RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome};
 mod provisioning;
 mod recovery;
 pub mod status;

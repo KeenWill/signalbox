@@ -1,8 +1,8 @@
 # Runner protocol design
 
 This design is not built; it extends
-[runner protocol and placement](../spec/runner-protocol.md) with lease crash
-reconciliation, concurrent enrollment and active-turn replacement,
+[runner protocol and placement](../spec/runner-protocol.md) with workspace and
+failure reconciliation, concurrent enrollment and active-turn replacement,
 healthy-session relocation, workspaces, sandboxes, the egress broker, and forced
 Git configuration.
 
@@ -22,21 +22,9 @@ forces and a canonical-URL check the model cannot defeat.
 
 ### Lease and dispatch
 
-The phases `waiting_dispatch` and `dispatch_received` prove only that the
-journaled executor invocation had not started; `execution_may_have_started`
-carries ordinary effect-class ambiguity. On reconnect the runner sends a bounded
-inventory of at most one lease with its fsynced phase, one retained result, one
-workspace operation, one operation failure, and one leak page. Canonical durable
-state decides whether the daemon resends a claim acknowledgement, a dispatch, or
-a result acknowledgement; advertisement and connection memory never recreate
-authority. A reconnect inventory that omits a daemon-recorded claimed lease
-cannot strand or repeat it: the daemon marks that lease lost and applies its
-effect-class ambiguity law. A claimed lease reported without a terminal envelope
-follows its fsynced phase.
-
 The runner spools `workspace_leak_page`, `workspace_ready`,
-`workspace_released`, `result`, and `operation_failed` until each is
-acknowledged. A runner that cannot perform an admitted operation reports it with
+`workspace_released`, and `operation_failed` until each is acknowledged. A
+runner that cannot perform an admitted operation reports it with
 `operation_failed` rather than sending nothing. A failure the daemon has durably
 recorded resolves the corresponding provisioning, release, or lease authority as
 refused, and neither side waits on it further.

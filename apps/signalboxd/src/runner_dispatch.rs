@@ -3,7 +3,7 @@
 use signalbox_domain::{RunnerLeaseId, RunnerLeaseState, ToolDispatchAuthority};
 use signalbox_persistence::runner_protocol::{RunnerProtocolStore, RunnerProtocolStoreError};
 use std::sync::Arc;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Mutex, MutexGuard, Semaphore, watch};
 
 pub(crate) enum RunnerDispatchOutcome {
     Daemon,
@@ -16,6 +16,7 @@ pub(crate) enum RunnerDispatchOutcome {
 pub struct RunnerDispatchService {
     pub(crate) store: RunnerProtocolStore,
     permit: Arc<Semaphore>,
+    admission: Arc<Mutex<()>>,
     changes: watch::Sender<()>,
 }
 
@@ -25,6 +26,7 @@ impl RunnerDispatchService {
         Self {
             store,
             permit: Arc::new(Semaphore::new(1)),
+            admission: Arc::new(Mutex::new(())),
             changes,
         }
     }
@@ -34,6 +36,10 @@ impl RunnerDispatchService {
     }
     pub(crate) fn changed(&self) {
         self.changes.send_replace(());
+    }
+
+    pub(crate) async fn lock_admission(&self) -> MutexGuard<'_, ()> {
+        self.admission.lock().await
     }
 
     pub(crate) async fn execute(
@@ -52,10 +58,12 @@ impl RunnerDispatchService {
             RunnerProtocolStoreError::Domain(signalbox_domain::RunnerDomainError::InvalidState)
         })?;
         let mut changes = self.subscribe();
-        let offered = self
-            .store
-            .offer_tool_dispatch(authority, RunnerLeaseId::from_uuid(uuid::Uuid::now_v7()))
-            .await;
+        let offered = {
+            let _admission = self.lock_admission().await;
+            self.store
+                .offer_tool_dispatch(authority, RunnerLeaseId::from_uuid(uuid::Uuid::now_v7()))
+                .await
+        };
         let mut lease = match offered {
             Ok(None) => return Ok(RunnerDispatchOutcome::Daemon),
             Ok(Some(lease)) => lease,

@@ -56,7 +56,7 @@ impl Journal {
                 crate::RunnerState::Enrolled { receipt }
                     if receipt.runner_id() == phase.correlation.runner_id
                         && receipt.registration_revision()
-                            == phase.correlation.registration_revision
+                            >= phase.correlation.registration_revision
                         && receipt.authority() == crate::EnrollmentAuthority::Active => {}
                 _ => return Err(RunnerStateError::CorruptState),
             }
@@ -247,6 +247,19 @@ impl Journal {
                 result: Some(result),
                 ..
             }) if &result.correlation == correlation => self.publish(directory, Self::default()),
+            _ => Err(RunnerStateError::InvalidTransition),
+        }
+    }
+
+    pub(crate) fn discard_lease(
+        &mut self,
+        directory: &File,
+        correlation: &LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.entries.first() {
+            Some(JournalEntry::Lease { phase, .. }) if &phase.correlation == correlation => {
+                self.publish(directory, Self::default())
+            }
             _ => Err(RunnerStateError::InvalidTransition),
         }
     }
