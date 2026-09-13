@@ -18,6 +18,7 @@ pub struct WebContractIdentity {
 pub struct WebContractCapabilities {
     pub bounded_json: bool,
     pub same_origin_json_mutations: bool,
+    pub session_title_generation: bool,
     pub ndjson_streaming: bool,
     pub immutable_blob_content: bool,
     pub blob_derivations: bool,

@@ -67,7 +67,81 @@ async fn initial_session_title_is_claimed_once_preserves_manual_names_and_record
             |_| TurnId::from_uuid(Uuid::now_v7()),
         )
         .await?;
-    assert!(titles.prepare(&mut call, &Default::default()).await?);
+    let later_turn = TurnId::from_uuid(Uuid::now_v7());
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x80,
+                seed + 1,
+                "Check the completed indexing work",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            Some(later_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::now_v7(),
+            starting_frontier: Uuid::now_v7(),
+            initial_attempt: Uuid::now_v7(),
+        },
+    )
+    .await?;
+    let later_call = ModelCallId::from_uuid(Uuid::now_v7());
+    assert!(matches!(
+        model_repository
+            .prepare_initial_call(
+                fixture.session,
+                later_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                |_| (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    TurnId::from_uuid(Uuid::now_v7())
+                ),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
+    let AuthorizeModelCallOutcome::Authorized(later_authorized) = model_repository
+        .authorize_send(fixture.session, later_call)
+        .await?
+    else {
+        panic!("later call authorizes");
+    };
+    model_repository
+        .commit_observation(
+            fixture.session,
+            later_authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new("Index validation complete".to_owned())
+                            .expect("assistant text"),
+                    ],
+                }),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Exact(
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                )),
+            ),
+            |_| TurnId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    call.initial_for_turn = Some(later_turn);
+    assert!(
+        titles.prepare(&mut call, &Default::default()).await?,
+        "a later completion claims the initial title when an earlier event left no claim"
+    );
     assert!(
         !titles
             .prepare(

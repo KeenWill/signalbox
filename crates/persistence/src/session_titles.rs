@@ -31,7 +31,7 @@ impl SessionTitleRepository {
         Self { pool }
     }
 
-    /// Claims an initial call once, only for the first completed turn and an unset title.
+    /// Claims an initial call once, for a completed turn and an unset title.
     /// On-demand calls require only an existing session.
     pub async fn prepare(
         &self,
@@ -52,9 +52,8 @@ impl SessionTitleRepository {
             let eligible: bool = sqlx::query_scalar(
                 "SELECT NOT EXISTS (SELECT 1 FROM session_metadata WHERE session_id = $1 AND title IS NOT NULL)
                  AND NOT EXISTS (SELECT 1 FROM session_title_model_call WHERE session_id = $1 AND initial_for_turn IS NOT NULL)
-                 AND COALESCE($2 = (SELECT turn_id FROM turn_lifecycle WHERE session_id = $1
-                     AND state_kind = 'terminal' AND terminal_disposition_kind = 'completed'
-                     ORDER BY acceptance_position LIMIT 1), false)")
+                 AND EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2
+                     AND state_kind = 'terminal' AND terminal_disposition_kind = 'completed')")
                 .bind(call.session.into_uuid()).bind(turn.into_uuid()).fetch_one(&mut *tx).await?;
             if !eligible {
                 return Ok(false);

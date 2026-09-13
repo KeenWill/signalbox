@@ -489,11 +489,11 @@ request fix the user actor, and a separate constructor accepts only the tool
 actor for the exact executing tool request. Title generation fixes the core
 actor.
 
-When `session_titles.selection_id` names a configured model selection, the first
-completed assistant turn claims one title call if the title is unset. The
-configured model receives recent conversation text and a short plain-language
-title request; completion installs the title only if it is still unset,
-preserving other metadata under the session lock.
+When `session_titles.selection_id` names a configured model selection, a
+completed assistant turn claims one title call if the title is unset and no
+initial claim exists. The configured model receives recent conversation text and
+a short plain-language title request; completion installs the title only if it
+is still unset, preserving other metadata under the session lock.
 `POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
 `{ "title": "..." }` without saving; accepting a suggestion uses the metadata
 PATCH route. Title calls record their target, credentials, send boundary,
@@ -503,7 +503,9 @@ terminal report naming another call leaves usage unreported. Startup closes
 abandoned title calls without retrying generation and releases unregistered
 invocation reservations. Pre-send title cleanup failures remain registered with
 periodic invocation recovery until terminal cleanup succeeds. Title requests cap
-output at 256 tokens, within the configured model limit.
+output at 256 tokens, within the configured model limit. Generated titles are at
+most 256 UTF-8 bytes. Bootstrap advertises runtime availability through
+`capabilities.session_title_generation`.
 
 First handling of a metadata replacement locks the target session, then either
 records session-not-found without an effect or atomically replaces the complete

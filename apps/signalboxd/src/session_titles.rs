@@ -24,6 +24,8 @@ const TITLE_PROMPT: &str = "Name this conversation in three to six words. Use pl
 const TITLE_WORDS: usize = 6;
 /// Short titles reserve only a small part of the model's context for output.
 const TITLE_MAX_OUTPUT_TOKENS: u32 = 256;
+/// Keeps short generated names and their JSON envelope within browser response limits.
+const TITLE_MAX_UTF8_BYTES: usize = 256;
 
 #[derive(Clone)]
 pub(crate) struct SessionTitles {
@@ -403,6 +405,7 @@ fn normalize_title(text: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     (!title.is_empty()
+        && title.len() <= TITLE_MAX_UTF8_BYTES
         && title.len() <= signalbox_domain::SessionMetadataContent::MAX_TOTAL_UTF8_BYTES)
         .then_some(title)
 }
@@ -499,5 +502,18 @@ mod tests {
         let oversized =
             "界".repeat(signalbox_domain::SessionMetadataContent::MAX_TOTAL_UTF8_BYTES / 3 + 1);
         assert!(normalize_title(&oversized).is_none());
+    }
+
+    #[test]
+    fn generated_titles_fit_the_bounded_json_response() {
+        assert!(normalize_title(&"界".repeat(TITLE_MAX_UTF8_BYTES / 3 + 1)).is_none());
+        let title = normalize_title(&"\u{1}".repeat(TITLE_MAX_UTF8_BYTES)).expect("bounded title");
+        let response =
+            serde_json::to_vec(&signalbox_web_contract::WebSessionTitleSuggestion { title })
+                .expect("title response");
+        assert!(
+            response.len() < 65_536,
+            "even JSON escapes fit the browser response bound"
+        );
     }
 }
