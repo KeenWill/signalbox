@@ -98,10 +98,34 @@ export function ProductNavigation({
   const scenarioDisabled = !productCommandAvailable('navigate.scenario', context)
   return (
     <div className="product-navigation">
-      <div className="brand">
-        <span className="brand-mark">SB</span>
+      <Link
+        className="brand product-brand"
+        to="/$surface"
+        params={{ surface: 'attention' }}
+        aria-label="Signalbox home"
+        aria-disabled={context.navigationLocked || undefined}
+        tabIndex={context.navigationLocked ? -1 : undefined}
+        onClick={(event) => {
+          if (context.navigationLocked) {
+            event.preventDefault()
+            return
+          }
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          ) {
+            return
+          }
+          event.preventDefault()
+          onActivate?.()
+          invokeProductCommand('navigate.attention', context)
+        }}
+      >
         <strong>Signalbox</strong>
-      </div>
+      </Link>
       <nav aria-label="Product">
         {productRoutes.map((route) => {
           const disabled = !productCommandAvailable(productNavigationCommandIds[route.id], context)
