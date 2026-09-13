@@ -68,7 +68,7 @@ export async function turnApi(page: Page, turnId = detailTurnId, entries = detai
       return route.fulfill({
         json: detailPage(
           items,
-          item?.body.type === 'tool_batch'
+          item?.body.type === 'tool_batch' && item.body.tools.length > 0
             ? { ...resultCursor, body: { ...resultCursor.body, address: item.address } }
             : null,
         ),

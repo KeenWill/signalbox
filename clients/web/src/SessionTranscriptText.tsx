@@ -76,9 +76,13 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
             </div>
           )
         })}
-        {body.goal_events.map((event) => (
-          <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
-        ))}
+        {body.goal_events.length > 0 && (
+          <section aria-label="Goal events">
+            {body.goal_events.map((event) => (
+              <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
+            ))}
+          </section>
+        )}
       </>
     )
   if (body.type === 'reconciliation')
@@ -324,7 +328,10 @@ function TranscriptWindow({
         : current,
     )
   }, [entries])
+  const previousDetail = useRef(detail)
   useEffect(() => {
+    if (previousDetail.current === detail) return
+    previousDetail.current = detail
     setTurnModes({})
     setEventContinuations({})
   }, [detail])
@@ -691,9 +698,7 @@ function TurnContent({
             renderTool={renderTool}
             target={target === event.address.event_sequence}
             continuation={eventContinuations[event.address.event_sequence]}
-            onContinuation={(state) =>
-              onEventContinuation(event.address.event_sequence, state)
-            }
+            onContinuation={(state) => onEventContinuation(event.address.event_sequence, state)}
           />
         ))}
       </>
@@ -938,19 +943,16 @@ function EventDetail({
                 {item.body.tools.map((tool) => (
                   <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
                 ))}
-                {item.body.goal_events.map((event) => (
-                  <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
-                ))}
+                {item.body.goal_events.length > 0 && (
+                  <section aria-label="Goal events">
+                    {item.body.goal_events.map((event) => (
+                      <GoalEventDetail key={`${event.generation}:${event.type}`} event={event} />
+                    ))}
+                  </section>
+                )}
               </>
             ) : (
               <BodyText body={item.body} />
-            )}
-            {item.body.type === 'tool_batch' && item.body.goal_events.length > 0 && (
-              <section aria-label="Goal events">
-                {item.body.goal_events.map((event) => (
-                  <GoalEventDetail key={`${event.type}:${event.generation}`} event={event} />
-                ))}
-              </section>
             )}
             {!['user_input', 'model_call', 'tool_batch'].includes(item.body.type) && (
               <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>

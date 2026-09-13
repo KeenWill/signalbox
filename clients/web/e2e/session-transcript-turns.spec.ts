@@ -118,7 +118,9 @@ test('clears an expanded turn when a transcript level command runs', async ({ pa
     .click()
 
   await expect(page.getByRole('radio', { name: 'Tools', exact: true })).toBeChecked()
-  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toHaveCount(0)
+  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toHaveCount(
+    0,
+  )
   await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
     'passed',
   )
@@ -304,18 +306,21 @@ test('renders tool-batch goal events in All details', async ({ page }) => {
   const tool = detailItems[1]
   const input = detailItems[0]
   if (!input || tool?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const goalText = detailExcerpt('Release approval is required.')
   await turnApi(page, undefined, [
     input,
     {
       ...tool,
+      projected_body_bytes: 128 + Number(goalText.total_bytes),
       body: {
         ...tool.body,
+        tools: [],
         goal_events: [
           {
             type: 'blocked',
             generation: '1',
             reason: 'authorization_required',
-            text: detailExcerpt('Release approval is required.'),
+            text: goalText,
           },
         ],
       },
@@ -430,8 +435,8 @@ test('retains continued event text while its virtualized row is unmounted', asyn
           (sum, item) => sum + item.projected_structured_bytes,
           0,
         ),
-        continuation_before: start > 0 ? items[0]?.address ?? null : null,
-        continuation_after: end < entries.length ? items.at(-1)?.address ?? null : null,
+        continuation_before: start > 0 ? (items[0]?.address ?? null) : null,
+        continuation_after: end < entries.length ? (items.at(-1)?.address ?? null) : null,
       },
     })
   })
@@ -442,25 +447,26 @@ test('retains continued event text while its virtualized row is unmounted', asyn
     const item = entries[0]
     if (!item || item.body.type !== 'user_input') throw new Error('Input fixture missing')
     const continuation =
-      offset === '1'
+      offset === '11'
         ? null
         : {
             address: item.address,
             field: 'input_text' as const,
             member_index: 0,
-            offset_bytes: '1',
+            offset_bytes: '11',
           }
     return route.fulfill({
       json: detailPage(
         [
           {
             ...item,
+            projected_body_bytes: 128 + (offset === '11' ? 12 : 11),
             body: {
               ...item.body,
               text: {
-                text: offset === '1' ? 'second chunk' : 'first chunk',
+                text: offset === '11' ? 'second chunk' : 'first chunk',
                 offset_bytes: offset ?? '0',
-                total_bytes: '2',
+                total_bytes: '23',
                 continuation,
               },
             },
@@ -473,11 +479,15 @@ test('retains continued event text while its virtualized row is unmounted', asyn
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   for (const expected of ['Message 9', 'first chunk']) {
-    await transcript.evaluate((element) => {
-      element.scrollTop = 0
-      element.dispatchEvent(new Event('scroll'))
-    })
-    await expect(transcript.getByText(expected, { exact: true })).toBeVisible()
+    await expect
+      .poll(async () => {
+        await transcript.evaluate((element) => {
+          element.scrollTop = 0
+          element.dispatchEvent(new Event('scroll'))
+        })
+        return transcript.getByText(expected, { exact: true }).isVisible()
+      })
+      .toBe(true)
   }
   await page.getByRole('radio', { name: 'All details', exact: true }).check()
   const input = transcript.locator('[data-event-sequence="1"]')
