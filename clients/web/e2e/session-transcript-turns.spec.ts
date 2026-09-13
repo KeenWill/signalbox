@@ -9,6 +9,7 @@ import {
   detailCallId,
   detailExcerpt,
   detailItems,
+  detailLive,
   detailPage,
   detailSessionId,
   resultCursor,
@@ -1817,7 +1818,10 @@ test('keeps an open request disclosure and its continued text when physical atte
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
-  const chips = transcript.getByRole('button', { name: 'Open turn details for exec_command', exact: true })
+  const chips = transcript.getByRole('button', {
+    name: 'Open turn details for exec_command',
+    exact: true,
+  })
   await transcript.getByRole('button', { name: 'Read more', exact: true }).click()
   const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
   await expect(continued).toContainText(text.slice(split))
@@ -1850,3 +1854,46 @@ test('keeps an open request disclosure and its continued text when physical atte
   expect(problems).toEqual([])
 })
 
+for (const [level, command] of [
+  ['Summary', 'Show transcript results'],
+  ['Tools', 'Show condensed transcript detail'],
+  ['All details', 'Show full transcript detail'],
+] as const) {
+  test(`clears local turn overrides when reapplying ${level} from the palette`, async ({
+    page,
+  }) => {
+    await turnApi(page)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    const selected = page.getByRole('radio', { name: level, exact: true })
+    await selected.check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const expand = transcript.getByRole('button', { name: 'Open turn details', exact: true })
+    const collapse = transcript.getByRole('button', { name: 'Collapse turn', exact: true })
+    if (level === 'All details') {
+      await collapse.click()
+      await expect(expand).toBeVisible()
+    } else {
+      await expand.click()
+      await expect(collapse).toBeVisible()
+    }
+    // An unrelated global command must preserve the local override.
+    await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+    await page
+      .getByRole('dialog', { name: 'Command palette' })
+      .getByRole('button', { name: /Use light theme/ })
+      .click()
+    await expect(level === 'All details' ? expand : collapse).toBeVisible()
+    await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+    await page
+      .getByRole('dialog', { name: 'Command palette' })
+      .getByRole('button', { name: new RegExp(command) })
+      .click()
+    await expect(selected).toBeChecked()
+    await expect(level === 'All details' ? collapse : expand).toBeVisible()
+    await expect(level === 'All details' ? expand : collapse).toHaveCount(0)
+    if (level === 'Tools')
+      await expect(
+        transcript.getByRole('region', { name: 'exec_command details', exact: true }),
+      ).toContainText('passed')
+  })
+}

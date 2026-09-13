@@ -239,6 +239,7 @@ function TranscriptWindow({
   anchor,
 }: SessionTranscriptTextProps) {
   const detail = useAppSelector((state) => state.app.detail)
+  const detailRevision = useAppSelector((state) => state.app.detailRevision)
   const dispatch = useAppDispatch()
   const [turnModes, setTurnModes] = useState<Record<string, DetailMode>>({})
   const [eventContinuations, setEventContinuations] = useState<
@@ -592,15 +593,15 @@ function TranscriptWindow({
       control?.focus()
     })
   }, [])
-  const previousDetail = useRef(detail)
+  const previousDetailRevision = useRef(detailRevision)
   useEffect(() => {
-    if (previousDetail.current === detail) return
-    previousDetail.current = detail
+    if (previousDetailRevision.current === detailRevision) return
+    previousDetailRevision.current = detailRevision
     setTurnModes({})
     setEventContinuations({})
     setContinuedEvents({})
     setToolPages({})
-  }, [detail])
+  }, [detailRevision])
   useEffect(
     () =>
       registerUnwind?.(() => {
@@ -1025,9 +1026,7 @@ function TurnContent({
                         event.address.event_sequence === continuationSequence(page) &&
                         event.body.type === 'tool_batch' &&
                         event.body.tools.some((entry) =>
-                          part.tools.some(
-                            (tool) => disclosureKey(tool) === disclosureKey(entry),
-                          ),
+                          part.tools.some((tool) => disclosureKey(tool) === disclosureKey(entry)),
                         ),
                     ),
                 )
