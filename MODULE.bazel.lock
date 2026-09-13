@@ -267,7 +267,7 @@
         "usagesDigest": "EfIixXISA9aY18d2B5XWiiMSIlOZy7vdGxR3tqlF+0I=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
-          "FILE:@@//clients/web/package-lock.json 4ccc1b27f6186941626fdc265138344e5a342d2689f9194c19d74c7ce0f8f207"
+          "FILE:@@//clients/web/package-lock.json 2319e1c594ea74a87170dc9fcd3a252acfffec189ba007cd38e3efd16ed90657"
         ],
         "generatedRepoSpecs": {
           "dejavu_fonts": {
@@ -284,7 +284,7 @@
           "playwright_runtime": {
             "repoRuleId": "@@//tooling/bazel:playwright.bzl%_playwright_runtime",
             "attributes": {
-              "digest": "dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e",
+              "digest": "eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27",
               "fonts": "@@+playwright+dejavu_fonts//:LICENSE"
             }
           }
@@ -320,7 +320,7 @@
         "usagesDigest": "H0opy+PLNeMUOPEPgzvK1+5bO1GFuYIVjfU/jmDShZQ=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
-          "FILE:@@//Cargo.lock d8f97d00f1417952d8566750259b6207131af5927390105fe8bb3c32409cd59c"
+          "FILE:@@//Cargo.lock 7d3deb6f05c1b220b1694a2f9f31505e9f810965f9ae8e7f5bb0f8f854904d85"
         ],
         "generatedRepoSpecs": {
           "rusty_v8_archive": {
@@ -550,7 +550,7 @@
           "REPO_MAPPING:rules_rust+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
-          "FILE:@@//Cargo.lock da4e2edff50ae1fa14d5cd3e1c2d7960c5ac1c48ace0c7f8e1a72bbdd1b7bd0e",
+          "FILE:@@//Cargo.lock 7d3deb6f05c1b220b1694a2f9f31505e9f810965f9ae8e7f5bb0f8f854904d85",
           "FILE:@@//Cargo.toml 8d4e47fe82a6dd8ffbfad97e93a1a61b2c961d6e871873c6dcde00c75554dd7f",
           "FILE:@@//apps/client/Cargo.toml 367d8f5f75b15c9b42727b31beaf1bb4c311edcadafe5828b8aa46a12e6c0b94",
           "FILE:@@//crates/process-protocol/Cargo.toml 66a27ba17a35d4398cb89df1e20cb9b9eb549f24a839ce1a83486b8026fc492a",
@@ -569,7 +569,7 @@
           "FILE:@@//crates/conversation-import-json/Cargo.toml 09ae7f32f94e771ec1181083c5e3f87147b5307334e20bbf6191fbf8aa87f602",
           "FILE:@@//crates/conversation-import-codex/Cargo.toml 88e4d97f9a0a5952e4face9ffa0731ff655a0495a689ce57aa174b7b358ee285",
           "FILE:@@//crates/test-bin/Cargo.toml d7b30c3fa1e7fd8e31168d9b68ca362ecb39b2e4700ede1316173dcb265d2140",
-          "FILE:@@//apps/signalboxd/Cargo.toml 553aae64987a60dd0cfe1805f210048f8845e80555b8077997ab61b48c6179c0",
+          "FILE:@@//apps/signalboxd/Cargo.toml 89bef80d24e0cd9c0054180b1cac650078d22da5df9550329ba8dabf6e028956",
           "FILE:@@//crates/approval-judge-eval/Cargo.toml 9ada8912afbe40d0434321eb9231fb2113ea19def0e3c990c26467d12a7aefc1",
           "FILE:@@//crates/blob-store-filesystem/Cargo.toml 8558b86e73465e57cb079d69244b065952798e449ab70db6c6aa21d85bce4e1c",
           "FILE:@@//crates/blob-store-s3/Cargo.toml f7ec8b37661da4abd7c01b7fa33aa8168c0b5296c1d563bd4bde23584bb4d99b",
@@ -9362,7 +9362,7 @@
   "facts": {
     "//tooling/bazel:playwright.bzl%playwright": {
       "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2": "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7",
-      "https://mcr.microsoft.com/v2/playwright/manifests/v1.62.1-noble": "dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e"
+      "https://mcr.microsoft.com/v2/playwright/manifests/v1.63.0-noble": "eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27"
     },
     "//tooling/bazel:rust_toolchains.bzl%rust": {
       "https://static.rust-lang.org/dist/2026-09-12/channel-rust-nightly.toml": "b62ae95c233ac37ce49840313f537401ec2d8e83d846146110b186ac2d4a5dbc",
