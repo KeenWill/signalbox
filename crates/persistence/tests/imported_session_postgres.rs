@@ -191,10 +191,19 @@ async fn title_context_reads_a_bounded_prefix_from_an_imported_seed() -> Result<
         )
         .await?;
     assert_eq!(
-        signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool.clone())
             .conversation(session, 4)
             .await?,
         "界"
+    );
+    assert_eq!(
+        signalbox_persistence::session_titles::SessionTitleRepository::new(pool)
+            .conversation(session, 400_000)
+            .await?
+            .lines()
+            .count(),
+        64,
+        "large input budgets retain only the recent row window"
     );
     Ok(())
 }

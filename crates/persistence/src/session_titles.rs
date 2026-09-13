@@ -10,6 +10,8 @@ use sqlx::{PgConnection, PgPool, Row};
 
 use crate::session_metadata::SessionMetadataRepositoryError;
 
+const TITLE_CONTEXT_ROWS: i32 = 64;
+
 /// Facts frozen before a title model is invoked.
 #[derive(Clone, Debug)]
 pub struct SessionTitleCall {
@@ -167,7 +169,7 @@ impl SessionTitleRepository {
             &mut tx,
             session,
             source.frontier,
-            max_utf8_bytes,
+            TITLE_CONTEXT_ROWS,
         )
         .await
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -180,7 +182,7 @@ impl SessionTitleRepository {
             .map(|member| member.entry().into_uuid())
             .collect::<Vec<_>>();
         let mut rows = sqlx::query(
-            "SELECT LEFT(COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value), $2) AS value,
+            "SELECT substring(convert_to(COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value), 'UTF8') FROM 1 FOR $2) AS value,
                     substring(imported.content_encoding FROM 1 FOR $3) AS content_encoding
              FROM unnest($1::uuid[], $4::uuid[]) WITH ORDINALITY AS member(source_session_id, semantic_entry_id, member_position)
              JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
@@ -193,18 +195,27 @@ impl SessionTitleRepository {
              WHERE (COALESCE(CASE WHEN entry.payload_kind = 'assistant_text' THEN entry.assistant_text_value END, entry.context_summary_value, part.text_value) <> ''
                 OR octet_length(imported.content_encoding) > $5)
              ORDER BY member.member_position DESC, part.position DESC NULLS LAST
-             LIMIT $2")
+             LIMIT $6")
             .bind(sources).bind(max_utf8_bytes)
             .bind(max_utf8_bytes.saturating_add(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES))
-            .bind(entries).bind(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES).fetch(&mut *tx);
+            .bind(entries).bind(crate::conversation_import_codec::TEXT_CONTENT_HEADER_BYTES)
+            .bind(TITLE_CONTEXT_ROWS).fetch(&mut *tx);
         let mut remaining = usize::try_from(max_utf8_bytes).unwrap_or_default();
         let mut parts = Vec::new();
         while remaining > 0 {
             let Some(row) = rows.try_next().await? else {
                 break;
             };
-            let text = match row.try_get::<Option<String>, _>("value")? {
-                Some(text) => text,
+            let text = match row.try_get::<Option<Vec<u8>>, _>("value")? {
+                Some(bytes) => match std::str::from_utf8(&bytes) {
+                    Ok(text) => text.to_owned(),
+                    Err(error) if error.error_len().is_none() => {
+                        std::str::from_utf8(&bytes[..error.valid_up_to()])
+                            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
+                            .to_owned()
+                    }
+                    Err(error) => return Err(sqlx::Error::Decode(Box::new(error))),
+                },
                 None => {
                     let encoded: Vec<u8> = row.try_get("content_encoding")?;
                     match crate::conversation_import_codec::decode_text_prefix(&encoded)
