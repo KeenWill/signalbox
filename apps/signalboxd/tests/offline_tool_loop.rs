@@ -6,6 +6,8 @@
 
 #[path = "offline_tool_loop/ambient_credentials.rs"]
 mod ambient_credentials;
+#[path = "offline_tool_loop/runner_fallback.rs"]
+mod runner_fallback;
 mod support;
 #[path = "offline_tool_loop/workflows.rs"]
 mod workflow_tools;
@@ -318,7 +320,16 @@ impl ToolLoopFixture {
     async fn with_template_database(
         posture: DangerousToolAutoApproval,
         template: Option<&signalboxd::ResolvedSessionTemplate>,
+        database: (TestDatabase, PgPool),
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::with_creation_placement(posture, template, database, None).await
+    }
+
+    async fn with_creation_placement(
+        posture: DangerousToolAutoApproval,
+        template: Option<&signalboxd::ResolvedSessionTemplate>,
         (container, pool): (TestDatabase, PgPool),
+        runner_placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
     ) -> Result<Self, Box<dyn Error>> {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_ID_SEED + 1));
         let defaults = SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
@@ -338,6 +349,7 @@ impl ToolLoopFixture {
             )?,
             None => CreateSessionRequest::try_new(command, defaults)?,
         };
+        let request = request.with_runner_placement(runner_placement);
         let CreateSessionOutcome::Applied(created) = create.execute(request).await? else {
             panic!("the unique fixture command must create its session")
         };

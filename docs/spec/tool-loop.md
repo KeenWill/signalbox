@@ -375,6 +375,10 @@ effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
 `SideEffecting`. Effect class controls crash classification, not permission
 identity.
 
+Daemon-local `echo` admission does not consume an unpinned session's runner
+permission override or credential-profile selection and does not pin the
+placement.
+
 Workspace mutation tools advertise their UTF-8 byte limits. Oversized content,
 edit strings, and patches are rejected with the argument name, actual byte
 count, and maximum byte count.
