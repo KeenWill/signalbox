@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  attachmentTypeLabel,
-  inspectedArtifact,
-  nextResolutionSequence,
-} from './ArtifactInspector'
+import { attachmentTypeLabel, inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
 import {
   fallbackDescriptor,
   imageArtifact,
