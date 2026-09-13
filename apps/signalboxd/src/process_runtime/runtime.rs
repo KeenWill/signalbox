@@ -366,6 +366,7 @@ async fn dispatch_updates_with_titles(
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
+        let mut title_work = None;
         let outcome = dispatcher
             .dispatch_next(|event| {
                 observe_outbox_metrics_once(
@@ -377,16 +378,14 @@ async fn dispatch_updates_with_titles(
                 // A sessionless receipt has no follower to reach.
                 if let Some(session) = event.session() {
                     if let DispatchedOutboxEventKind::TurnTerminal {
-                        turn, disposition: DispatchedTurnTerminalDisposition::Completed { .. },
+                        turn,
+                        disposition: DispatchedTurnTerminalDisposition::Completed { .. },
                     } = event.kind()
-                        && let Some(titles) = title_configuration.as_ref().and_then(|configuration| configuration.session_titles(pool.clone()))
+                        && let Some(titles) = title_configuration
+                            .as_ref()
+                            .and_then(|configuration| configuration.session_titles(pool.clone()))
                     {
-                        let turn = *turn;
-                        tokio::spawn(async move {
-                            if let Err(error) = titles.generate(session, Some(turn)).await {
-                                tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title generation failed");
-                            }
-                        });
+                        title_work = Some((titles, session, *turn));
                     }
                     let outcome =
                         nudge_eligible_outbox_wake(&eligibility_nudge, session, event.kind());
@@ -416,7 +415,23 @@ async fn dispatch_updates_with_titles(
             })
             .await;
         match outcome {
-            Ok(OutboxDispatchOutcome::Delivered { .. }) => {}
+            Ok(OutboxDispatchOutcome::Delivered { .. }) => {
+                if let Some((titles, session, turn)) = title_work {
+                    match titles.prepare(session, Some(turn)).await {
+                        Ok(Some(prepared)) => {
+                            tokio::spawn(async move {
+                                if let Err(error) = titles.generate_prepared(prepared).await {
+                                    tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title generation failed");
+                                }
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(session_id = %session.into_uuid(), ?error, "initial session title preparation failed")
+                        }
+                    }
+                }
+            }
             Ok(OutboxDispatchOutcome::Idle)
             | Err(OutboxDispatchError::Database(sqlx::Error::PoolTimedOut)) => {
                 tokio::select! {
