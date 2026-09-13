@@ -115,11 +115,13 @@ impl CredentialInvocationProcesses {
     }
 
     pub(crate) fn retain_initial_title(&self, session: SessionId, turn: TurnId) {
-        self.pending_titles
+        let mut pending = self
+            .pending_titles
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(session)
-            .or_insert(turn);
+            .unwrap_or_else(PoisonError::into_inner);
+        if pending.len() < TITLE_RECOVERY_PAGE_SIZE as usize {
+            pending.entry(session).or_insert(turn);
+        }
     }
 
     pub(crate) fn clear_pending_titles(&self) {
@@ -621,6 +623,14 @@ mod tests {
         assert_eq!(
             *processes.pending_titles.lock().expect("first page"),
             expected
+        );
+        for (&session, &turn) in &completed {
+            processes.retain_initial_title(session, turn);
+        }
+        assert_eq!(
+            *processes.pending_titles.lock().expect("live completions"),
+            expected,
+            "live completion and retry retention leave overflow in the durable backlog"
         );
         processes.refill_pending_titles().await?;
         assert_eq!(
