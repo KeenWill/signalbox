@@ -386,6 +386,7 @@ export function SessionCatalogSurface({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
+    refetchOnWindowFocus: 'always',
   })
   const searchAvailable = bootstrap.data?.capabilities.bounded_lexical_search === true
 

@@ -1306,6 +1306,54 @@ test('disables suggestions in the row and palette when title generation is unava
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('refreshes suggestion availability on window focus after a catalog reload', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  let available = false
+  let suggestions = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, session_title_generation: available },
+      },
+    }),
+  )
+  await page.route(`**/api/sessions/${firstSessionId}/title/suggest`, (route) => {
+    suggestions += 1
+    return route.fulfill({ json: { title: 'Unused suggestion' } })
+  })
+  await page.goto('/sessions')
+  const suggest = page.getByRole('button', {
+    name: `Suggest a name for session ${firstSessionId}`,
+    exact: true,
+  })
+  const rename = page.getByRole('button', {
+    name: `Rename session ${firstSessionId}`,
+    exact: true,
+  })
+  await expect(suggest).toBeDisabled()
+  for (const next of [true, false]) {
+    available = next
+    await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+    if (next) await expect(suggest).toBeEnabled()
+    else await expect(suggest).toBeDisabled()
+    await expect(rename).toBeEnabled()
+    await page.getByRole('button', { name: /^Release verification/ }).focus()
+    await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+    const palette = page.getByRole('dialog', { name: 'Command palette' })
+    await expect(palette.getByRole('button', { name: /Suggest a name/ })).toHaveCount(next ? 1 : 0)
+    await page.keyboard.press('Escape')
+  }
+  expect(suggestions).toBe(0)
+  await page.screenshot({ path: testInfo.outputPath('reloaded-title-availability.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.screenshot({ path: testInfo.outputPath('reloaded-title-availability-phone.png') })
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('suggests a title inline and saves only after keyboard acceptance', async ({
   page,
 }, testInfo) => {
