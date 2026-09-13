@@ -12,11 +12,24 @@ import {
 import type { WebSessionTimelineDetail } from '../generated/web-contract.mjs'
 import { transcriptFixture } from './transcript.fixture'
 
-export async function turnApi(page: Page, turnId = detailTurnId) {
+export async function turnApi(page: Page, turnId = detailTurnId, entries = detailItems) {
   const withTurn = (item: WebSessionTimelineDetail): WebSessionTimelineDetail => ({
     ...item,
-    body: 'turn_id' in item.body ? { ...item.body, turn_id: turnId } : item.body,
+    body:
+      'turn_id' in item.body && item.body.turn_id === detailTurnId
+        ? { ...item.body, turn_id: turnId }
+        : item.body,
   })
+  const window = {
+    ...detailWindow,
+    items: entries.map(({ address, kind }) => ({
+      address,
+      kind,
+      projected_structured_bytes: 64 + kind.length,
+    })),
+    projected_structured_bytes: entries.reduce((sum, item) => sum + 64 + item.kind.length, 0),
+  }
+  const latest = entries.at(-1)?.address.event_sequence ?? '1'
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/follow'))
@@ -25,10 +38,11 @@ export async function turnApi(page: Page, turnId = detailTurnId) {
       return route.fulfill({
         json: { cursor: '0', summaries: [], continuation_after_session_id: null },
       })
-    if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: detailWindow })
-    if (url.pathname.endsWith('/live')) return route.fulfill({ json: detailLive })
+    if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: window })
+    if (url.pathname.endsWith('/live'))
+      return route.fulfill({ json: { ...detailLive, observed_through: latest } })
     if (url.pathname.endsWith('/timeline-detail')) {
-      const item = detailItems
+      const item = entries
         .map(withTurn)
         .find(
           (entry) =>
@@ -56,15 +70,15 @@ export async function turnApi(page: Page, turnId = detailTurnId) {
           repository_watch: null,
           workspace_root_kind: null,
           sizes: {
-            item_count: '5',
+            item_count: String(entries.length),
             projected_text_bytes: '300',
-            projected_structured_bytes: String(detailWindow.projected_structured_bytes),
+            projected_structured_bytes: String(window.projected_structured_bytes),
             referenced_blob_count: '0',
             referenced_blob_bytes: '0',
           },
           first_address: { event_sequence: '1' },
-          latest_address: { event_sequence: '5' },
-          observed_through: '5',
+          latest_address: { event_sequence: latest },
+          observed_through: latest,
           work: { active_turn_count: '0', queued_turn_count: '0' },
         },
       })

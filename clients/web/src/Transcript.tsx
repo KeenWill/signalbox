@@ -200,6 +200,7 @@ export function VirtualTranscript({
   initialEnd = false,
   followEnd = false,
   onRange,
+  onEndChange,
   onEdge,
   onKeyDown,
   role = 'region',
@@ -218,6 +219,7 @@ export function VirtualTranscript({
   initialEnd?: boolean
   followEnd?: boolean
   onRange?: (start: number, end: number) => void
+  onEndChange?: (atEnd: boolean) => void
   onEdge?: (direction: 'before' | 'after') => void
   onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>
   role?: 'listbox' | 'region'
@@ -293,6 +295,7 @@ export function VirtualTranscript({
     remember()
     atEnd.current =
       direction !== 'before' && element.scrollHeight - element.scrollTop - element.clientHeight <= 1
+    onEndChange?.(atEnd.current)
     if (element.scrollTop < estimateSize && direction !== 'after') onEdge?.('before')
     else if (
       element.scrollHeight - element.scrollTop - element.clientHeight < estimateSize &&

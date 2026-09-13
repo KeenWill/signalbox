@@ -142,3 +142,29 @@ it('retains a provider failure when no response or only a generic failed outcome
     ])[0]?.outcome,
   ).toEqual(failure)
 })
+
+it('keeps an intervening turn input before the earlier turn response', () => {
+  const input = detailItems[0]
+  if (input?.body.type !== 'user_input') throw new Error('Input fixture missing')
+  const turns = groupTranscriptTurns([
+    ...detailItems.slice(0, 2),
+    {
+      ...input,
+      address: { event_sequence: '3' },
+      body: { ...input.body, turn_id: '00000000-0000-0000-0000-000000000126' },
+    },
+    ...detailItems.slice(2).map((item) => ({
+      ...item,
+      address: { event_sequence: String(Number(item.address.event_sequence) + 1) },
+    })),
+  ])
+  expect(turns.map((turn) => turn.events.map((event) => event.address.event_sequence))).toEqual([
+    ['1', '2'],
+    ['3'],
+    ['4', '5', '6'],
+  ])
+  expect(turns[0]?.turnId).toBe(turns[2]?.turnId)
+  expect(turns[0]?.id).not.toBe(turns[2]?.id)
+  expect(turns[0]?.result).toBeUndefined()
+  expect(turns[2]?.result?.address.event_sequence).toBe('5')
+})

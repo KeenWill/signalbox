@@ -2,6 +2,7 @@ import { turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
 import {
   detailExcerpt,
+  detailItems,
   detailPage,
   detailSessionId,
   toolResultItem,
@@ -126,4 +127,50 @@ test('reads later tool members on demand in Tools mode', async ({ page }) => {
   await expect(details.getByText('verify_release', { exact: true })).toBeVisible()
   await expect(details).toContainText('release verify')
   expect(members).toEqual(['1'])
+})
+
+test('preserves interleaved chronology while expanding every segment of a turn', async ({
+  page,
+}) => {
+  const input = detailItems[0]
+  if (input?.body.type !== 'user_input') throw new Error('Input fixture missing')
+  const text = detailExcerpt('Start the next check after this turn.')
+  const entries = [
+    ...detailItems.slice(0, 2),
+    {
+      ...input,
+      address: { event_sequence: '3' },
+      projected_body_bytes: 128 + Number(text.total_bytes),
+      body: {
+        ...input.body,
+        turn_id: '00000000-0000-0000-0000-000000000126',
+        text,
+        attachments: [],
+      },
+    },
+    ...detailItems.slice(2).map((item) => ({
+      ...item,
+      address: { event_sequence: String(Number(item.address.event_sequence) + 1) },
+    })),
+  ]
+  await turnApi(page, undefined, entries)
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const messages = [
+    'Inspect the release status and retain the result.',
+    'Start the next check after this turn.',
+    'The release checks passed. Publishing remains unapproved.',
+  ]
+  await expect(transcript.locator('.session-message-text')).toHaveText(messages)
+  await transcript.getByRole('button', { name: 'Open turn details', exact: true }).first().click()
+  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toHaveCount(
+    2,
+  )
+  await expect(transcript.locator('.session-message-text')).toHaveText(messages)
+  await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).first().click()
+  await expect(transcript.getByRole('button', { name: 'Collapse turn', exact: true })).toHaveCount(
+    0,
+  )
+  await expect(transcript.locator('.session-message-text')).toHaveText(messages)
 })

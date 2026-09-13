@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
@@ -103,6 +103,7 @@ export interface SessionTranscriptTextProps {
   observed: string
   limits: SessionTranscriptLimits
   eventSequence?: string
+  anchor?: SessionWindowAnchor
   turnId?: string
   context?: CommandContext
   registerUnwind?: (unwind: () => boolean) => () => void
@@ -140,7 +141,7 @@ export function SessionTranscriptText(props: SessionTranscriptTextProps) {
   const target = eventSequence ?? location.data?.items[0]?.address.event_sequence
   return (
     <TranscriptWindow
-      key={`${props.sessionId}:${target ?? ''}:${turnId ?? ''}`}
+      key={`${props.sessionId}:${target ?? ''}:${turnId ?? ''}:${JSON.stringify(props.anchor ?? null)}`}
       {...props}
       eventSequence={target}
       turnId={turnId}
@@ -157,6 +158,7 @@ function TranscriptWindow({
   turnId: requestedTurn,
   context,
   registerUnwind,
+  anchor,
 }: SessionTranscriptTextProps) {
   const detail = useAppSelector((state) => state.app.detail)
   const dispatch = useAppDispatch()
@@ -174,11 +176,21 @@ function TranscriptWindow({
   }
 
   const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
+  const initialAnchor = useMemo<SessionWindowAnchor>(
+    () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
+    [eventSequence, anchor],
+  )
+  const selectedSequence =
+    eventSequence ?? (initialAnchor.kind === 'around' ? initialAnchor.eventSequence : undefined)
+  const queryKey = useMemo(
+    () => ['production', 'scrolling-transcript', sessionId, initialAnchor, limits],
+    [sessionId, initialAnchor, limits],
+  )
+  const queries = useQueryClient()
+  const readerAtEnd = useRef(initialAnchor.kind === 'latest')
   const transcript = useInfiniteQuery({
-    queryKey: ['production', 'scrolling-transcript', sessionId, eventSequence, limits],
-    initialPageParam: (eventSequence
-      ? { kind: 'around', eventSequence }
-      : { kind: 'latest' }) as SessionWindowAnchor,
+    queryKey,
+    initialPageParam: initialAnchor,
     queryFn: ({ pageParam, signal }) => reader.read(pageParam, limits, signal),
     getPreviousPageParam: (page): SessionWindowAnchor | undefined =>
       page.window.continuation_before
@@ -198,9 +210,18 @@ function TranscriptWindow({
   useEffect(() => {
     if (previousObservation.current !== observed) {
       previousObservation.current = observed
+      if (readerAtEnd.current && initialAnchor.kind === 'latest')
+        queries.setQueryData<typeof transcript.data>(queryKey, (data) =>
+          data
+            ? {
+                ...data,
+                pageParams: [initialAnchor, ...data.pageParams.slice(1)],
+              }
+            : data,
+        )
       void transcript.refetch()
     }
-  }, [observed, transcript.refetch])
+  }, [observed, transcript.refetch, queries, queryKey, initialAnchor])
   const pages = transcript.data?.pages
   const entries = useMemo(
     () => pages?.flatMap((page) => page.details.flatMap((detail) => detail.items)) ?? [],
@@ -211,7 +232,7 @@ function TranscriptWindow({
       groupTranscriptTurns(entries).filter(
         (turn) =>
           detail === 'full' ||
-          turnModes[turn.id] === 'full' ||
+          turnModes[turn.turnId ?? turn.id] === 'full' ||
           turn.events.some((event) => event.address.event_sequence === eventSequence) ||
           turn.messages.length > 0 ||
           turn.result ||
@@ -247,7 +268,12 @@ function TranscriptWindow({
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
   useEffect(() => {
-    const loaded = new Set(entries.map((entry) => groupTranscriptTurns([entry])[0]?.id))
+    const loaded = new Set(
+      entries.map((entry) => {
+        const turn = groupTranscriptTurns([entry])[0]
+        return turn?.turnId ?? turn?.id
+      }),
+    )
     setTurnModes((current) =>
       Object.keys(current).some((id) => !loaded.has(id))
         ? Object.fromEntries(Object.entries(current).filter(([id]) => loaded.has(id)))
@@ -263,15 +289,19 @@ function TranscriptWindow({
         const turn = turns.find((turn) => turn.id === id)
         if (
           !turn ||
-          (turnModes[turn.id] !== 'full' &&
+          (turnModes[turn.turnId ?? turn.id] !== 'full' &&
             requestedTurn !== turn.turnId &&
             !turn.events.some((event) => event.address.event_sequence === eventSequence))
         )
           return false
-        if (turnModes[turn.id] === 'results' || turnModes[turn.id] === 'condensed') return false
+        if (
+          turnModes[turn.turnId ?? turn.id] === 'results' ||
+          turnModes[turn.turnId ?? turn.id] === 'condensed'
+        )
+          return false
         setTurnModes((current) => ({
           ...current,
-          [turn.id]: detail === 'full' ? 'results' : detail,
+          [turn.turnId ?? turn.id]: detail === 'full' ? 'results' : detail,
         }))
         requestAnimationFrame(() =>
           row.querySelector<HTMLButtonElement>('.session-turn-heading button')?.focus(),
@@ -292,7 +322,7 @@ function TranscriptWindow({
               (turn) =>
                 (turn.events.includes(item) &&
                   (detail === 'full' ||
-                    turnModes[turn.id] === 'full' ||
+                    turnModes[turn.turnId ?? turn.id] === 'full' ||
                     item.address.event_sequence === eventSequence)) ||
                 turn.messages.includes(item) ||
                 turn.result === item ||
@@ -366,9 +396,12 @@ function TranscriptWindow({
       )}
       <VirtualTranscript
         ids={ids}
-        initialEnd={!eventSequence}
+        initialEnd={initialAnchor.kind === 'latest'}
+        onEndChange={(atEnd) => {
+          readerAtEnd.current = atEnd
+        }}
         followEnd={
-          !eventSequence &&
+          initialAnchor.kind === 'latest' &&
           Boolean(
             pages
               ?.at(-1)
@@ -379,7 +412,7 @@ function TranscriptWindow({
                     turns.some(
                       (turn) =>
                         (turn.events.includes(item) &&
-                          (detail === 'full' || turnModes[turn.id] === 'full')) ||
+                          (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
                         turn.messages.includes(item) ||
                         turn.result === item ||
                         turn.outcome === item ||
@@ -391,8 +424,8 @@ function TranscriptWindow({
         }
         selectedId={
           turns.find((turn) =>
-            turn.events.some((event) => event.address.event_sequence === eventSequence),
-          )?.id ?? rows.find((row) => row.sequence === eventSequence)?.id
+            turn.events.some((event) => event.address.event_sequence === selectedSequence),
+          )?.id ?? rows.find((row) => row.sequence === selectedSequence)?.id
         }
         onEdge={(direction) => {
           if (transcript.isFetching || transcript.isError) return
@@ -431,7 +464,7 @@ function TranscriptWindow({
                 turn={turn}
                 collapsedDetail={detail === 'full' ? 'results' : detail}
                 detail={
-                  turnModes[turn.id] ??
+                  turnModes[turn.turnId ?? turn.id] ??
                   (detail === 'full' ||
                   requestedTurn === turn.turnId ||
                   turn.events.some((event) => event.address.event_sequence === eventSequence)
@@ -449,7 +482,7 @@ function TranscriptWindow({
                   const target = Array.from(row ?? []).find(
                     (row) => row.dataset.transcriptTurn === turn.id,
                   )
-                  setTurnModes((current) => ({ ...current, [turn.id]: mode }))
+                  setTurnModes((current) => ({ ...current, [turn.turnId ?? turn.id]: mode }))
                   requestAnimationFrame(() =>
                     target
                       ?.querySelector<HTMLButtonElement>('.session-turn-heading button')
