@@ -5,12 +5,12 @@ import { type CostTotal, costTotalText, totalCost } from './cost'
 import { usageSourceOptions } from './queries'
 import './usage.css'
 
-function useSummaryCost(sessionId: string, turnId?: string) {
+function useSummaryCost(sessionId: string, enabled: boolean, turnId?: string) {
   const client = useQueryClient()
   const filters = { sessionId, turnId }
   const query = useQuery({
     queryKey: ['search-usage', 'summary', filters],
-    enabled: Boolean(sessionId),
+    enabled,
     queryFn: async ({ signal }) => {
       const source = await client.ensureQueryData(usageSourceOptions)
       return source.usageSummary(filters, signal)
@@ -21,7 +21,7 @@ function useSummaryCost(sessionId: string, turnId?: string) {
 }
 
 export function useSessionCost(sessionId: string) {
-  return useSummaryCost(sessionId)
+  return useSummaryCost(sessionId, Boolean(sessionId))
 }
 
 export function turnCosts(page: WebUsageCallPage): ReadonlyMap<string, CostTotal> {
@@ -107,6 +107,7 @@ export function SessionCostChip({ sessionId }: { sessionId: string }) {
 }
 
 export function TurnCostChip({ sessionId, turnId }: { sessionId: string; turnId: string }) {
-  const cost = useSummaryCost(sessionId, turnId)
+  const cost = useSummaryCost(sessionId, Boolean(sessionId && turnId), turnId)
+  if (!turnId) return <CostChip status="success" />
   return <CostChip cost={cost.data} status={cost.status} />
 }

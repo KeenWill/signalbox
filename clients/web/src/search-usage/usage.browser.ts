@@ -106,3 +106,34 @@ test('retries the connection when a session cost refresh follows bootstrap failu
   await page.getByRole('button', { name: 'Refresh costs' }).click()
   await expect(session.getByRole('button')).toHaveText('$0')
 })
+
+test('does not show session totals as turn cost when no turn is selected', async ({ page }) => {
+  const { webContractBootstrapFixture } = await import('../product.fixture')
+  const { SearchUsageScenarioSource, SEARCH_USAGE_SCENARIO_SESSION_ID } = await import('./scenario')
+  const source = new SearchUsageScenarioSource()
+  const summaryRequests: URL[] = []
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/bootstrap')
+      return route.fulfill({ json: webContractBootstrapFixture })
+    if (url.pathname === '/api/usage/calls')
+      return route.fulfill({ json: { calls: [], continuation: null } })
+    if (url.pathname === '/api/usage/summary') {
+      summaryRequests.push(url)
+      return route.fulfill({ json: await source.usageSummary({}) })
+    }
+    throw new Error(`Unexpected endpoint ${url.pathname}`)
+  })
+  await page.goto(
+    `/src/search-usage/preview.html?preview=cost&session=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  )
+  await expect(page.getByRole('region', { name: 'Session cost', exact: true })).toContainText(
+    '$2.84',
+  )
+  const turn = page.getByRole('region', { name: 'Turn cost', exact: true })
+  await expect(turn).toHaveText('Cost not loaded')
+  await expect(turn.getByRole('button')).toHaveCount(0)
+  expect(summaryRequests).toHaveLength(1)
+  expect(summaryRequests[0]?.searchParams.get('session_id')).toBe(SEARCH_USAGE_SCENARIO_SESSION_ID)
+  expect(summaryRequests[0]?.searchParams.has('turn_id')).toBe(false)
+})
