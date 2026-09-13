@@ -2259,6 +2259,21 @@ impl RepoWatchStore {
         {
             return Err(StoreError::InvalidDispatchBatch);
         }
+        if initial_batch {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('frontier:' || $1,0))")
+                .bind(first.repository().as_str())
+                .execute(&mut **transaction)
+                .await?;
+            let paused: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM observer_actor WHERE repository=$1 AND NOT ready)",
+            )
+            .bind(first.repository().as_str())
+            .fetch_one(&mut **transaction)
+            .await?;
+            if paused {
+                return Ok(DispatchAdmission::Suppressed);
+            }
+        }
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
                 hashtextextended(length($1)::text || ':' || $1 || $2, 0))",

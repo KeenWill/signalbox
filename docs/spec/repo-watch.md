@@ -40,15 +40,16 @@ and reply comment IDs before releasing the repository frontier lock. Review
 submissions and new thread openings retain their source review ID with
 `gh_event`; matching native receipts exclude them from `gh_readable_event`.
 Startup and reload pause repository event evaluation until observation resolves
-its authenticated GitHub account. Identity resolution consumes one bounded
-partial attempt, then immediately observes the same triggering producer in a
-separate bounded attempt with the same authenticated client. Each observation
-resolves its loaded credential’s identity before reading provider events. Review
-submissions by that account are permanently marked at ingestion and excluded
-from rule evaluation and retries. Credential rotation does not reclassify
-already observed reviews. Subsequent thread reopenings remain eligible. Receipts
-are permanent; writes without a retained acknowledgement have no receipt
-provenance.
+its authenticated GitHub account. Pausing and initial command admission
+serialize with the repository frontier; admission rechecks readiness in its
+transaction. Identity resolution consumes one bounded partial attempt, then
+immediately observes the same triggering producer in a separate bounded attempt
+with the same authenticated client. Each observation resolves its loaded
+credential’s identity before reading provider events. Review submissions by that
+account are permanently marked at ingestion and excluded from rule evaluation
+and retries. Credential rotation does not reclassify already observed reviews.
+Subsequent thread reopenings remain eligible. Receipts are permanent; writes
+without a retained acknowledgement have no receipt provenance.
 
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the
