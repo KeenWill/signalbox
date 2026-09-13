@@ -23,7 +23,7 @@ export const excerpt = (text: string) => ({
 })
 
 export async function sessionApi(
-  page: Page,
+  page: Pick<Page, 'route'>,
   busy = false,
   selectedSessionId = sessionId,
   origin: WebRepositoryWatchProvenance | null = null,

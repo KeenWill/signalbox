@@ -88,7 +88,7 @@ for (const viewport of [
     await expect(page.getByText(idleSession, { exact: true })).toHaveCount(0)
     await expect(page.getByText('Needs decision 2', { exact: true })).toBeVisible()
     await expect(page.getByText('Completed 7', { exact: true })).toBeVisible()
-    await expect(page.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
+    await expect(page.getByRole('link').filter({ hasText: waitingSession })).toBeVisible()
     await page.screenshot({
       path: testInfo.outputPath(`attention-filter-${viewport.width}.png`),
       fullPage: true,
@@ -115,7 +115,7 @@ test('keyboard selection follows visible attention rows', async ({ page }) => {
   await page.goto('/sessions')
   await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
   await page.getByRole('checkbox', { name: 'Needs attention', exact: true }).check()
-  const row = page.getByRole('button').filter({ hasText: waitingSession })
+  const row = page.getByRole('link').filter({ hasText: waitingSession })
   await expect(row).toBeVisible()
   await page.getByRole('main').focus()
   await page.keyboard.press('j')
@@ -138,7 +138,7 @@ for (const laterPage of [false, true]) {
       const filter = page.getByRole('checkbox', { name: 'Needs attention', exact: true })
       await filter.check()
       if (laterPage) await page.getByRole('button', { name: 'Next', exact: true }).click()
-      const row = page.getByRole('button').filter({ hasText: waitingSession })
+      const row = page.getByRole('link').filter({ hasText: waitingSession })
       await row.click()
       await expect(page.locator('.session-compact-header')).toBeVisible()
       if (returnAction === 'Back') await page.goBack()
@@ -195,7 +195,7 @@ test('Go to Attention opens the Sessions filter', async ({ page }) => {
   await page.keyboard.press('a')
   await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
   await expect(filter).toBeChecked()
-  await expect(page.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
+  await expect(page.getByRole('link').filter({ hasText: waitingSession })).toBeVisible()
 })
 
 for (const activation of ['click', 'ControlOrMeta', 'middle', 'bookmark'] as const) {
@@ -223,12 +223,44 @@ for (const activation of ['click', 'ControlOrMeta', 'middle', 'bookmark'] as con
     await expect(
       destination.getByRole('checkbox', { name: 'Needs attention', exact: true }),
     ).toBeChecked()
-    await expect(destination.getByRole('button').filter({ hasText: waitingSession })).toBeVisible()
+    await expect(destination.getByRole('link').filter({ hasText: waitingSession })).toBeVisible()
     await destination.reload()
     await expect(
       destination.getByRole('checkbox', { name: 'Needs attention', exact: true }),
     ).toBeChecked()
     await destination.getByRole('checkbox', { name: 'Needs attention', exact: true }).uncheck()
     await expect(destination).toHaveURL(/\/sessions$/)
+  })
+}
+
+for (const activation of ['ControlOrMeta', 'middle', 'copied destination'] as const) {
+  test(`attention rows open their session through ${activation}`, async ({ page, context }) => {
+    await sessionApi(context, true, waitingSession)
+    await installSessions(context)
+    await page.goto('/sessions?needsAttention=true')
+    const row = page.getByRole('link').filter({ hasText: waitingSession })
+    const href = await row.getAttribute('href')
+    expect(href).not.toBeNull()
+    const search = new URL(href ?? '', page.url()).searchParams
+    expect(search.get('session')).toBe(waitingSession)
+    expect(search.get('workspace')).toBe('true')
+    expect(search.get('needsAttention')).toBe('true')
+    let destination: Page
+    if (activation === 'copied destination') {
+      destination = await context.newPage()
+      await destination.goto(href ?? '')
+    } else {
+      const popup = context.waitForEvent('page')
+      if (activation === 'middle') await row.click({ button: 'middle' })
+      else await row.click({ modifiers: [activation] })
+      destination = await popup
+    }
+    await expect(destination).toHaveURL(new RegExp(`session=${waitingSession}`))
+    await expect(destination.locator('.session-compact-header')).toBeVisible()
+    await expect(page).toHaveURL(/\/sessions\?needsAttention=true$/)
+    await destination.getByRole('main').focus()
+    await destination.keyboard.press('Escape')
+    await expect(destination).toHaveURL(/\/sessions\?needsAttention=true$/)
+    await expect(destination.getByRole('checkbox', { name: 'Needs attention' })).toBeChecked()
   })
 }

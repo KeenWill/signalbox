@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Navigate } from '@tanstack/react-router'
+import { Link, Navigate } from '@tanstack/react-router'
 import { ArrowRight, Radio, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
@@ -65,7 +65,7 @@ export function AttentionSessions({
 }) {
   const dispatch = useAppDispatch()
   const { attentionSync: phase, selectedTimeline, overlay } = useAppSelector(selectApp)
-  const sessionLinks = useRef(new Map<string, HTMLButtonElement>())
+  const sessionLinks = useRef(new Map<string, HTMLAnchorElement>())
   const pendingReturnFocus = useRef(returnSessionId)
   const queryClient = useQueryClient()
   const [monitorGeneration, setMonitorGeneration] = useState(0)
@@ -265,15 +265,33 @@ export function AttentionSessions({
               <ol>
                 {needingAttention.map((summary) => (
                   <li key={summary.session_id} className={`attention-${summary.state}`}>
-                    <button
-                      type="button"
+                    <Link
+                      to="/$surface"
+                      params={{ surface: 'sessions' }}
+                      search={{
+                        session: summary.session_id,
+                        workspace: true,
+                        needsAttention: true,
+                      }}
                       className="attention-session-link"
                       ref={(link) => {
                         if (link) sessionLinks.current.set(summary.session_id, link)
                         else sessionLinks.current.delete(summary.session_id)
                       }}
                       onFocus={() => dispatch(actions.timelineSelected(summary.session_id))}
-                      onClick={() => onSessionOpen(summary.session_id)}
+                      onClick={(event) => {
+                        if (
+                          event.button !== 0 ||
+                          event.metaKey ||
+                          event.ctrlKey ||
+                          event.shiftKey ||
+                          event.altKey
+                        ) {
+                          return
+                        }
+                        event.preventDefault()
+                        onSessionOpen(summary.session_id)
+                      }}
                     >
                       <span className="attention-rail" aria-hidden="true" />
                       <span className="attention-identity">
@@ -285,7 +303,7 @@ export function AttentionSessions({
                       </span>
                       <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
                       <ArrowRight aria-hidden="true" />
-                    </button>
+                    </Link>
                     <section className="attention-judge" aria-label="Approval outcomes">
                       <span>
                         Needs decision <strong>{summary.judge.actionable}</strong>
