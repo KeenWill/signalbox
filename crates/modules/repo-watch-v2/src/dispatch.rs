@@ -61,6 +61,46 @@ pub struct RuleEvent {
 }
 
 impl RepoWatchStore {
+    /// Evaluates retained work through the event tail captured before command submission.
+    pub async fn evaluate_pending<
+        Ids: DispatchReferenceGenerator,
+        Factory: CreateSessionCommandFactory,
+        Codec: SessionCommandCodec,
+    >(
+        &self,
+        repository: &RepositorySlug,
+        rule: &RepoWatchRule,
+        ids: &mut Ids,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        now: OffsetDateTime,
+    ) -> Result<(), EvaluationError<Factory::Error>> {
+        let tail: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(max(repository_event_ordinal), 0) FROM gh_event WHERE repository=$1",
+        )
+        .bind(repository.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::from)
+        .map_err(EvaluationError::Store)?;
+        while self
+            .activate_next(repository, rule, ids, factory, codec, now)
+            .await?
+        {}
+        while let Some(next) = self
+            .next_rule_event(repository, rule)
+            .await
+            .map_err(EvaluationError::Store)?
+        {
+            if Decimal::from(next.ordinal) > tail {
+                break;
+            }
+            self.evaluate_event(rule, next, ids, factory, codec, now)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Reads only the next unevaluated fact after this revision's activation tail.
     pub async fn next_rule_event(
         &self,
@@ -144,6 +184,25 @@ impl RepoWatchStore {
         else {
             return Ok(false);
         };
+        self.evaluate_event(rule, next, ids, factory, codec, now)
+            .await?;
+        Ok(true)
+    }
+
+    async fn evaluate_event<
+        Ids: DispatchReferenceGenerator,
+        Factory: CreateSessionCommandFactory,
+        Codec: SessionCommandCodec,
+    >(
+        &self,
+        rule: &RepoWatchRule,
+        next: RuleEvent,
+        ids: &mut Ids,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        now: OffsetDateTime,
+    ) -> Result<(), EvaluationError<Factory::Error>> {
+        let repository = next.event.repository();
         let batches = plan_repository_event(std::slice::from_ref(rule), &next.event, ids, factory)
             .map_err(EvaluationError::Plan)?;
         for batch in batches {
@@ -162,7 +221,7 @@ impl RepoWatchStore {
                 .await
                 .map_err(EvaluationError::Store)?;
             match outcome {
-                DispatchAdmission::Inserted | DispatchAdmission::Suppressed => return Ok(true),
+                DispatchAdmission::Inserted | DispatchAdmission::Suppressed => return Ok(()),
                 DispatchAdmission::ConflictingReuse => {
                     return Err(EvaluationError::ConflictingDispatch);
                 }
@@ -174,7 +233,7 @@ impl RepoWatchStore {
             DO UPDATE SET event_ordinal = GREATEST(rule_evaluation_cursor.event_ordinal, EXCLUDED.event_ordinal)")
             .bind(repository.as_str()).bind(rule.id().as_str()).bind(Decimal::from(rule.version().get())).bind(Decimal::from(next.ordinal))
             .execute(&self.pool).await.map_err(StoreError::from).map_err(EvaluationError::Store)?;
-        Ok(true)
+        Ok(())
     }
 
     /// Applies the captured lifecycle prefix before retained commands are replayed.

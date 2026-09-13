@@ -965,7 +965,7 @@ impl RuntimeState {
         for repository in configuration.repositories() {
             for rule in configuration.rules() {
                 self.store
-                    .evaluate_next(
+                    .evaluate_pending(
                         repository.repository(),
                         rule,
                         &mut RepositoryWatchDispatchIds,
