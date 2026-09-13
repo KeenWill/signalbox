@@ -63,11 +63,14 @@ for (const view of ['preview', 'thumbnail'] as const) {
     await expect(media).toHaveCount(1)
     await media.scrollIntoViewIfNeeded()
     await expect(media.getByRole('img', { name: label })).toBeVisible()
+    const artifactRow = media.getByRole('article', { name: 'Artifact Image', exact: true })
+    await expect(artifactRow).not.toHaveAttribute('data-selected')
     await media.getByRole('img', { name: label }).click()
     const pane = page.getByRole('dialog', { name: 'Attachment details' })
     await expect(pane.getByRole('img', { name: label })).toBeVisible()
     await expect(pane).not.toContainText('sha256:')
     await page.keyboard.press('Escape')
+    await expect(artifactRow).toHaveAttribute('data-selected', 'true')
     await expect(
       media.getByRole('button', { name: 'Open Image details', exact: true }),
     ).toBeFocused()

@@ -667,15 +667,16 @@ export function ArtifactRenderer({
   onInspect?: (opener: HTMLButtonElement) => void
 }) {
   const selected = useAppSelector((state) => state.app.selectedArtifact === artifact.id)
+  const inspect = (control: HTMLButtonElement) => {
+    selectArtifact(commandContext, artifact.id)
+    onInspect?.(control)
+  }
   const heading = (
     <button
       type="button"
       className="artifact-heading"
       aria-pressed={onInspect ? undefined : selected}
-      onClick={(event) => {
-        selectArtifact(commandContext, artifact.id)
-        onInspect?.(event.currentTarget)
-      }}
+      onClick={(event) => inspect(event.currentTarget)}
     >
       {artifactIcon(artifact)}
       <div>
@@ -693,7 +694,11 @@ export function ArtifactRenderer({
       data-selected={selected || undefined}
     >
       {onInspect ? <Dialog.Trigger asChild>{heading}</Dialog.Trigger> : heading}
-      <RendererBoundary artifact={artifact} commandContext={commandContext} onInspect={onInspect} />
+      <RendererBoundary
+        artifact={artifact}
+        commandContext={commandContext}
+        onInspect={onInspect ? inspect : undefined}
+      />
     </article>
   )
 }
