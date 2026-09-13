@@ -10,7 +10,7 @@ import {
 import { readBoundedJson } from '../../product'
 
 // Hard safety ceiling: bounds retained catalog entries and mounted picker options.
-export const MAX_TEMPLATE_LIST_ITEMS = 100
+export const MAX_SESSION_TEMPLATE_ITEMS = 100
 
 export interface TemplateApi {
   list(signal?: AbortSignal): Promise<WebTemplateList>
@@ -33,6 +33,10 @@ export class HttpTemplateApi implements TemplateApi {
   }
 
   async list(signal?: AbortSignal): Promise<WebTemplateList> {
+    return decodeWebTemplateList(await this.read('/api/templates', signal))
+  }
+
+  async listForSessionPicker(signal?: AbortSignal): Promise<WebTemplateList> {
     const response = await this.request('/api/templates', {
       signal,
       credentials: 'same-origin',
@@ -45,7 +49,7 @@ export class HttpTemplateApi implements TemplateApi {
       value !== null &&
       'templates' in value &&
       Array.isArray(value.templates) &&
-      value.templates.length > MAX_TEMPLATE_LIST_ITEMS
+      value.templates.length > MAX_SESSION_TEMPLATE_ITEMS
     )
       throw new Error('Template catalog exceeded the item limit.')
     return decodeWebTemplateList(value)

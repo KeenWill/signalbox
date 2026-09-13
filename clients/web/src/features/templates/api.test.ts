@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { MAX_PRODUCT_JSON_BYTES } from '../../product'
-import { HttpTemplateApi, MAX_TEMPLATE_LIST_ITEMS } from './api'
+import { HttpTemplateApi, MAX_SESSION_TEMPLATE_ITEMS } from './api'
 import { detailFixture, templateFixture } from './fixtures'
 
 describe('template API', () => {
@@ -70,7 +70,7 @@ const compactTemplate = { ...templateFixture, workflow_tools: [] }
 
 it('admits a bounded catalog and forwards cancellation', async () => {
   const controller = new AbortController()
-  const templates = Array.from({ length: MAX_TEMPLATE_LIST_ITEMS }, (_, index) => ({
+  const templates = Array.from({ length: MAX_SESSION_TEMPLATE_ITEMS }, (_, index) => ({
     ...compactTemplate,
     name: `template-${index}`,
   }))
@@ -79,14 +79,16 @@ it('admits a bounded catalog and forwards cancellation', async () => {
     expect(init?.signal).toBe(controller.signal)
     return Response.json({ templates })
   })
-  await expect(api.list(controller.signal)).resolves.toEqual({ templates })
+  await expect(api.listForSessionPicker(controller.signal)).resolves.toEqual({ templates })
 })
 
 it('rejects excessive catalog entries before decoding their contents', async () => {
   const api = new HttpTemplateApi(async () =>
-    Response.json({ templates: Array.from({ length: MAX_TEMPLATE_LIST_ITEMS * 10 }, () => null) }),
+    Response.json({
+      templates: Array.from({ length: MAX_SESSION_TEMPLATE_ITEMS * 10 }, () => null),
+    }),
   )
-  await expect(api.list()).rejects.toThrow('item limit')
+  await expect(api.listForSessionPicker()).rejects.toThrow('item limit')
 })
 
 it.each([true, false])('cancels oversized catalog bodies (advertised: %s)', async (advertised) => {
@@ -103,6 +105,15 @@ it.each([true, false])('cancels oversized catalog bodies (advertised: %s)', asyn
         headers: advertised ? { 'content-length': String(MAX_PRODUCT_JSON_BYTES + 1) } : {},
       }),
   )
-  await expect(api.list()).rejects.toThrow('JSON byte limit')
+  await expect(api.listForSessionPicker()).rejects.toThrow('JSON byte limit')
   expect(cancel).toHaveBeenCalledOnce()
+})
+
+it.each([200, 10_000])('preserves the Templates surface catalog with %s entries', async (count) => {
+  const templates = Array.from({ length: count }, (_, index) => ({
+    ...templateFixture,
+    name: `template-${index}`,
+  }))
+  const api = new HttpTemplateApi(async () => Response.json({ templates }))
+  await expect(api.list()).resolves.toEqual({ templates })
 })
