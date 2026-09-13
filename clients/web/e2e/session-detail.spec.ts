@@ -380,8 +380,8 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(page.locator('.session-telemetry')).toBeHidden()
   const references = conversation.getByRole('list', { name: 'Attachments' })
   await expect(references.getByRole('listitem')).toHaveCount(2)
-  await expect(references).toContainText('image/jpeg · 4 B')
-  await expect(references).toContainText('image/png · 4 B')
+  await expect(references).toContainText('image/jpeg · 4 bytes')
+  await expect(references).toContainText('image/png · 4 bytes')
   await expect(conversation.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
     'release status --json',
   )
@@ -409,8 +409,8 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(page.locator('.session-telemetry')).toBeVisible()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   await expect(references.getByRole('listitem')).toHaveCount(2)
-  await expect(references).toContainText('image/png · 4 B')
-  await expect(references).toContainText('image/jpeg · 4 B')
+  await expect(references).toContainText('image/png · 4 bytes')
+  await expect(references).toContainText('image/jpeg · 4 bytes')
 })
 
 test('shows reconciliation-required turn outcomes with events hidden', async ({ page }) => {
