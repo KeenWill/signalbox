@@ -16,6 +16,14 @@ export const textField = (value: unknown): string =>
       ? String(value)
       : ''
 
+export const parseToolJson = (text: string): unknown =>
+  JSON.parse(text, (_key, value: unknown, context?: { source?: string }) => {
+    // Keep the original excerpt whenever rendering the parsed number would change its token.
+    if (typeof value === 'number' && String(value) !== context?.source)
+      throw new RangeError('JSON number requires its original representation')
+    return value
+  })
+
 export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields => {
   if (
     excerpt?.offset_bytes !== '0' ||
@@ -25,20 +33,13 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
   )
     return {}
   try {
-    return fields(
-      JSON.parse(excerpt.text, (_key, value: unknown, context?: { source?: string }) => {
-        // Keep the original excerpt whenever rendering the parsed number would change its token.
-        if (typeof value === 'number' && String(value) !== context?.source)
-          throw new RangeError('JSON number requires its original representation')
-        return value
-      }),
-    )
+    return fields(parseToolJson(excerpt.text))
   } catch {
     return {}
   }
 }
 
-export const previewText = (text: string) => {
+export const previewText = (text: string, maxLines = ARTIFACT_PREVIEW_LINES) => {
   let characters = 0
   let prefixCharacters = 0
   let lineBreaks = 0
@@ -49,7 +50,7 @@ export const previewText = (text: string) => {
     characters += 1
     if (stopped) continue
     if (character === '\r' || (character === '\n' && previous !== '\r')) lineBreaks += 1
-    if (prefixCharacters === ARTIFACT_PREVIEW_CHARACTERS || lineBreaks === ARTIFACT_PREVIEW_LINES) {
+    if (prefixCharacters === ARTIFACT_PREVIEW_CHARACTERS || lineBreaks === maxLines) {
       stopped = true
       continue
     }
