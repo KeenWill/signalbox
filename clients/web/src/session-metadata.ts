@@ -18,7 +18,20 @@ export function createRenameCommandId() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
+const unresolvedRenames = new Map<string, WebSessionTitleRequest>()
+
+export const retainedRename = (sessionId: string) => unresolvedRenames.get(sessionId) ?? null
+
 export async function renameSession(sessionId: string, request: WebSessionTitleRequest) {
+  const retained = retainedRename(sessionId)
+  if (
+    retained &&
+    (retained.command_id !== request.command_id || retained.title !== request.title)
+  ) {
+    throw new Error('Retry the unconfirmed rename before changing its title.')
+  }
+  const body = JSON.stringify(decodeWebSessionTitleRequest(request))
+  unresolvedRenames.set(sessionId, request)
   const controller = new AbortController()
   const deadline = setTimeout(() => controller.abort(), METADATA_PATCH_DEADLINE_MS)
   try {
@@ -26,10 +39,13 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
       method: 'PATCH',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify(decodeWebSessionTitleRequest(request)),
+      body,
       signal: controller.signal,
     })
-    if (response.status === 204) return
+    if (response.status === 204) {
+      unresolvedRenames.delete(sessionId)
+      return
+    }
     if (!response.ok) {
       throw new ProductRequestError(
         response.status,
@@ -38,6 +54,9 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
     }
     throw new Error('Rename was not acknowledged. Retry to confirm the same title.')
   } catch (failure) {
+    if (failure instanceof ProductRequestError && [400, 404, 409].includes(failure.status)) {
+      unresolvedRenames.delete(sessionId)
+    }
     if (controller.signal.aborted) {
       throw new Error('Rename timed out. Retry to confirm the same title.', { cause: failure })
     }

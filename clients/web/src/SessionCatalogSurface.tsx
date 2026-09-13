@@ -13,7 +13,7 @@ import {
   readSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
-import { createRenameCommandId, renameSession } from './session-metadata'
+import { createRenameCommandId, renameSession, retainedRename } from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
 import './catalog.css'
@@ -135,9 +135,11 @@ const SessionMetadata = ({
         intent.current = { command_id: createRenameCommandId(), title }
       }
       await renameSession(summary.session_id, intent.current)
-      await queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
+      intent.current = null
       close()
+      void queryClient.invalidateQueries({ queryKey: ['production', 'sessions'] })
     } catch (failure) {
+      intent.current = retainedRename(summary.session_id)
       setError(failure instanceof Error ? failure.message : 'Rename failed. Try again.')
     } finally {
       setSaving(false)
@@ -160,9 +162,13 @@ const SessionMetadata = ({
         ref={renameButton}
         aria-label={`Rename session ${summary.session_id}`}
         onClick={() => {
-          setTitle(summary.title_truncated ? '' : (summary.title_summary ?? ''))
-          setError(null)
-          intent.current = null
+          intent.current = retainedRename(summary.session_id)
+          setTitle(
+            intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
+          )
+          setError(
+            intent.current ? 'A previous rename is unconfirmed. Save retries that title.' : null,
+          )
           setEditing(true)
         }}
         disabled={editing || !canRename}
@@ -187,6 +193,7 @@ const SessionMetadata = ({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               disabled={saving}
+              readOnly={intent.current !== null}
               required
             />
           </label>
