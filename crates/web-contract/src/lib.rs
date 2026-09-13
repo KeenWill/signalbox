@@ -206,12 +206,15 @@ pub struct WebCreateSessionResponse {
     pub summary: WebSessionCatalogSummary,
 }
 
+/// Maximum UTF-8 bytes in a generated session title.
+pub const MAX_WEB_SESSION_TITLE_UTF8_BYTES: usize = 256;
+
 /// A generated session name awaiting user acceptance.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTitleSuggestion {
-    /// Generated title, saved only after acceptance through the metadata route.
-    #[schemars(length(min = 1))]
+    /// Generated title of at most 256 UTF-8 bytes, saved only after acceptance.
+    #[schemars(length(min = 1, max = MAX_WEB_SESSION_TITLE_UTF8_BYTES))]
     pub title: String,
 }
 
@@ -5371,6 +5374,11 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInva
                 max_json_body_bytes = current_bootstrap.limits.max_json_body_bytes,
                 max_ndjson_item_bytes = current_bootstrap.limits.max_ndjson_item_bytes,
                 max_session_live_queued_turns = current_bootstrap.limits.max_session_live_queued_turns,
+            ));
+        }
+        if schema.name == "WebSessionTitleSuggestion" {
+            output.push_str(&format!(
+                "  if (new TextEncoder().encode(value.title).length > {MAX_WEB_SESSION_TITLE_UTF8_BYTES}) {{\n    fail(\"session_title_suggestion.title\", \"at most {MAX_WEB_SESSION_TITLE_UTF8_BYTES} UTF-8 bytes\");\n  }}\n"
             ));
         }
         if schema.name == "WebSessionLiveSnapshot" {

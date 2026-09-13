@@ -7659,7 +7659,8 @@ const schemas = {
     "description": "A generated session name awaiting user acceptance.",
     "properties": {
       "title": {
-        "description": "Generated title, saved only after acceptance through the metadata route.",
+        "description": "Generated title of at most 256 UTF-8 bytes, saved only after acceptance.",
+        "maxLength": 256,
         "minLength": 1,
         "type": "string"
       }
@@ -10664,6 +10665,9 @@ export function decodeWebCreateSessionResponse(value) {
 
 export function decodeWebSessionTitleSuggestion(value) {
   assertSchema(schemas.WebSessionTitleSuggestion, schemas.WebSessionTitleSuggestion, value, "websessiontitlesuggestion");
+  if (new TextEncoder().encode(value.title).length > 256) {
+    fail("session_title_suggestion.title", "at most 256 UTF-8 bytes");
+  }
   return value;
 }
 
