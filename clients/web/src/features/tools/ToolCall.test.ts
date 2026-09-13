@@ -11,6 +11,20 @@ const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each([true, false, undefined])(
+    'identifies replace-all edits when replace_all is %s',
+    (replaceAll) => {
+      const [tool] = toolExample(
+        'edit_file',
+        { path: 'file.txt', old_string: 'before', new_string: 'after', replace_all: replaceAll },
+        { replacements: 3 },
+      )
+      const markup = renderToStaticMarkup(createElement(ToolCall, { tool }))
+      expect(markup.includes('Replace every match')).toBe(replaceAll === true)
+      expect(markup).toContain('Output is on another detail page')
+    },
+  )
+
   it('renders the availability of arguments and output on decoded continuation pages', () => {
     const tools = toolExample(
       'sandboxed_exec',

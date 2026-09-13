@@ -172,6 +172,7 @@ function FileEdit({ arguments: args, result, resultExcerpt }: RendererProps) {
     <>
       <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
       <TextPreview text={patch} label="Proposed changes" diff />
+      {args.replace_all === true && <strong>Replace every match</strong>}
       {(previewText(old).omittedCharacters > 0 ||
         previewText(replacement).omittedCharacters > 0) && (
         <small>Showing part of the changes</small>
