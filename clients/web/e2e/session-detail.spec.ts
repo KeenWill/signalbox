@@ -367,6 +367,7 @@ test('reads tool arguments and output in conversation order with events hidden',
   page,
 }) => {
   await openDetails(page)
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
@@ -375,14 +376,12 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(references.getByRole('listitem')).toHaveCount(2)
   await expect(references).toContainText('image/jpeg · 4 B')
   await expect(references).toContainText('image/png · 4 B')
-  await conversation.getByRole('button', { name: 'exec_command', exact: true }).click()
   await expect(
     conversation.getByRole('region', { name: 'exec_command details', exact: true }),
   ).toContainText('release status --json')
-  await conversation.getByRole('button', { name: 'Read more', exact: true }).click()
-  await expect(conversation.getByRole('region', { name: 'Output', exact: true })).toContainText(
-    'passed',
-  )
+  await expect(
+    conversation.getByRole('region', { name: 'exec_command details', exact: true }),
+  ).toContainText('passed')
   await expect(
     conversation.getByText('The release checks passed. Publishing remains unapproved.', {
       exact: true,
@@ -488,14 +487,16 @@ test('labels partial tool payloads and the final continued chunk', async ({ page
   await openDetails(page, false, false, undefined, undefined, true)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
-  await conversation.getByRole('button', { name: 'exec_command', exact: true }).click()
-  await conversation.getByRole('button', { name: 'Read more', exact: true }).click()
-  const tool = conversation.getByRole('region', { name: 'More message text', exact: true })
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const tool = conversation.locator('[data-event-sequence="2"]')
+  await tool.getByRole('button', { name: 'Continue reading', exact: true }).click()
   const output = tool.getByRole('region', { name: 'Output', exact: true })
   await expect(output).toContainText('From byte 0 of 55')
   await expect(output).toContainText('"status": "ok"')
   await tool.getByRole('button', { name: 'Continue reading', exact: true }).click()
-  await expect(output).toContainText('From byte 15 of 55')
+  await expect(output).toHaveCount(2)
+  await expect(output.first()).toContainText('From byte 0 of 55')
+  await expect(output.last()).toContainText('From byte 15 of 55')
 })
 
 for (const outcome of ['goal_stopped', 'goal_settling'] as const) {

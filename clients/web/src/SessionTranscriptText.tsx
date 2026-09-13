@@ -1,4 +1,5 @@
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useLocation } from '@tanstack/react-router'
 import {
   type ReactNode,
   type RefObject,
@@ -9,8 +10,9 @@ import {
   useState,
 } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
-import type { CommandContext } from './commands'
+import { type CommandContext, invokeCommand } from './commands'
 import type {
+  WebSessionTimelineDetail,
   WebSessionTimelineDetailBody,
   WebSessionTimelineDetailPage,
   WebTimelineDetailContinuation,
@@ -18,16 +20,29 @@ import type {
   WebTimelineToolAttempt,
 } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
-import { readSessionTranscript, type SessionTranscriptLimits } from './product'
+import {
+  ProductRequestError,
+  readProductSessionState,
+  readSessionTranscript,
+  type SessionTranscriptLimits,
+} from './product'
+import { detailContent, detailTextContent, GoalEventDetail } from './SessionItemDetail'
 import { conversationEntryKey, hasConversationContent } from './session-timeline/conversation'
-import { detailExcerptAt, type SessionWindowAnchor } from './session-timeline/model'
+import {
+  detailExcerptAt,
+  initialDetailFacts,
+  type SessionWindowAnchor,
+  sameInitialDetailFacts,
+} from './session-timeline/model'
 import {
   TRANSCRIPT_RETAINED_WINDOWS,
   TRANSCRIPT_WINDOW_BYTES,
   type TranscriptReadAnchor,
   TranscriptWindowReader,
 } from './session-timeline/transcript'
+import { readTurnTranscript } from './session-timeline/turn-detail'
 import {
+  detailTurnId,
   groupTranscriptTurns,
   isToolBodyContinuation,
   isVisibleTurnEvent,
@@ -39,11 +54,20 @@ import {
 } from './session-timeline/turns'
 
 import { SESSION_WINDOW_ITEMS } from './session-workspace'
-import type { DetailMode } from './state'
+import { type DetailMode, store, useAppDispatch, useAppSelector } from './state'
 import { VirtualTranscript } from './Transcript'
 
-type ContinuedEventState = {
+type EventContinuationState = {
   cursor: WebTimelineDetailContinuation | null
+  earlier: { key: string; item: WebSessionTimelineDetail }[]
+  previous?: WebSessionTimelineDetailPage
+  current?: { key: string; page: WebSessionTimelineDetailPage }
+}
+
+type ContinuedEventState = {
+  sequence: string
+  cursor: WebTimelineDetailContinuation | null
+  earlier: { key: string; items: WebSessionTimelineDetailPage['items'] }[]
   previous: WebSessionTimelineDetailPage
   current?: WebSessionTimelineDetailPage
 }
@@ -68,7 +92,15 @@ function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextE
   )
 }
 
-function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
+function BodyText({
+  body,
+  showAttachments = true,
+  showGoalFacts = true,
+}: {
+  body: WebSessionTimelineDetailBody
+  showAttachments?: boolean
+  showGoalFacts?: boolean
+}) {
   if (body.type === 'tool_batch')
     return (
       <>
@@ -83,6 +115,17 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
             </div>
           )
         })}
+        {body.goal_events.length > 0 && (
+          <section aria-label="Goal events">
+            {body.goal_events.map((event) => (
+              <GoalEventDetail
+                key={`${event.generation}:${event.type}`}
+                event={event}
+                includeFacts={showGoalFacts}
+              />
+            ))}
+          </section>
+        )}
       </>
     )
   if (body.type === 'reconciliation')
@@ -107,7 +150,9 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
     <>
       <span className="eyebrow">{body.type === 'user_input' ? 'You' : 'Assistant'}</span>
       <p className="session-message-text">{excerpt.text}</p>
-      {body.type === 'user_input' && <AttachmentReferences attachments={body.attachments} />}
+      {body.type === 'user_input' && showAttachments && (
+        <AttachmentReferences attachments={body.attachments} />
+      )}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation !== null) && (
         <small>
           From byte {excerpt.offset_bytes} of {excerpt.total_bytes}
@@ -128,14 +173,45 @@ export interface SessionTranscriptTextProps {
   anchor?: SessionWindowAnchor
   turnId?: string
   context?: CommandContext
+  registerUnwind?: (unwind: () => boolean) => () => void
   renderTool?: (tool: WebTimelineToolAttempt, detail: DetailMode) => ReactNode
 }
 
 export function SessionTranscriptText(props: SessionTranscriptTextProps) {
+  const search = useLocation({ select: (location) => location.searchStr })
+  const params = new URLSearchParams(search)
+  const address = props.eventSequence ?? params.get('around') ?? undefined
+  const eventSequence = readProductSessionState({ around: address }).around
+  const requestedTurn = props.turnId ?? params.get('turn') ?? undefined
+  const turnId =
+    requestedTurn &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedTurn)
+      ? requestedTurn.toLowerCase()
+      : undefined
+  const location = useQuery({
+    queryKey: ['production', 'transcript-turn-location', props.sessionId, turnId, props.limits],
+    enabled: Boolean(turnId && !eventSequence),
+    queryFn: ({ signal }) =>
+      readTurnTranscript(props.sessionId, turnId ?? '', null, props.limits, signal),
+    gcTime: 0,
+  })
+  if (turnId && !eventSequence && location.isPending) return <p role="status">Finding turn…</p>
+  if (turnId && !eventSequence && location.isError)
+    return (
+      <p role="alert">
+        Turn could not be loaded.{' '}
+        <button type="button" onClick={() => void location.refetch()}>
+          Retry turn
+        </button>
+      </p>
+    )
+  const target = eventSequence ?? location.data?.items[0]?.address.event_sequence
   return (
     <TranscriptWindow
-      key={`${props.sessionId}:${props.eventSequence ?? ''}:${props.turnId ?? ''}:${JSON.stringify(props.anchor ?? null)}`}
+      key={`${props.sessionId}:${target ?? ''}:${turnId ?? ''}:${JSON.stringify(props.anchor ?? null)}`}
       {...props}
+      eventSequence={target}
+      turnId={turnId}
     />
   )
 }
@@ -181,12 +257,34 @@ function TranscriptWindow({
   limits,
   eventSequence,
   renderTool,
+  turnId: requestedTurn,
+  context,
+  registerUnwind,
   anchor,
 }: SessionTranscriptTextProps) {
+  const detail = useAppSelector((state) => state.app.detail)
+  const detailRevision = useAppSelector((state) => state.app.detailRevision)
+  const dispatch = useAppDispatch()
+  const [turnModes, setTurnModes] = useState<Record<string, DetailMode>>({})
+  const [eventContinuations, setEventContinuations] = useState<
+    Record<string, EventContinuationState>
+  >({})
   const [continuedEvents, setContinuedEvents] = useState<
-    Record<string, ContinuedEventState & { rowId: string; source: WebSessionTimelineDetailPage }>
+    Record<string, ContinuedEventState & { source: WebSessionTimelineDetailPage }>
   >({})
   const [focusedRow, setFocusedRow] = useState<string | null>(null)
+  const surface = useRef<HTMLElement>(null)
+  const commandContext: CommandContext = {
+    dispatch,
+    getState: store.getState,
+    timelineIds: [],
+    artifactPreviewIds: [],
+    artifactOriginalIds: [],
+    focusTimeline: () => {},
+    ...context,
+    configuresTranscriptDetail: true,
+  }
+
   const reader = useMemo(() => new TranscriptWindowReader(sessionId), [sessionId])
   const initialAnchor = useMemo<TranscriptReadAnchor>(
     () => (eventSequence ? { kind: 'around', eventSequence } : (anchor ?? { kind: 'latest' })),
@@ -358,23 +456,111 @@ function TranscriptWindow({
     [pages],
   )
   const toolSegments = useRef(new Map<string, string>())
+  const knownTurnIds = new Set(
+    entries.flatMap((event) => {
+      const turnId = detailTurnId(event)
+      return turnId ? [turnId] : []
+    }),
+  )
+  const expandedTurnIds =
+    detail === 'full'
+      ? [...knownTurnIds]
+      : [
+          ...new Set([
+            ...Object.entries(turnModes).flatMap(([id, mode]) =>
+              mode === 'full' && knownTurnIds.has(id) ? [id] : [],
+            ),
+            ...(requestedTurn && (turnModes[requestedTurn] ?? 'full') === 'full'
+              ? [requestedTurn]
+              : []),
+            ...entries.flatMap((event) => {
+              const turnId = detailTurnId(event)
+              return event.address.event_sequence === eventSequence &&
+                turnId &&
+                (turnModes[turnId] ?? 'full') === 'full'
+                ? [turnId]
+                : []
+            }),
+          ]),
+        ]
+  const associations = useQueries({
+    queries: entries
+      .filter((event) => detailTurnId(event) === null)
+      .flatMap((event) =>
+        expandedTurnIds.map((turnId) => ({
+          queryKey: [
+            'production',
+            'retained-turn-membership',
+            sessionId,
+            turnId,
+            event.address,
+            limits,
+          ],
+          queryFn: async ({ signal }: { signal: AbortSignal }) => {
+            const page = await readTurnTranscript(
+              sessionId,
+              turnId,
+              { type: 'more_at', address: event.address },
+              limits,
+              signal,
+            ).catch((error: unknown) => {
+              // A retained address outside this turn is an invalid per-turn cursor.
+              if (
+                error instanceof ProductRequestError &&
+                error.status === 400 &&
+                error.response.error.code === 'invalid_timeline_detail_limits'
+              )
+                return null
+              throw error
+            })
+            const item = page?.items[0]
+            if (!item || item.address.event_sequence !== event.address.event_sequence) return null
+            if (!sameInitialDetailFacts(initialDetailFacts(event), initialDetailFacts(item)))
+              throw new TypeError('Turn membership read changed retained immutable facts')
+            return { sequence: item.address.event_sequence, turnId }
+          },
+          gcTime: 0,
+          staleTime: Number.POSITIVE_INFINITY,
+        })),
+      ),
+    combine: (results) => ({
+      members: results.flatMap((query) => (query.data ? [query.data] : [])),
+      retries: results.filter((query) => query.isError).map((query) => query.refetch),
+    }),
+  })
+  const allTurns = useMemo(
+    () =>
+      groupTranscriptTurns(entries, windowStarts, toolSegments.current).map((turn) => {
+        const association = associations.members.find(
+          (member) => member.sequence === turn.events[0]?.address.event_sequence,
+        )
+        return turn.turnId === null && association ? { ...turn, turnId: association.turnId } : turn
+      }),
+    [entries, windowStarts, associations.members],
+  )
   const turns = useMemo(
     () =>
-      groupTranscriptTurns(entries, windowStarts, toolSegments.current).filter(
+      allTurns.filter(
         (turn) =>
-          turn.messages.length > 0 ||
+          detail === 'full' ||
+          turnModes[turn.turnId ?? turn.id] === 'full' ||
+          (requestedTurn === turn.turnId && !turnModes[turn.turnId ?? turn.id]) ||
+          turn.events.some((event) => event.address.event_sequence === eventSequence) ||
+          turn.messages.some((item) => detail === 'condensed' || item.body.type === 'user_input') ||
           turn.result ||
-          turn.tools.length > 0 ||
+          (detail === 'condensed' && turn.tools.length > 0) ||
           turn.warnings.length > 0 ||
           turn.outcome,
       ),
-    [entries, windowStarts],
+    [allTurns, detail, turnModes, eventSequence, requestedTurn],
   )
   useEffect(() => {
     toolSegments.current = new Map(
-      turns.flatMap((turn) => turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const)),
+      allTurns.flatMap((turn) =>
+        turn.tools.map((tool) => [toolEvidenceKey(tool), turn.id] as const),
+      ),
     )
-  }, [turns])
+  }, [allTurns])
   const pending = useMemo(
     () =>
       detailPages.filter((detail) => {
@@ -383,10 +569,16 @@ function TranscriptWindow({
           detail.continuation &&
           (!last ||
             (last.body.type !== 'tool_batch' &&
-              !turns.some((turn) => isVisibleTurnEvent(turn, last))))
+              !allTurns.some((turn) =>
+                turn.events.some(
+                  (event) =>
+                    event.address.event_sequence === last.address.event_sequence &&
+                    isVisibleTurnEvent(turn, event),
+                ),
+              )))
         )
       }),
-    [detailPages, turns],
+    [detailPages, allTurns],
   )
   const rows = useMemo(
     () =>
@@ -412,8 +604,7 @@ function TranscriptWindow({
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
   useEffect(() => {
-    const retained = (state: { rowId: string; source: WebSessionTimelineDetailPage }) => {
-      if (!ids.includes(state.rowId)) return false
+    const retained = (state: { source: WebSessionTimelineDetailPage }) => {
       const sequence = continuationSequence(state.source)
       if (
         !pages?.some(({ window }) =>
@@ -439,19 +630,18 @@ function TranscriptWindow({
         ? current
         : Object.fromEntries(Object.entries(current).filter(([, state]) => retained(state))),
     )
-  }, [ids, pages, retainedDetailPages])
+  }, [pages, retainedDetailPages])
   const renderContinuation = (
-    id: string,
     page: WebSessionTimelineDetailPage,
     adoptPage?: AdoptToolPage,
     label?: string,
   ) => {
-    const key = JSON.stringify([id, continuationFieldKey(page)])
+    const key = JSON.stringify([continuationSequence(page), continuationFieldKey(page)])
     return (
       <ContinuedEvent
-        key={key}
         adoptToolPage={adoptPage}
         label={label}
+        key={key}
         sessionId={sessionId}
         page={page}
         limits={limits}
@@ -470,7 +660,7 @@ function TranscriptWindow({
             if (state)
               return {
                 ...current,
-                [key]: { ...state, rowId: id, source: current[key]?.source ?? page },
+                [key]: { ...state, source: current[key]?.source ?? page },
               }
             const next = { ...current }
             delete next[key]
@@ -480,6 +670,107 @@ function TranscriptWindow({
       />
     )
   }
+
+  useEffect(() => {
+    const loaded = new Set(allTurns.map((turn) => turn.turnId ?? turn.id))
+    setTurnModes((current) =>
+      Object.keys(current).some((id) => !loaded.has(id))
+        ? Object.fromEntries(Object.entries(current).filter(([id]) => loaded.has(id)))
+        : current,
+    )
+    const loadedEvents = new Set(entries.map((entry) => entry.address.event_sequence))
+    const continuedSequences = new Set([...loadedEvents, ...pending.map(continuationSequence)])
+    setContinuedEvents((current) =>
+      Object.values(current).some((state) => !continuedSequences.has(state.sequence))
+        ? Object.fromEntries(
+            Object.entries(current).filter(([, state]) => continuedSequences.has(state.sequence)),
+          )
+        : current,
+    )
+
+    setEventContinuations((current) =>
+      Object.keys(current).some((sequence) => !loadedEvents.has(sequence))
+        ? Object.fromEntries(
+            Object.entries(current).filter(([sequence]) => loadedEvents.has(sequence)),
+          )
+        : current,
+    )
+  }, [entries, pending, allTurns])
+  const closeTurnReaders = useCallback(
+    (turn: TranscriptTurn) => {
+      const segments = allTurns.filter((segment) =>
+        turn.turnId ? segment.turnId === turn.turnId : segment.id === turn.id,
+      )
+      const sequences = new Set(
+        segments.flatMap((segment) => segment.events.map((event) => event.address.event_sequence)),
+      )
+      setContinuedEvents((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([, state]) => !sequences.has(state.sequence)),
+        ),
+      )
+      setEventContinuations((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([sequence]) => !sequences.has(sequence)),
+        ),
+      )
+    },
+    [allTurns],
+  )
+  const [headingToFocus, setHeadingToFocus] = useState<TranscriptTurn | null>(null)
+  const focusTurnHeading = useCallback((turn: TranscriptTurn) => setHeadingToFocus(turn), [])
+  const survivingTurn = headingToFocus
+    ? (turns.find((turn) => turn.id === headingToFocus.id) ??
+      turns.find((turn) => headingToFocus.turnId && turn.turnId === headingToFocus.turnId))
+    : undefined
+  const previousDetailRevision = useRef(detailRevision)
+  useEffect(() => {
+    if (previousDetailRevision.current === detailRevision) return
+    previousDetailRevision.current = detailRevision
+    setTurnModes({})
+    setEventContinuations({})
+    setContinuedEvents({})
+    setToolPages({})
+  }, [detailRevision])
+  useEffect(
+    () =>
+      registerUnwind?.(() => {
+        const row = document.activeElement?.closest<HTMLElement>('[data-transcript-turn]')
+        if (!row || !surface.current?.contains(row)) return false
+        const id = row.dataset.transcriptTurn
+        const turn = turns.find((turn) => turn.id === id)
+        if (
+          !turn ||
+          (detail !== 'full' &&
+            turnModes[turn.turnId ?? turn.id] !== 'full' &&
+            requestedTurn !== turn.turnId &&
+            !turn.events.some((event) => event.address.event_sequence === eventSequence))
+        )
+          return false
+        if (
+          turnModes[turn.turnId ?? turn.id] === 'results' ||
+          turnModes[turn.turnId ?? turn.id] === 'condensed'
+        )
+          return false
+        setTurnModes((current) => ({
+          ...current,
+          [turn.turnId ?? turn.id]: detail === 'full' ? 'results' : detail,
+        }))
+        closeTurnReaders(turn)
+        focusTurnHeading(turn)
+        return true
+      }),
+    [
+      registerUnwind,
+      turns,
+      turnModes,
+      requestedTurn,
+      eventSequence,
+      detail,
+      closeTurnReaders,
+      focusTurnHeading,
+    ],
+  )
   useEffect(() => {
     if (readerAtEnd.current && pages && !pages.at(-1)?.window.continuation_after)
       followLatest.current = true
@@ -500,7 +791,18 @@ function TranscriptWindow({
             (candidate) =>
               continuationSequence(candidate) ===
               (page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)),
-          ) || page.items.some((item) => turns.some((turn) => isVisibleTurnEvent(turn, item))),
+          ) ||
+          page.items.some((item) =>
+            turns.some(
+              (turn) =>
+                (turn.events.includes(item) &&
+                  (detail === 'full' ||
+                    turnModes[turn.turnId ?? turn.id] === 'full' ||
+                    item.address.event_sequence === eventSequence)) ||
+                (isVisibleTurnEvent(turn, item, detail === 'condensed') &&
+                  (item.body.type !== 'tool_batch' || detail === 'condensed')),
+            ),
+          ),
       )
     ) {
       emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
@@ -544,6 +846,9 @@ function TranscriptWindow({
   }, [
     turns,
     pending,
+    detail,
+    turnModes,
+    eventSequence,
     limits,
     pages,
     transcript.isFetching,
@@ -554,11 +859,39 @@ function TranscriptWindow({
   ])
   return (
     <section
+      ref={surface}
       className="session-transcript-text"
       aria-label="Transcript text"
       data-retained-tool-pages={Object.keys(toolPages).length}
       aria-busy={transcript.isFetching}
+      onFocusCapture={(event) => {
+        if (
+          !(event.target instanceof Element) ||
+          !event.target.closest('[data-transcript-turn], [data-event-sequence]')
+        )
+          setFocusedRow(null)
+      }}
     >
+      <fieldset className="session-transcript-levels">
+        <legend>Show</legend>
+        {(
+          [
+            ['results', 'Summary'],
+            ['condensed', 'Tools'],
+            ['full', 'All details'],
+          ] as const
+        ).map(([mode, label]) => (
+          <label key={mode}>
+            <input
+              type="radio"
+              name={`transcript-level-${sessionId}`}
+              checked={detail === mode}
+              onChange={() => invokeCommand(`detail.${mode}`, commandContext)}
+            />
+            {label}
+          </label>
+        ))}
+      </fieldset>
       {transcript.isPending && <p role="status">Loading transcript…</p>}
       {transcript.isError && (
         <p role="alert">
@@ -581,7 +914,28 @@ function TranscriptWindow({
         rows.length === 0 && (
           <p>No messages in this part of the conversation. Keep scrolling to look for messages.</p>
         )}
+      {associations.retries.length > 0 && (
+        <p role="alert">
+          Turn details could not be loaded.{' '}
+          <button
+            type="button"
+            onClick={() => {
+              for (const retry of associations.retries) void retry()
+            }}
+          >
+            Retry turn details
+          </button>
+        </p>
+      )}
       <VirtualTranscript
+        revealId={survivingTurn?.id}
+        onReveal={() => {
+          const target = Array.from(
+            surface.current?.querySelectorAll<HTMLElement>('[data-transcript-turn]') ?? [],
+          ).find((row) => row.dataset.transcriptTurn === survivingTurn?.id)
+          target?.querySelector<HTMLButtonElement>('.session-turn-heading button')?.focus()
+          setHeadingToFocus(null)
+        }}
         scrollRef={scrollRef}
         ids={ids}
         loadingLater={transcript.isFetchingNextPage}
@@ -603,7 +957,15 @@ function TranscriptWindow({
                       continuationSequence(candidate) ===
                       (page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)),
                   ) ||
-                  page.items.some((item) => turns.some((turn) => isVisibleTurnEvent(turn, item))),
+                  page.items.some((item) =>
+                    turns.some(
+                      (turn) =>
+                        (turn.events.includes(item) &&
+                          (detail === 'full' || turnModes[turn.turnId ?? turn.id] === 'full')) ||
+                        (isVisibleTurnEvent(turn, item, detail === 'condensed') &&
+                          (item.body.type !== 'tool_batch' || detail === 'condensed')),
+                    ),
+                  ),
               ),
           )
         }
@@ -643,7 +1005,7 @@ function TranscriptWindow({
                   if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
                 }}
               >
-                {renderContinuation(row.id, row.pending)}
+                {renderContinuation(row.pending)}
               </div>
             )
           const turn = row.turn
@@ -655,21 +1017,39 @@ function TranscriptWindow({
               style={style}
               className="session-message-entry session-turn"
               data-turn-id={turn.turnId}
+              data-transcript-turn={turn.id}
               onFocusCapture={() => setFocusedRow(row.id)}
               onBlurCapture={(event) => {
                 if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow(null)
               }}
             >
-              <TurnSummary
+              <TurnContent
                 turn={turn}
-                renderContinuation={(page, adoptPage, label) =>
-                  renderContinuation(row.id, page, adoptPage, label)
+                collapsedDetail={detail === 'full' ? 'results' : detail}
+                detail={
+                  turnModes[turn.turnId ?? turn.id] ??
+                  (detail === 'full' ||
+                  (requestedTurn === turn.turnId && !turnModes[turn.turnId ?? turn.id]) ||
+                  turn.events.some((event) => event.address.event_sequence === eventSequence)
+                    ? 'full'
+                    : detail)
                 }
-                renderTool={renderTool}
                 detailPages={detailPages}
                 adoptToolPage={adoptToolPage}
+                renderTool={renderTool}
                 sessionId={sessionId}
                 limits={limits}
+                target={eventSequence}
+                renderContinuation={renderContinuation}
+                eventContinuations={eventContinuations}
+                onEventContinuation={(sequence, state) =>
+                  setEventContinuations((current) => ({ ...current, [sequence]: state }))
+                }
+                onExpand={(mode) => {
+                  setTurnModes((current) => ({ ...current, [turn.turnId ?? turn.id]: mode }))
+                  closeTurnReaders(turn)
+                  focusTurnHeading(turn)
+                }}
               />
             </div>
           )
@@ -682,28 +1062,39 @@ function TranscriptWindow({
   )
 }
 
-function TurnSummary({
-  renderContinuation,
+function TurnContent({
   adoptToolPage,
   turn,
-  renderTool,
   detailPages,
+  collapsedDetail,
+  renderTool,
+  detail,
   sessionId,
   limits,
+  target,
+  renderContinuation,
+  eventContinuations,
+  onEventContinuation,
+  onExpand,
 }: {
+  adoptToolPage: AdoptToolPage
+  turn: TranscriptTurn
+  collapsedDetail: DetailMode
+  detailPages: readonly WebSessionTimelineDetailPage[]
+  renderTool?: SessionTranscriptTextProps['renderTool']
+  detail: DetailMode
+  sessionId: string
+  limits: SessionTranscriptLimits
+  target?: string
   renderContinuation: (
     page: WebSessionTimelineDetailPage,
     adoptPage?: AdoptToolPage,
     label?: string,
   ) => ReactNode
-  adoptToolPage: AdoptToolPage
-  turn: TranscriptTurn
-  renderTool?: SessionTranscriptTextProps['renderTool']
-  detailPages: readonly WebSessionTimelineDetailPage[]
-  sessionId: string
-  limits: SessionTranscriptLimits
+  eventContinuations: Readonly<Record<string, EventContinuationState>>
+  onEventContinuation: (sequence: string, state: EventContinuationState) => void
+  onExpand: (mode: DetailMode) => void
 }) {
-  const [openTool, setOpenTool] = useState<string | null>(null)
   const previousKeys = useRef<ReadonlyMap<string, string>>(new Map())
   const disclosureKeys = useMemo(
     () => toolDisclosureKeys(turn.tools, previousKeys.current),
@@ -714,7 +1105,6 @@ function TurnSummary({
   }, [disclosureKeys])
   const disclosureKey = (entry: WebTimelineToolAttempt) =>
     disclosureKeys.get(toolEvidenceKey(entry)) ?? toolEvidenceKey(entry)
-  const tool = turn.tools.find((entry) => disclosureKey(entry) === openTool)
   const more = (sequence: string) => {
     return detailPages
       .filter(
@@ -724,93 +1114,134 @@ function TurnSummary({
       )
       .map((page) => renderContinuation(page))
   }
+  const moreTool = (tool: WebTimelineToolAttempt) =>
+    detailPages
+      .filter((candidate) => {
+        const cursor = candidate.continuation
+        const item = candidate.items.at(-1)
+        return (
+          cursor?.type === 'more_body' &&
+          isToolBodyContinuation(cursor.body) &&
+          !advancesToolMember(candidate) &&
+          ((item?.body.type === 'tool_batch' &&
+            item.body.tools.some((entry) => disclosureKey(entry) === disclosureKey(tool))) ||
+            toolContinuations(tool).some(
+              ({ continuation }) =>
+                cursor.body.address.event_sequence === continuation.address.event_sequence &&
+                cursor.body.field === continuation.field &&
+                cursor.body.member_index === continuation.member_index &&
+                cursor.body.offset_bytes === continuation.offset_bytes,
+            ))
+        )
+      })
+      .map((page) => renderContinuation(page, adoptToolPage, toolContinuationLabel(page)))
+  const events = turn.events.filter(
+    (event, index) =>
+      turn.events.findIndex(
+        (candidate) => candidate.address.event_sequence === event.address.event_sequence,
+      ) === index,
+  )
+  if (detail === 'full')
+    return (
+      <>
+        <header className="session-turn-heading">
+          <a
+            href={`/sessions?workspace=true&session=${sessionId}&around=${events[0]?.address.event_sequence ?? ''}${turn.turnId ? `&turn=${turn.turnId}` : ''}`}
+          >
+            Link to turn
+          </a>
+          <button type="button" onClick={() => onExpand(collapsedDetail)}>
+            Collapse turn
+          </button>
+        </header>
+        {events.map((event) => (
+          <EventDetail
+            key={event.address.event_sequence}
+            event={event}
+            sessionId={sessionId}
+            turnId={turn.turnId}
+            limits={limits}
+            renderTool={renderTool}
+            target={target === event.address.event_sequence}
+            continuation={eventContinuations[event.address.event_sequence]}
+            onContinuation={(state) => onEventContinuation(event.address.event_sequence, state)}
+          />
+        ))}
+      </>
+    )
   return (
     <>
-      {turnSummaryParts(turn).map((part) =>
-        part.kind === 'message' ? (
-          <div
-            key={conversationEntryKey(part.item)}
-            data-event-sequence={part.item.address.event_sequence}
-          >
-            <BodyText body={part.item.body} />
-            {more(part.item.address.event_sequence)}
-          </div>
-        ) : (
-          <section
-            className="session-tool-chips"
-            aria-label="Tools used"
-            key={part.tools[0] ? disclosureKey(part.tools[0]) : undefined}
-          >
-            {part.tools.map((entry) => (
-              <button
-                type="button"
-                key={disclosureKey(entry)}
-                aria-expanded={openTool === disclosureKey(entry)}
-                onClick={() =>
-                  setOpenTool(openTool === disclosureKey(entry) ? null : disclosureKey(entry))
-                }
-              >
-                {entry.tool_name}
-                {entry.evidence.type === 'physical_attempt' &&
-                  ` · ${enumLabel(entry.evidence.state)}`}
-              </button>
-            ))}
-            {tool &&
-              part.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)) && (
-                <div className="session-tool-slot">
-                  {renderTool ? renderTool(tool, 'condensed') : <ToolSummary tool={tool} />}
-                  {detailPages
-                    .filter((candidate) => {
-                      const cursor = candidate.continuation
-                      const item = candidate.items.at(-1)
-                      return (
-                        cursor?.type === 'more_body' &&
-                        isToolBodyContinuation(cursor.body) &&
-                        !advancesToolMember(candidate) &&
-                        ((item?.body.type === 'tool_batch' &&
-                          item.body.tools.some(
-                            (entry) => disclosureKey(entry) === disclosureKey(tool),
-                          )) ||
-                          toolContinuations(tool).some(
-                            ({ continuation }) =>
-                              cursor.body.address.event_sequence ===
-                                continuation.address.event_sequence &&
-                              cursor.body.field === continuation.field &&
-                              cursor.body.member_index === continuation.member_index &&
-                              cursor.body.offset_bytes === continuation.offset_bytes,
-                          ))
-                      )
-                    })
-                    .map((page) =>
-                      renderContinuation(page, adoptToolPage, toolContinuationLabel(page)),
-                    )}
-                </div>
-              )}
-            {detailPages
-              .filter(
-                (page) =>
-                  advancesToolMember(page) &&
-                  turn.events.some(
-                    (event) =>
-                      event.address.event_sequence === continuationSequence(page) &&
-                      event.body.type === 'tool_batch' &&
-                      event.body.tools.some((entry) =>
-                        part.tools.some((tool) => disclosureKey(tool) === disclosureKey(entry)),
-                      ),
-                  ),
-              )
-              .map((page) => (
-                <MoreTools
-                  key={JSON.stringify(page.continuation)}
-                  sessionId={sessionId}
-                  page={page}
-                  limits={limits}
-                  adoptToolPage={adoptToolPage}
-                />
+      <header className="session-turn-heading">
+        <button type="button" onClick={() => onExpand('full')}>
+          Open turn details
+        </button>
+      </header>
+      {turnSummaryParts(turn)
+        .filter((part) => detail === 'condensed' || part.kind === 'message')
+        .map((part) =>
+          part.kind !== 'tools' ? (
+            <div
+              key={conversationEntryKey(part.item)}
+              data-event-sequence={part.item.address.event_sequence}
+            >
+              <BodyText body={part.item.body} />
+              {more(part.item.address.event_sequence)}
+            </div>
+          ) : (
+            <section
+              className="session-tool-chips"
+              aria-label="Tools used"
+              key={part.tools[0] ? disclosureKey(part.tools[0]) : undefined}
+            >
+              {part.tools.map((entry) => (
+                <button
+                  type="button"
+                  key={disclosureKey(entry)}
+                  aria-label={`Open turn details for ${entry.tool_name}${entry.evidence.type === 'physical_attempt' ? ` · ${enumLabel(entry.evidence.state)}` : ''}`}
+                  onClick={() => onExpand('full')}
+                >
+                  {entry.tool_name}
+                  {entry.evidence.type === 'physical_attempt' &&
+                    ` · ${enumLabel(entry.evidence.state)}`}
+                </button>
               ))}
-          </section>
-        ),
-      )}
+              {part.tools.map((entry) => (
+                <div className="session-tool-slot" key={disclosureKey(entry)}>
+                  <ToolSummary
+                    tool={entry}
+                    detailPages={detailPages}
+                    sessionId={sessionId}
+                    limits={limits}
+                    renderTool={renderTool}
+                  />
+                  {moreTool(entry)}
+                </div>
+              ))}
+              {detailPages
+                .filter(
+                  (page) =>
+                    advancesToolMember(page) &&
+                    turn.events.some(
+                      (event) =>
+                        event.address.event_sequence === continuationSequence(page) &&
+                        event.body.type === 'tool_batch' &&
+                        event.body.tools.some((entry) =>
+                          part.tools.some((tool) => disclosureKey(tool) === disclosureKey(entry)),
+                        ),
+                    ),
+                )
+                .map((page) => (
+                  <MoreTools
+                    key={JSON.stringify(page.continuation)}
+                    sessionId={sessionId}
+                    page={page}
+                    limits={limits}
+                    adoptToolPage={adoptToolPage}
+                  />
+                ))}
+            </section>
+          ),
+        )}
       {turn.outcome && <BodyText body={turn.outcome.body} />}
     </>
   )
@@ -830,26 +1261,277 @@ function toolContinuationLabel(page: WebSessionTimelineDetailPage): string {
   return `Read more ${fields.join(' and ')}`
 }
 
-function ToolSummary({ tool }: { tool: WebTimelineToolAttempt }) {
+function ToolSummary({
+  tool,
+  detailPages,
+  sessionId,
+  limits,
+  renderTool,
+}: {
+  tool: WebTimelineToolAttempt
+  detailPages: readonly WebSessionTimelineDetailPage[]
+  sessionId: string
+  limits: SessionTranscriptLimits
+  renderTool?: SessionTranscriptTextProps['renderTool']
+}) {
   const evidence = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
+  const event = detailPages
+    .flatMap((page) => page.items)
+    .findLast(
+      (item) =>
+        item.body.type === 'tool_batch' &&
+        item.body.tools.some((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool)),
+    )
+  const member =
+    event?.body.type === 'tool_batch'
+      ? (event.body.projected_member_index ?? 0) +
+        event.body.tools.findIndex((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool))
+      : 0
+  const field = evidence?.failure_present ? 'tool_failure' : 'tool_result'
+  const needsOutput = Boolean(
+    event &&
+      evidence &&
+      ((evidence.result_present && !evidence.result) ||
+        (evidence.failure_present && !evidence.failure)),
+  )
+  const output = useQuery({
+    queryKey: ['production', 'tool-summary', sessionId, event?.address, member, field, limits],
+    enabled: needsOutput,
+    queryFn: ({ signal }) =>
+      readSessionTranscript(
+        sessionId,
+        event?.address.event_sequence ?? '',
+        event?.address.event_sequence ?? '',
+        {
+          type: 'more_body',
+          body: {
+            address: event?.address ?? { event_sequence: '1' },
+            field,
+            member_index: member,
+            offset_bytes: '0',
+          },
+        },
+        limits,
+        signal,
+        event ? { items: [event] } : undefined,
+      ),
+    gcTime: 0,
+  })
+  const body = output.data?.items[0]?.body
+  const returned =
+    body?.type === 'tool_batch'
+      ? body.tools.find((entry) => toolEvidenceKey(entry) === toolEvidenceKey(tool))?.evidence
+      : null
+  const loaded = returned?.type === 'physical_attempt' ? returned : null
+  const result = evidence?.result ?? loaded?.result
+  const failure = evidence?.failure ?? loaded?.failure
   return (
     <section aria-label={`${tool.tool_name} details`}>
-      <strong>{tool.tool_name}</strong>
-      <small>Tool summaries</small>
-      {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
-      {evidence?.result && <ToolText label="Output" excerpt={evidence.result} />}
-      {evidence?.failure && <ToolText label="Failure" excerpt={evidence.failure} />}
-      {evidence && !evidence.result && !evidence.failure && (
-        <p className="session-turn-outcome">
-          {evidence.state === 'known_failed' || evidence.failure_present
-            ? `Failure · ${enumLabel(evidence.cause ?? evidence.state)}`
-            : enumLabel(evidence.state)}
-        </p>
+      {renderTool ? (
+        renderTool({ ...tool, evidence: loaded ?? tool.evidence }, 'condensed')
+      ) : (
+        <>
+          <strong>{tool.tool_name}</strong>
+          <small>Tool summaries</small>
+          {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
+          {result && <ToolText label="Output" excerpt={result} />}
+          {failure && <ToolText label="Failure" excerpt={failure} />}
+          {evidence && !evidence.result && !evidence.failure && (
+            <p className="session-turn-outcome">
+              {evidence.state === 'known_failed' || evidence.failure_present
+                ? `Failure · ${enumLabel(evidence.cause ?? evidence.state)}`
+                : enumLabel(evidence.state)}
+            </p>
+          )}
+        </>
       )}
-      {[tool.arguments, evidence?.result, evidence?.failure].some(
+      {needsOutput && output.isPending && <small role="status">Loading output…</small>}
+      {needsOutput && output.isError && <small role="alert">Output could not be loaded.</small>}
+      {[tool.arguments, result, failure].some(
         (excerpt) => excerpt && (excerpt.offset_bytes !== '0' || excerpt.continuation != null),
       ) && <small>Excerpt · more text available</small>}
     </section>
+  )
+}
+
+function EventDetail({
+  event,
+  sessionId,
+  turnId,
+  limits,
+  renderTool,
+  target,
+  continuation,
+  onContinuation,
+}: {
+  event: WebSessionTimelineDetail
+  sessionId: string
+  turnId: string | null
+  limits: SessionTranscriptLimits
+  renderTool?: SessionTranscriptTextProps['renderTool']
+  target: boolean
+  continuation?: EventContinuationState
+  onContinuation: (state: EventContinuationState) => void
+}) {
+  const sequence = event.address.event_sequence
+  const cursor = continuation?.cursor ?? null
+  const earlier = continuation?.earlier ?? []
+  const element = useRef<HTMLDivElement>(null)
+  const detail = useQuery({
+    queryKey: ['production', 'transcript-event', sessionId, turnId, sequence, cursor, limits],
+    queryFn: async ({ signal }) => {
+      const page = turnId
+        ? await readTurnTranscript(
+            sessionId,
+            turnId,
+            cursor ?? { type: 'more_at', address: event.address },
+            limits,
+            signal,
+            continuation?.previous,
+          )
+        : await readSessionTranscript(
+            sessionId,
+            sequence,
+            sequence,
+            cursor,
+            limits,
+            signal,
+            continuation?.previous,
+          )
+      const item = page.items[0]
+      if (
+        cursor?.type !== 'more_body' &&
+        item &&
+        !sameInitialDetailFacts(initialDetailFacts(event), initialDetailFacts(item))
+      )
+        throw new TypeError('Expanded event changed its retained immutable facts')
+      return page
+    },
+    gcTime: 0,
+    initialData: continuation?.current?.page,
+    staleTime: continuation?.current ? Number.POSITIVE_INFINITY : 0,
+  })
+  const item = detail.data?.items[0]
+  const matches = item?.address.event_sequence === sequence && item.kind === event.kind
+  const next =
+    matches && detail.data?.continuation?.type === 'more_body' ? detail.data.continuation : null
+  useEffect(() => {
+    if (!continuation || !detail.data || !matches || continuation.current?.page === detail.data)
+      return
+    onContinuation({
+      cursor,
+      earlier,
+      previous: continuation?.previous,
+      current: { key: JSON.stringify(cursor), page: detail.data },
+    })
+  }, [detail.data, matches, cursor, earlier, continuation, onContinuation])
+  useEffect(() => {
+    if (!target || !matches) return
+    const frame = requestAnimationFrame(() => {
+      element.current?.scrollIntoView({ block: 'center' })
+      element.current?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [target, matches])
+  const chunks = [...earlier, ...(matches ? [{ key: JSON.stringify(cursor), item }] : [])]
+  const latestBody = chunks.at(-1)?.item.body
+  const factsBody =
+    latestBody?.type === 'tool_batch'
+      ? {
+          ...latestBody,
+          tools: Array.from(
+            new Map(
+              chunks.flatMap(({ item }) =>
+                item.body.type === 'tool_batch'
+                  ? item.body.tools.map((tool) => [toolEvidenceKey(tool), tool] as const)
+                  : [],
+              ),
+            ).values(),
+          ),
+        }
+      : latestBody
+  const renderedGoalMembers = new Set<number>()
+  return (
+    <div ref={element} tabIndex={-1} className="session-turn-event" data-event-sequence={sequence}>
+      <header>
+        <a href={`/sessions?workspace=true&session=${sessionId}&around=${sequence}`}>
+          {enumLabel(event.kind)}
+        </a>
+      </header>
+      {(factsBody?.type === 'model_call' || factsBody?.type === 'tool_batch') &&
+        detailContent(factsBody, false)}
+      {chunks.map(({ key, item }, index) => {
+        const body = item.body
+        const goalMember =
+          body.type === 'tool_batch' && body.goal_events.length > 0
+            ? (body.projected_member_index ?? 0)
+            : null
+        const showGoalFacts = goalMember === null || !renderedGoalMembers.has(goalMember)
+        if (goalMember !== null) renderedGoalMembers.add(goalMember)
+        return (
+          <div key={key}>
+            {item.body.type === 'tool_batch' && renderTool ? (
+              <>
+                {item.body.tools.map((tool) => (
+                  <div key={tool.request_id}>{renderTool(tool, 'full')}</div>
+                ))}
+                {item.body.goal_events.length > 0 && (
+                  <section aria-label="Goal events">
+                    {item.body.goal_events.map((event) => (
+                      <GoalEventDetail
+                        key={`${event.generation}:${event.type}`}
+                        event={event}
+                        includeFacts={showGoalFacts}
+                      />
+                    ))}
+                  </section>
+                )}
+              </>
+            ) : ['user_input', 'model_call', 'tool_batch'].includes(item.body.type) ? (
+              <BodyText
+                body={item.body}
+                showAttachments={index === 0}
+                showGoalFacts={showGoalFacts}
+              />
+            ) : (
+              <>
+                {index === 0 ? detailContent(item.body) : detailTextContent(item.body)}
+                <details>
+                  <summary>Raw event data</summary>
+                  <pre className="session-event-facts">{JSON.stringify(item.body, null, 2)}</pre>
+                </details>
+              </>
+            )}
+          </div>
+        )
+      })}
+      {detail.isPending ? (
+        <p role="status">Loading details…</p>
+      ) : detail.isError || !matches ? (
+        <p role="alert">
+          Details could not be loaded.{' '}
+          <button type="button" onClick={() => void detail.refetch()}>
+            Retry details
+          </button>
+        </p>
+      ) : (
+        next && (
+          <button
+            type="button"
+            onClick={() => {
+              if (!detail.data) return
+              onContinuation({
+                cursor: next,
+                earlier: [...earlier, { key: JSON.stringify(cursor), item }],
+                previous: detail.data,
+              })
+            }}
+          >
+            Continue reading
+          </button>
+        )
+      )}
+    </div>
   )
 }
 
@@ -932,12 +1614,23 @@ function ContinuedEvent({
   onChange: (state?: ContinuedEventState) => void
 }) {
   const opener = useRef<HTMLButtonElement>(null)
+  const close = () => {
+    onChange(undefined)
+    requestAnimationFrame(() => opener.current?.focus())
+  }
   if (!state)
     return (
       <button
         ref={opener}
         type="button"
-        onClick={() => onChange({ cursor: page.continuation ?? null, previous: page })}
+        onClick={() =>
+          onChange({
+            sequence: page.items.at(-1)?.address.event_sequence ?? continuationSequence(page),
+            cursor: page.continuation ?? null,
+            earlier: [],
+            previous: page,
+          })
+        }
       >
         {label}
       </button>
@@ -951,10 +1644,7 @@ function ContinuedEvent({
       headerKind={headerKind}
       state={state}
       onChange={onChange}
-      onClose={() => {
-        onChange(undefined)
-        requestAnimationFrame(() => opener.current?.focus())
-      }}
+      onClose={close}
     />
   )
 }
@@ -975,10 +1665,11 @@ function ContinuedEventReader({
   limits: SessionTranscriptLimits
   headerKind: string | undefined
   state: ContinuedEventState
-  onChange: (state: ContinuedEventState) => void
+  onChange: (state?: ContinuedEventState) => void
   onClose: () => void
 }) {
-  const cursor = state.cursor
+  const cursor = state?.cursor ?? page.continuation ?? null
+  const earlier = state?.earlier ?? []
   const sequence = page.items.at(-1)?.address.event_sequence ?? continuationSequence(page)
   const detail = useQuery({
     queryKey: ['production', 'transcript-continuation', sessionId, sequence, cursor, limits],
@@ -991,23 +1682,25 @@ function ContinuedEventReader({
         cursor,
         limits,
         signal,
-        state.previous,
+        state?.previous ?? page,
       )
       if (detail.items.some((item) => item.kind !== headerKind))
         throw new TypeError('Transcript detail kind contradicts its timeline header')
       return detail
     },
     gcTime: 0,
-    initialData: state.current,
-    staleTime: state.current ? Number.POSITIVE_INFINITY : 0,
+    initialData: state?.current,
+    staleTime: state?.current ? Number.POSITIVE_INFINITY : 0,
   })
   useEffect(() => {
-    if (detail.data && state.current !== detail.data) onChange({ ...state, current: detail.data })
-  }, [detail.data, state, onChange])
+    if (!state || !detail.data || state.current === detail.data) return
+    onChange({ ...state, current: detail.data })
+  }, [state, detail.data, onChange])
   useEffect(() => {
-    if (adoptToolPage && detail.data && advancesToolMember(detail.data))
+    if (state && adoptToolPage && detail.data && advancesToolMember(detail.data))
       adoptToolPage(state.previous, detail.data, false)
-  }, [detail.data, adoptToolPage, state.previous])
+  }, [state, detail.data, adoptToolPage])
+  const attachedMessages = new Set(page.items.map((item) => item.address.event_sequence))
   const next = detail.data?.continuation
   const canContinue =
     detail.data &&
@@ -1017,7 +1710,15 @@ function ContinuedEventReader({
         isToolBodyContinuation(next.body) &&
         !advancesToolMember(detail.data)))
   return (
-    <section aria-label="More message text">
+    <section
+      aria-label="More message text"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || event.defaultPrevented) return
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }}
+    >
       {detail.isPending && <p role="status">Loading details…</p>}
       {detail.isError && (
         <p role="alert">
@@ -1027,27 +1728,43 @@ function ContinuedEventReader({
           </button>
         </p>
       )}
-      {detail.data?.items.map((item) => {
-        const excerpt =
-          cursor?.type === 'more_body' && !hasConversationContent(item)
-            ? detailExcerptAt(item.body, cursor.body)
-            : null
-        return (
-          <div key={conversationEntryKey(item)}>
-            {excerpt ? (
-              <ToolText label="Details" excerpt={excerpt} />
-            ) : (
-              <BodyText body={item.body} />
-            )}
-          </div>
-        )
-      })}
+      {[
+        ...earlier,
+        ...(detail.data ? [{ key: JSON.stringify(cursor), items: detail.data.items }] : []),
+      ].map(({ key, items }) => (
+        <div key={key}>
+          {items.map((item) => {
+            const readCursor = JSON.parse(key) as WebTimelineDetailContinuation | null
+            const excerpt =
+              readCursor?.type === 'more_body' && !hasConversationContent(item)
+                ? detailExcerptAt(item.body, readCursor.body)
+                : null
+            const showAttachments = !attachedMessages.has(item.address.event_sequence)
+            attachedMessages.add(item.address.event_sequence)
+            return (
+              <div key={conversationEntryKey(item)}>
+                {excerpt ? (
+                  <ToolText label="Details" excerpt={excerpt} />
+                ) : (
+                  <BodyText body={item.body} showAttachments={showAttachments} />
+                )}
+              </div>
+            )
+          })}
+        </div>
+      ))}
       {canContinue && (
         <button
           type="button"
           onClick={() => {
             if (detail.data) {
-              onChange({ previous: detail.data, cursor: detail.data.continuation ?? null })
+              const items = detail.data.items
+              onChange({
+                sequence,
+                earlier: [...earlier, { key: JSON.stringify(cursor), items }],
+                previous: detail.data,
+                cursor: detail.data.continuation ?? null,
+              })
             }
           }}
         >

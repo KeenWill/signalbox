@@ -118,6 +118,7 @@ test('resolves a typed artifact in the desktop side inspector without a mouse', 
   await page.goto('/sessions?workspace=true')
 
   await resolveArtifactWithoutMouse(page)
+  await page.getByRole('button', { name: 'Close artifact inspector', exact: true }).focus()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('complementary', { name: 'Inspector' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()

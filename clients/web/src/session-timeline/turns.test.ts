@@ -55,9 +55,22 @@ it('retains tool-producing assistant text as a non-final message in event order'
   expect(turn.result).toBe(response)
   expect(
     turnSummaryParts(turn).map((part) =>
-      part.kind === 'message' ? part.item.address.event_sequence : 'tools',
+      part.kind !== 'tools' ? part.item.address.event_sequence : 'tools',
     ),
   ).toEqual(['1', '2', 'tools', '4'])
+  expect(turnSummaryParts(turn).map((part) => part.kind)).toEqual([
+    'message',
+    'intermediate',
+    'tools',
+    'message',
+  ])
+  expect(isVisibleTurnEvent(turn, intermediate, false)).toBe(false)
+  const segments = groupTranscriptTurns(turn.events, new Set(['2', '3']))
+  const intermediateSegment = segments[1]
+  if (!intermediateSegment) throw new Error('Intermediate segment missing')
+  expect(turnSummaryParts(intermediateSegment).map((part) => part.kind)).toEqual(['intermediate'])
+  expect(isVisibleTurnEvent(intermediateSegment, intermediate, false)).toBe(false)
+  expect(isVisibleTurnEvent(intermediateSegment, intermediate)).toBe(true)
 })
 
 it('keeps an unowned retired outcome visible without assigning it to a neighboring turn', () => {
@@ -89,7 +102,7 @@ it('keeps a completed response visible until its turn closure supplies final sta
     turnSummaryParts(pending).flatMap((part) =>
       part.kind === 'message' ? [part.item.address.event_sequence] : [],
     ),
-  ).toEqual(['1', '4'])
+  ).toEqual(['1'])
 
   const completed = groupTranscriptTurns(detailItems)[0]
   expect(completed?.result).toEqual(detailItems[3])
@@ -231,7 +244,7 @@ it('retains provider failures in event order without treating them as terminal o
   expect(turnSummaryParts(retriedTurn).map((part) => part.kind)).toEqual(['message', 'message'])
   expect(
     turnSummaryParts(retriedTurn).map((part) =>
-      part.kind === 'message' ? part.item.address.event_sequence : 'tools',
+      part.kind !== 'tools' ? part.item.address.event_sequence : 'tools',
     ),
   ).toEqual([failure.address.event_sequence, '6'])
 })

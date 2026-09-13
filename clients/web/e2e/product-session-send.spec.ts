@@ -17,9 +17,10 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   const api = await sessionApi(page)
   await openSession(page)
   api.grow()
-  await expect(page.getByText(assistantMessage, { exact: true })).toHaveCount(0)
-  await expect.poll(() => api.state.historyReads).toContain('after')
-  await expect.poll(() => api.state.textReads).toContain('44')
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
+  expect(api.state.historyReads).toContain('after')
+  expect(api.state.textReads).toContain('44')
   await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
   await page.getByRole('button', { name: 'Send message', exact: true }).focus()
   await page.keyboard.press('Enter')
@@ -47,9 +48,10 @@ test('follows new active work after restoring an inactive session position', asy
   expect(api.state.historyReads).toContain('around')
   api.state.active = true
   api.grow()
-  await expect(page.getByText(assistantMessage, { exact: true })).toHaveCount(0)
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
-  await expect.poll(() => api.state.historyReads).toContain('after')
+  expect(api.state.historyReads).toContain('after')
 })
 
 test('retries an unconfirmed acceptance with the same command and text', async ({ page }) => {
@@ -162,7 +164,8 @@ for (const viewport of [
     const api = await sessionApi(page)
     await openSession(page)
     api.grow()
-    await expect(page.getByText(assistantMessage, { exact: true })).toHaveCount(0)
+    await page.getByRole('radio', { name: 'All details', exact: true }).check()
+    await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
     await expect(page.getByText('Live updates unavailable.')).toBeVisible()
     await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
     await expect.soft(page).toHaveScreenshot(`session-read-send-${viewport.name}.png`, {

@@ -1,1 +1,130 @@
+import { expect, test } from '../../e2e/fontTest'
+import { detailTurnId } from '../../e2e/session-detail-fixture'
+import { toolGoalApi, turnApi } from './turns.fixture'
 import '../../e2e/session-transcript-turns.spec'
+
+test('keeps linked events and turn targets visible', async ({ page }, testInfo) => {
+  await turnApi(page)
+  const turnReads: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/turns/')) turnReads.push(request.url())
+  })
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await page.goto(`/src/session-timeline/transcript-scenario.html?around=3`)
+  const linked = transcript.locator('[data-event-sequence="3"]')
+  await expect(linked).toBeInViewport()
+  await expect(linked).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('linked-turn-detail.png') })
+  await page.goto(`/src/session-timeline/transcript-scenario.html?turn=${detailTurnId}`)
+  await expect
+    .poll(() => turnReads.some((url) => !new URL(url).searchParams.has('cursor_address')))
+    .toBe(true)
+  await expect(
+    transcript.getByText('Inspect the release status and retain the result.'),
+  ).toBeVisible()
+})
+
+test('keeps turn summaries and level controls usable at phone width', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await turnApi(page)
+  await page.goto('/src/session-timeline/transcript-scenario.html')
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(
+    transcript.getByText('The release checks passed. Publishing remains unapproved.'),
+  ).toBeInViewport()
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
+    'passed',
+  )
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: testInfo.outputPath('turn-tools-phone.png') })
+})
+
+test('supplies loaded arguments and output to the tool renderer slot', async ({ page }) => {
+  await turnApi(page)
+  await page.goto('/src/session-timeline/transcript-scenario.html?renderer=true')
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const renderer = page.getByRole('region', { name: 'Injected tool renderer' })
+  await expect(renderer).toContainText('release status')
+  await expect(renderer).toContainText('passed')
+  await expect(renderer).toHaveAttribute('data-detail', 'condensed')
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  await expect(renderer).toHaveAttribute('data-detail', 'full')
+  await page.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(renderer).toHaveCount(2)
+  await expect(renderer.first()).toContainText('release status')
+  await expect(renderer.last()).toContainText('passed')
+})
+
+test('unwinds turn expansion through the surface command and restores its focus', async ({
+  page,
+}) => {
+  await turnApi(page)
+  await page.goto('/src/session-timeline/transcript-scenario.html')
+  await page.getByRole('radio', { name: 'Summary', exact: true }).check()
+  const open = page.getByRole('button', { name: 'Open turn details', exact: true })
+  await open.click()
+  await expect(page.getByRole('button', { name: 'Collapse turn', exact: true })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(open).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Collapse turn', exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(open).toBeFocused()
+})
+
+test('restores Tools after collapsing a turn by button or Escape', async ({ page }) => {
+  await turnApi(page)
+  await page.goto('/src/session-timeline/transcript-scenario.html')
+  await page.getByRole('radio', { name: 'Tools', exact: true }).check()
+  const open = page.getByRole('button', { name: 'Open turn details', exact: true })
+  const summary = page.getByRole('region', { name: 'exec_command details', exact: true })
+  await expect(summary).toContainText('passed')
+  await open.click()
+  await page.getByRole('button', { name: 'Collapse turn', exact: true }).click()
+  await expect(summary).toContainText('passed')
+  await open.click()
+  await page.keyboard.press('Escape')
+  await expect(open).toBeFocused()
+  await expect(summary).toContainText('passed')
+  await page.keyboard.press('Escape')
+  await expect(summary).toContainText('passed')
+})
+
+test('opens an uppercase turn link using its canonical identity', async ({ page }) => {
+  const turnId = '00000000-0000-0000-0000-00000000abcf'
+  await turnApi(page, turnId)
+  const reads: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/turns/')) reads.push(new URL(request.url()).pathname)
+  })
+  await page.goto(`/src/session-timeline/transcript-scenario.html?turn=${turnId.toUpperCase()}`)
+  await expect(page.getByText('Inspect the release status and retain the result.')).toBeVisible()
+  expect(reads.length).toBeGreaterThan(0)
+  expect(reads.every((path) => path.includes(`/turns/${turnId}/`))).toBe(true)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
+test('retains tool-produced goal text alongside an injected tool renderer', async ({ page }) => {
+  const { prefix, suffix } = await toolGoalApi(page, 'blocked')
+  await page.goto('/src/session-timeline/transcript-scenario.html?renderer=true')
+  await page.getByRole('radio', { name: 'All details', exact: true }).check()
+  const event = page
+    .getByRole('region', { name: 'Session transcript', exact: true })
+    .locator('.session-turn-event[data-event-sequence="2"]')
+  const renderer = event.getByRole('region', { name: 'Injected tool renderer', exact: true })
+  await expect(renderer).toContainText('release status')
+  const next = event.getByRole('button', { name: 'Continue reading', exact: true })
+  await next.click()
+  await next.click()
+  const goals = event.getByRole('region', { name: 'Goal events', exact: true })
+  await expect(goals).toContainText('Input required')
+  await next.click()
+  await expect(
+    goals.getByRole('region', { name: 'Goal text', exact: true }).locator('pre'),
+  ).toHaveText([prefix, suffix])
+  await expect(renderer).toHaveCount(2)
+  await expect(renderer.last()).toContainText('passed')
+})

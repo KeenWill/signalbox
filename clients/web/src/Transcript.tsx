@@ -204,6 +204,8 @@ export function VirtualTranscript({
   ids,
   renderRow,
   selectedId,
+  revealId,
+  onReveal,
   pinnedId,
   estimateSize = 100,
   className = 'session-transcript-scroll',
@@ -226,6 +228,8 @@ export function VirtualTranscript({
     style: React.CSSProperties,
   ) => ReactNode
   selectedId?: string | null
+  revealId?: string | null
+  onReveal?: () => void
   pinnedId?: string | null
   estimateSize?: number
   className?: string
@@ -244,6 +248,7 @@ export function VirtualTranscript({
   const localParent = useRef<HTMLDivElement>(null)
   const parent = scrollRef ?? localParent
   const selected = selectedId ? ids.indexOf(selectedId) : -1
+  const revealed = revealId ? ids.indexOf(revealId) : -1
   const pinned = pinnedId ? ids.indexOf(pinnedId) : -1
   const anchor = useRef<{ id: string; offset: number } | null>(null)
   const initialized = useRef(false)
@@ -264,7 +269,7 @@ export function VirtualTranscript({
     getItemKey: (index) => ids[index] ?? index,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range)
-      for (const index of [selected, pinned])
+      for (const index of [selected, revealed, pinned])
         if (index >= 0 && !indexes.includes(index)) indexes.push(index)
       return indexes.sort((a, b) => a - b)
     },
@@ -326,6 +331,13 @@ export function VirtualTranscript({
     restoringLaterAnchor.current = false
     restoredOffset.current ??= parent.current?.scrollTop ?? null
   }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
+  const reportReveal = useEffectEvent(() => onReveal?.())
+  useLayoutEffect(() => {
+    if (!revealId || revealed < 0) return
+    virtualizer.scrollToIndex(revealed, { align: 'auto' })
+    const frame = requestAnimationFrame(() => reportReveal())
+    return () => cancelAnimationFrame(frame)
+  }, [revealed, revealId, virtualizer])
   const remember = () => {
     const offset = parent.current?.scrollTop ?? 0
     const row = virtualizer.getVirtualItems().find((item) => item.end > offset)

@@ -119,6 +119,7 @@ export function SessionWorkspaceSurface({
   initialAround,
   onAroundConsumed,
   onReturnToCatalog,
+  registerTranscriptUnwind,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -134,6 +135,7 @@ export function SessionWorkspaceSurface({
   focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
   onReturnToCatalog: () => void
+  registerTranscriptUnwind?: (handler: () => boolean) => () => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -442,7 +444,13 @@ export function SessionWorkspaceSurface({
       aria-label="Session workspace"
       className="surface-body session-workspace-surface"
       onKeyDown={(event) => {
-        if (event.key !== 'Escape' || !detailsRef.current?.open) return
+        if (
+          event.key !== 'Escape' ||
+          !detailsRef.current?.open ||
+          !(event.target instanceof Node) ||
+          !detailsRef.current.contains(event.target)
+        )
+          return
         const nearest =
           event.target instanceof Element ? event.target.closest('details[open]') : null
         const details = nearest instanceof HTMLDetailsElement ? nearest : detailsRef.current
@@ -653,6 +661,7 @@ export function SessionWorkspaceSurface({
           >
             {transcriptAvailable ? (
               <SessionTranscriptText
+                registerUnwind={registerTranscriptUnwind}
                 scrollRef={showEvents ? undefined : timelineRef}
                 anchor={displayedSession.anchor}
                 sessionId={sessionId ?? ''}
