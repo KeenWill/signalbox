@@ -269,7 +269,7 @@ pub(super) async fn session_timeline_item_detail(
         Ok(Some(page)) => match detail_page_dto(page) {
             Ok(mut page) => {
                 if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
-                    return error.into_response();
+                    return tool_media_projection_error(error);
                 }
                 Json(page).into_response()
             }
@@ -317,7 +317,7 @@ pub(super) async fn session_timeline_turn_detail(
         Ok(Some(page)) => match detail_page_dto(page) {
             Ok(mut page) => {
                 if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
-                    return error.into_response();
+                    return tool_media_projection_error(error);
                 }
                 Json(page).into_response()
             }
@@ -373,7 +373,7 @@ pub(super) async fn session_timeline_region_detail(
         Ok(Some(page)) => match detail_page_dto(page) {
             Ok(mut page) => {
                 if let Err(error) = populate_tool_media(&mut page, state.pool.as_ref()).await {
-                    return error.into_response();
+                    return tool_media_projection_error(error);
                 }
                 Json(page).into_response()
             }
@@ -488,16 +488,41 @@ fn repository_projection_error(error: SessionTimelineRepositoryError) -> Respons
     )
 }
 
-fn tool_media_projection_error(
-    error: signalbox_persistence::tool_loop::ToolLoopRepositoryError,
-) -> Response {
-    use signalbox_application::ClassifyOperatorFailure as _;
+#[derive(Debug)]
+enum ToolMediaPopulationError {
+    Unavailable,
+    Repository(signalbox_persistence::tool_loop::ToolLoopRepositoryError),
+    Corruption(&'static str),
+}
 
-    tracing::error!(
-        failure_class = ?error.operator_failure_class(),
-        cause = %error,
-        "session timeline media projection read failed"
-    );
+fn tool_media_projection_error(error: ToolMediaPopulationError) -> Response {
+    let failure_class = match &error {
+        ToolMediaPopulationError::Unavailable => return session_projection_unavailable(),
+        ToolMediaPopulationError::Repository(
+            signalbox_persistence::tool_loop::ToolLoopRepositoryError::Database { .. },
+        ) => "infrastructure",
+        ToolMediaPopulationError::Repository(
+            signalbox_persistence::tool_loop::ToolLoopRepositoryError::Corruption(_),
+        )
+        | ToolMediaPopulationError::Corruption(_) => "fail_closed_corruption",
+        ToolMediaPopulationError::Repository(
+            signalbox_persistence::tool_loop::ToolLoopRepositoryError::IdentityCollision,
+        ) => "identity_collision",
+        ToolMediaPopulationError::Repository(_) => "bug",
+    };
+    match error {
+        ToolMediaPopulationError::Repository(error) => tracing::error!(
+            failure_class,
+            cause = %error,
+            "session timeline media projection read failed"
+        ),
+        ToolMediaPopulationError::Corruption(cause) => tracing::error!(
+            failure_class,
+            cause,
+            "session timeline media projection read failed"
+        ),
+        ToolMediaPopulationError::Unavailable => unreachable!(),
+    }
     application_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "session_projection_failed",
@@ -629,29 +654,10 @@ fn window_dto(
     })
 }
 
-#[derive(Debug)]
-enum ToolMediaProjectionError {
-    Unavailable,
-    Repository(signalbox_persistence::tool_loop::ToolLoopRepositoryError),
-    InvalidAttempt,
-}
-
-impl ToolMediaProjectionError {
-    fn into_response(self) -> Response {
-        match self {
-            Self::Unavailable => session_projection_unavailable(),
-            Self::Repository(error) => tool_media_projection_error(error),
-            Self::InvalidAttempt => {
-                SessionTimelineRequestError::InvalidProjectedToolAttempt.into_response()
-            }
-        }
-    }
-}
-
 async fn populate_tool_media(
     page: &mut WebSessionTimelineDetailPage,
     pool: Option<&sqlx::PgPool>,
-) -> Result<(), ToolMediaProjectionError> {
+) -> Result<(), ToolMediaPopulationError> {
     let mut targets = Vec::new();
     for item in &mut page.items {
         let WebSessionTimelineDetailBody::ToolBatch { tools, .. } = &mut item.body else {
@@ -667,10 +673,9 @@ async fn populate_tool_media(
                 continue;
             };
             let request = signalbox_domain::ToolRequestId::from_uuid(
-                tool.request_id
-                    .as_str()
-                    .parse()
-                    .map_err(|_| ToolMediaProjectionError::InvalidAttempt)?,
+                tool.request_id.as_str().parse().map_err(|_| {
+                    ToolMediaPopulationError::Corruption("invalid projected tool request identity")
+                })?,
             );
             targets.push((request, result_media_reference));
         }
@@ -679,7 +684,7 @@ async fn populate_tool_media(
         return Ok(());
     }
     let repository = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(
-        pool.ok_or(ToolMediaProjectionError::Unavailable)?.clone(),
+        pool.ok_or(ToolMediaPopulationError::Unavailable)?.clone(),
     );
     let requests = targets
         .iter()
@@ -688,14 +693,16 @@ async fn populate_tool_media(
     let references = repository
         .load_media_references(&requests)
         .await
-        .map_err(ToolMediaProjectionError::Repository)?;
+        .map_err(ToolMediaPopulationError::Repository)?;
     for (request, target) in targets {
         *target = references
             .get(&request)
             .cloned()
             .map(tool_media_reference_dto)
             .transpose()
-            .map_err(|_| ToolMediaProjectionError::InvalidAttempt)?;
+            .map_err(|_| {
+                ToolMediaPopulationError::Corruption("invalid retained media reference")
+            })?;
     }
     Ok(())
 }
@@ -2032,10 +2039,10 @@ mod tests {
             let missing_pool = populate_tool_media(&mut page, None).await;
             if completed {
                 assert_eq!(
-                    missing_pool
-                        .expect_err("completed media needs a pool")
-                        .into_response()
-                        .status(),
+                    tool_media_projection_error(
+                        missing_pool.expect_err("completed media needs a pool")
+                    )
+                    .status(),
                     StatusCode::SERVICE_UNAVAILABLE
                 );
             } else {
@@ -2049,14 +2056,14 @@ mod tests {
                 let error = read.expect_err("closed pool is a read failure");
                 assert!(matches!(
                     &error,
-                    ToolMediaProjectionError::Repository(
+                    ToolMediaPopulationError::Repository(
                         signalbox_persistence::tool_loop::ToolLoopRepositoryError::Database {
                             source: sqlx::Error::PoolClosed,
                             ..
                         }
                     )
                 ));
-                let response = error.into_response();
+                let response = tool_media_projection_error(error);
                 assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
                 let body = axum::body::to_bytes(
                     response.into_body(),
@@ -2083,11 +2090,11 @@ mod tests {
                 ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Inconsistent(
                     CORRUPTION_DETAIL,
                 )),
-                "FailClosedCorruption",
+                "fail_closed_corruption",
             ),
             (
                 ToolLoopRepositoryError::from(sqlx::Error::PoolClosed),
-                "Infrastructure",
+                "infrastructure",
             ),
         ] {
             let expected_cause = error.to_string();
@@ -2099,7 +2106,7 @@ mod tests {
                 .with_writer(output.reopen().expect("capture writer"))
                 .finish();
             let response = tracing::subscriber::with_default(subscriber, || {
-                tool_media_projection_error(error)
+                tool_media_projection_error(ToolMediaPopulationError::Repository(error))
             });
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
             let body = axum::body::to_bytes(
