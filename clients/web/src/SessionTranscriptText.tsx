@@ -416,7 +416,7 @@ function TranscriptWindow({
   )
   const expandedTurnIds =
     detail === 'full'
-      ? []
+      ? [...knownTurnIds]
       : [
           ...new Set([
             ...Object.entries(turnModes).flatMap(([id, mode]) =>

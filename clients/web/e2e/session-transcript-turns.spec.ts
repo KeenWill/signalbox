@@ -1239,8 +1239,16 @@ for (const around of ['18446744073709551616', '99999999999999999999']) {
   })
 }
 
-for (const open of ['Summary', 'Tools', 'turn link']) {
-  test(`includes a turn-associated compaction without turn_id from ${open}`, async ({
+for (const [open, close, collapseFrom] of [
+  ['Summary', 'button', 'compaction'],
+  ['Tools', 'Escape', 'compaction'],
+  ['turn link', 'button', 'compaction'],
+  ['All details', 'button', 'input'],
+  ['All details', 'Escape', 'input'],
+  ['All details', 'button', 'compaction'],
+  ['All details', 'Escape', 'compaction'],
+] as const) {
+  test(`includes a turn-associated compaction without turn_id from ${open} and collapses from ${collapseFrom} by ${close}`, async ({
     page,
   }, testInfo) => {
     const input = detailItems[0]
@@ -1316,10 +1324,11 @@ for (const open of ['Summary', 'Tools', 'turn link']) {
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     if (open !== 'turn link') {
       await page.getByRole('radio', { name: open, exact: true }).check()
-      await transcript
-        .getByRole('button', { name: 'Open turn details', exact: true })
-        .first()
-        .click()
+      if (open !== 'All details')
+        await transcript
+          .getByRole('button', { name: 'Open turn details', exact: true })
+          .first()
+          .click()
     }
     const event = transcript.locator('[data-event-sequence="2"]')
     if (unavailable) {
@@ -1336,24 +1345,42 @@ for (const open of ['Summary', 'Tools', 'turn link']) {
         .locator('[data-turn-id]')
         .filter({ has: page.locator('[data-event-sequence="2"]') }),
     ).toHaveAttribute('data-turn-id', turnId)
-    await expect(transcript.locator('[data-event-sequence="3"]')).toHaveCount(0)
+    await expect(transcript.locator('[data-event-sequence="3"]')).toHaveCount(
+      open === 'All details' ? 1 : 0,
+    )
     expect(membership.filter((address) => address === '3')).toHaveLength(1)
     expect(membership.filter((address) => address === '2').length).toBeLessThanOrEqual(
       open === 'Summary' ? 3 : 2,
     )
     await page.screenshot({ path: testInfo.outputPath('associated-compaction.png') })
-    const collapse = transcript
-      .locator('[data-transcript-turn]')
-      .filter({ has: page.locator('[data-event-sequence="2"]') })
-      .getByRole('button', { name: 'Collapse turn', exact: true })
-    if (open === 'Tools') {
-      await collapse.focus()
-      await page.keyboard.press('Escape')
-    } else await collapse.click()
+    const segment = transcript.locator('[data-transcript-turn]').filter({
+      has: page.locator(`[data-event-sequence="${collapseFrom === 'input' ? '1' : '2'}"]`),
+    })
+    const segmentId = await segment.getAttribute('data-transcript-turn')
+    const collapse = segment.getByRole('button', { name: 'Collapse turn', exact: true })
+    if (close === 'Escape') await collapse.press('Escape')
+    else await collapse.click()
     await expect(event).toHaveCount(0)
-    await expect(
-      transcript.getByRole('button', { name: 'Open turn details', exact: true }).first(),
-    ).toBeFocused()
+    if (open === 'All details') {
+      await expect(page.getByRole('radio', { name: 'All details', exact: true })).toBeChecked()
+      await expect(transcript.locator('[data-event-sequence="3"]')).toBeVisible()
+      await expect(
+        transcript.locator(`[data-turn-id="${turnId}"]`).getByRole('button', {
+          name: 'Collapse turn',
+          exact: true,
+        }),
+      ).toHaveCount(0)
+      await expect(
+        transcript.locator(`[data-transcript-turn="${segmentId}"]`).getByRole('button', {
+          name: 'Open turn details',
+          exact: true,
+        }),
+      ).toBeFocused()
+    } else {
+      await expect(
+        transcript.getByRole('button', { name: 'Open turn details', exact: true }).first(),
+      ).toBeFocused()
+    }
   })
 }
 

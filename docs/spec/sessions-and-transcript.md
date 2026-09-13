@@ -658,7 +658,9 @@ conversation focus entry and command target; the enclosing section adds no focus
 stop. Invalid event-link addresses outside the unsigned 64-bit range are
 ignored. When a turn is opened, retained events without a turn identity are
 associated only by an exact per-turn route match with unchanged immutable facts;
-events skipped by that route remain outside the selected turn.
+events skipped by that route remain outside the selected turn. All details
+retains these associations for known turns so collapsing any segment also
+collapses associated events without a turn identity.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
