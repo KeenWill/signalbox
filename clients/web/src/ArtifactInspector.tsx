@@ -52,7 +52,7 @@ export const nextResolutionSequence = (): number => {
 }
 
 export const attachmentTypeLabel = (mediaType?: string | null): string => {
-  const normalizedMediaType = mediaType?.toLowerCase()
+  const normalizedMediaType = mediaType?.split(';', 1)[0]?.trim().toLowerCase()
   if (normalizedMediaType?.startsWith('image/')) return 'Image'
   if (normalizedMediaType?.startsWith('audio/')) return 'Audio'
   if (normalizedMediaType?.startsWith('video/')) return 'Video'

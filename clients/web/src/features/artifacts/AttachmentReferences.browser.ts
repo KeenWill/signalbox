@@ -372,3 +372,27 @@ for (const move of ['pointer', 'keyboard']) {
     expect(await page.evaluate((element) => document.activeElement === element, focused)).toBe(true)
   })
 }
+
+test('labels parameterized PDF attachments in chips and details', async ({ page }) => {
+  const mediaType = 'application/pdf;version=1.7'
+  const descriptor = {
+    ...fileAttachment,
+    declared_media_type: mediaType,
+    available_views: fileAttachment.available_views.map((view) => {
+      const url = new URL(view.content_url, 'http://localhost')
+      url.searchParams.set('media_type', mediaType)
+      return { ...view, media_type: mediaType, content_url: `${url.pathname}${url.search}` }
+    }),
+  }
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
+  await page.goto(`/src/features/artifacts/scenario.html?label=${encodeURIComponent(mediaType)}`)
+  const chip = page.getByRole('button', { name: `PDF · ${mediaType} · 4,096 bytes`, exact: true })
+  await expect(page.getByRole('link', { name: 'Download' })).toBeVisible()
+  await chip.click()
+  const pane = page.getByRole('dialog', { name: 'Attachment details' })
+  await expect(pane.getByRole('article', { name: 'Artifact PDF', exact: true })).toBeVisible()
+  await expect(pane.getByText('Found PDF', { exact: true })).toBeVisible()
+})
