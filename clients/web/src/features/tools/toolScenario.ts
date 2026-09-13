@@ -43,6 +43,18 @@ export const toolExample = (
   ]
 }
 
+export const fileEvidence = 'fn main() {\r\n    println!("Hello");\r\n}\r'
+export const rawFileEvidence = JSON.stringify({ content: fileEvidence }, null, 2).replaceAll(
+  '\n',
+  '\r\n',
+)
+const fileExample = toolExample('read_file', { path: 'src/main.rs' }, { content: fileEvidence })
+if (fileExample[1].evidence?.type === 'physical_attempt')
+  fileExample[1] = {
+    ...fileExample[1],
+    evidence: { ...fileExample[1].evidence, result: toolExcerpt(rawFileEvidence) },
+  }
+
 export const toolExamples = [
   toolExample('git_diff', { scope: 'working_tree' }, { patch: '-before\n+after\n' }),
   toolExample(
@@ -53,11 +65,7 @@ export const toolExamples = [
       stdout: { text: 'Finished successfully', completeness: 'complete' },
     },
   ),
-  toolExample(
-    'read_file',
-    { path: 'src/main.rs' },
-    { content: 'fn main() {\n    println!("Hello");\n}' },
-  ),
+  fileExample,
   toolExample(
     'edit_file',
     { path: 'src/main.rs', old_string: 'Hello', new_string: 'Welcome' },

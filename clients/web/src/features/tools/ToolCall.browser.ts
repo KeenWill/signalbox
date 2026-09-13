@@ -1,10 +1,20 @@
 import { expect, test } from '@playwright/test'
+import { fileEvidence, rawFileEvidence } from './toolScenario'
 
 test('tool summaries expose raw evidence by keyboard', async ({ page }, testInfo) => {
   const errors: string[] = []
   page.on('pageerror', (error) => errors.push(error.message))
   await page.goto('/src/features/tools/scenario.html')
   await expect(page.getByText('Exit 0')).toBeVisible()
+  const file = page.getByRole('article', { name: 'Tool read_file', exact: true }).last()
+  expect(
+    await file.getByRole('region', { name: 'File contents' }).locator('code').textContent(),
+  ).toBe(fileEvidence)
+  await file.getByRole('button', { name: 'Raw', exact: true }).click()
+  expect(
+    await file.getByRole('region', { name: 'Output', exact: true }).locator('code').textContent(),
+  ).toBe(rawFileEvidence)
+  await file.getByRole('button', { name: 'Raw', exact: true }).click()
   const proposedDiff = page
     .getByRole('region', { name: 'Proposed changes', exact: true })
     .locator('code')

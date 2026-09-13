@@ -148,7 +148,7 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
 function FileRead({ arguments: args, result, resultExcerpt }: RendererProps) {
   return (
     <>
-      <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
+      <strong>{textField(args.path ?? result.path)}</strong>
       {typeof result.content === 'string' ? (
         result.content === '' ? (
           <p>No content in this read</p>
@@ -188,7 +188,7 @@ function FileEdit({ arguments: args, result, resultExcerpt }: RendererProps) {
       .join('\n')
   return (
     <>
-      <strong>{textField(args.path ?? args.file_path ?? result.path)}</strong>
+      <strong>{textField(args.path ?? result.path)}</strong>
       <TextPreview text={patch} label="Proposed changes" diff />
       {args.content === '' && <strong>Write empty file</strong>}
       {args.replace_all === true && <strong>Replace every match</strong>}

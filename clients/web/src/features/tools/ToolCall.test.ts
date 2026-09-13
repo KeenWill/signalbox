@@ -4,13 +4,35 @@ import { describe, expect, it } from 'vitest'
 import { detailItems, detailPage, resultCursor } from '../../../e2e/session-detail-fixture'
 import { decodeWebSessionTimelineDetailPage } from '../../generated/web-contract.mjs'
 import { ToolApproval, ToolCall } from './ToolCall'
-import { excerptFields, searchResultText, webLink } from './toolPresentation'
+import { excerptFields, previewText, searchResultText, webLink } from './toolPresentation'
 import { toolExample, toolExcerpt } from './toolScenario'
 
 const render = (tools: ReturnType<typeof toolExample>) =>
   tools.map((tool) => renderToStaticMarkup(createElement(ToolCall, { tool }))).join('')
 
 describe('tool presentation', () => {
+  it.each(['one\r\ntwo\r\n', '10%\r20%\r', '\r\n😀\r'])(
+    'preserves evidence separators in %j',
+    (text) => {
+      expect(previewText(text)).toEqual({ content: text, omittedCharacters: 0 })
+    },
+  )
+
+  it('bounds CRLF lines without changing retained separators', () => {
+    const line = 'line\r\n'
+    const text = line.repeat(40)
+    const preview = previewText(text)
+    expect(preview.content).toBe(line.repeat(31) + 'line')
+    expect(preview.omittedCharacters).toBe(text.length - preview.content.length)
+  })
+
+  it('bounds Unicode characters without splitting surrogate pairs', () => {
+    expect(previewText('😀'.repeat(4001))).toEqual({
+      content: '😀'.repeat(4000),
+      omittedCharacters: 1,
+    })
+  })
+
   it('labels an empty search response on its result page', () => {
     const [, tool] = toolExample(
       'web_search',

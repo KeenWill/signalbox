@@ -1,5 +1,5 @@
 import type { WebTimelineTextExcerpt } from '../../generated/web-contract.mjs'
-import { boundArtifactText } from '../artifacts/artifactTypes'
+import { ARTIFACT_PREVIEW_CHARACTERS, ARTIFACT_PREVIEW_LINES } from '../artifacts/artifactTypes'
 
 // The generated decodeWebSessionTimelineDetailPage contract bounds projected bodies to 64 KiB.
 const MAX_TOOL_EXCERPT_BYTES = 64 * 1024
@@ -40,8 +40,24 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
 
 export const previewText = (text: string) => {
   let characters = 0
-  for (const _character of text) characters += 1
-  return boundArtifactText(text, characters, 'preview')
+  let prefixCharacters = 0
+  let lineBreaks = 0
+  let content = ''
+  let previous = ''
+  let stopped = false
+  for (const character of text) {
+    characters += 1
+    if (stopped) continue
+    if (character === '\r' || (character === '\n' && previous !== '\r')) lineBreaks += 1
+    if (prefixCharacters === ARTIFACT_PREVIEW_CHARACTERS || lineBreaks === ARTIFACT_PREVIEW_LINES) {
+      stopped = true
+      continue
+    }
+    content += character
+    prefixCharacters += 1
+    previous = character
+  }
+  return { content, omittedCharacters: characters - prefixCharacters }
 }
 
 export const webLink = (value: unknown): string | undefined => {
