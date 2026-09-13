@@ -52,7 +52,7 @@ image = { version = "0.25.8", default-features = false, features = [
 ] }
 percent-encoding = "2.3.2"
 mime = "0.3.17"
-tikv-jemallocator = { version = "0.7.0", features = ["background_threads"] }
+tikv-jemallocator = { version = "0.7.0", features = ["background_threads", "unprefixed_malloc_on_supported_platforms"] }
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.
 # Already present transitively under axum.
@@ -159,6 +159,7 @@ uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] 
 libc = "0.2.186"
 
 [dev-dependencies]
+signalbox-runner = { path = "../signalbox-runner" }
 # The composed daemon tests read drain dispositions through persistence's
 # test-support surface; carrying the feature here keeps a plain
 # `cargo test -p signalboxd` compiling without an explicit feature flag.

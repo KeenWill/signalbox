@@ -778,7 +778,10 @@ pub(super) fn create_session_internal_diagnostic(
     error: &CreateSessionError<CreateSessionRepositoryError>,
 ) -> InternalDiagnostic {
     match error {
-        CreateSessionError::Preparation(_) => InternalDiagnostic::SessionCreationPreparation,
+        CreateSessionError::Preparation(_)
+        | CreateSessionError::Transaction(CreateSessionRepositoryError::RunnerPlacementRejected) => {
+            InternalDiagnostic::SessionCreationPreparation
+        }
         CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_)) => {
             InternalDiagnostic::SessionCreationDatabase
         }

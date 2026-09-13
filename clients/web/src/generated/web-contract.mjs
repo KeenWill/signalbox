@@ -59,6 +59,51 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebApprovalRequest": {
+    "$defs": {
+      "WebApprovalDecision": {
+        "description": "Human decisions admitted by the ordinary tool decision command.",
+        "oneOf": [
+          {
+            "const": "approve",
+            "description": "Permit this request.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Refuse this request.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A durable human decision for the request named by the route.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      },
+      "decision": {
+        "$ref": "#/$defs/WebApprovalDecision",
+        "description": "Human approval or denial."
+      },
+      "note": {
+        "description": "Optional denial explanation.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "command_id",
+      "decision"
+    ],
+    "title": "WebApprovalRequest",
+    "type": "object"
+  },
   "WebAttentionSnapshot": {
     "$defs": {
       "WebAttentionAction": {
@@ -750,6 +795,32 @@ const schemas = {
       "available_views"
     ],
     "title": "WebBlobDescriptor",
+    "type": "object"
+  },
+  "WebCancelTurnRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Stops the named turn by accepting a successor message with session defaults.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      },
+      "expected_active_turn_id": {
+        "description": "Active turn observed when the action was chosen.",
+        "type": "string"
+      },
+      "message": {
+        "description": "User message for the immediate successor turn.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "expected_active_turn_id",
+      "message"
+    ],
+    "title": "WebCancelTurnRequest",
     "type": "object"
   },
   "WebContractBootstrap": {
@@ -1449,6 +1520,27 @@ const schemas = {
       "summary"
     ],
     "title": "WebCreateSessionResponse",
+    "type": "object"
+  },
+  "WebGoalRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Attaches a goal through the ordinary user goal command.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      },
+      "statement": {
+        "description": "Immutable statement of work.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "statement"
+    ],
+    "title": "WebGoalRequest",
     "type": "object"
   },
   "WebImportContinuationRequest": {
@@ -2780,6 +2872,22 @@ const schemas = {
       "continuation"
     ],
     "title": "WebSearchPage",
+    "type": "object"
+  },
+  "WebSessionActionRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Identity of a durable session action with no additional payload.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command identity, retained on retry.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id"
+    ],
+    "title": "WebSessionActionRequest",
     "type": "object"
   },
   "WebSessionCatalogSnapshot": {
@@ -10690,6 +10798,26 @@ export function decodeWebContractBootstrap(value) {
 
 export function decodeWebSubmitInputRequest(value) {
   assertSchema(schemas.WebSubmitInputRequest, schemas.WebSubmitInputRequest, value, "websubmitinputrequest");
+  return value;
+}
+
+export function decodeWebCancelTurnRequest(value) {
+  assertSchema(schemas.WebCancelTurnRequest, schemas.WebCancelTurnRequest, value, "webcancelturnrequest");
+  return value;
+}
+
+export function decodeWebApprovalRequest(value) {
+  assertSchema(schemas.WebApprovalRequest, schemas.WebApprovalRequest, value, "webapprovalrequest");
+  return value;
+}
+
+export function decodeWebGoalRequest(value) {
+  assertSchema(schemas.WebGoalRequest, schemas.WebGoalRequest, value, "webgoalrequest");
+  return value;
+}
+
+export function decodeWebSessionActionRequest(value) {
+  assertSchema(schemas.WebSessionActionRequest, schemas.WebSessionActionRequest, value, "websessionactionrequest");
   return value;
 }
 

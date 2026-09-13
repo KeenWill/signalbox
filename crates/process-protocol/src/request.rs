@@ -156,6 +156,9 @@ pub enum ClientRequest {
     },
     /// Create a user-initiated session.
     CreateSession {
+        /// Optional runner placement, retained unpinned until first runner use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner_placement: Option<crate::RunnerPlacementRequest>,
         /// Durable mutation identity.
         command_id: CommandId,
         /// Initial session model-selection defaults.
@@ -174,6 +177,9 @@ pub enum ClientRequest {
     },
     /// Create a user-initiated session from one daemon-held template.
     CreateSessionFromTemplate {
+        /// Optional runner placement, retained unpinned until first runner use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner_placement: Option<crate::RunnerPlacementRequest>,
         /// Durable mutation identity.
         command_id: CommandId,
         /// Validated static template name.
@@ -189,6 +195,9 @@ pub enum ClientRequest {
     /// it under a recorded immutable authority fence, attach its goal, and
     /// submit its first input through the start-when-idle path.
     CommissionSession {
+        /// Optional runner placement, retained unpinned until first runner use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner_placement: Option<crate::RunnerPlacementRequest>,
         /// Durable mutation identity for the whole composite.
         command_id: CommandId,
         /// Validated static template name.
@@ -776,6 +785,24 @@ pub enum ToolDecision {
 
 impl ClientRequest {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        let runner_placement = match self {
+            Self::CreateSession {
+                runner_placement, ..
+            }
+            | Self::CreateSessionFromTemplate {
+                runner_placement, ..
+            }
+            | Self::CommissionSession {
+                runner_placement, ..
+            } => runner_placement.as_ref(),
+            _ => None,
+        };
+        if let Some(placement) = runner_placement {
+            placement
+                .clone()
+                .try_into_domain()
+                .map_err(|_| FrameValidationError::PlacementShape)?;
+        }
         match self {
             Self::ReplaceLostRunner { revision, .. } => {
                 if let Some(revision) = revision {

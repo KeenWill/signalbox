@@ -275,10 +275,16 @@ export const productLabels = {
   preview: 'Preview',
 } as const
 
-export const attachmentTypeLabel = (mediaType?: string | null): string => {
+export const attachmentTypeLabel = (
+  mediaType?: string | null,
+  presentationKind?: 'image' | 'document',
+): string => {
   const normalizedMediaType = attachmentDescriptorMediaType(mediaType)
     .split(';', 1)[0]
     ?.toLowerCase()
+  if (presentationKind === 'image') return enumLabel('image')
+  if (presentationKind === 'document')
+    return normalizedMediaType === 'application/pdf' ? enumLabel('pdf') : enumLabel('document')
   if (normalizedMediaType?.startsWith('image/')) return enumLabel('image')
   if (normalizedMediaType?.startsWith('audio/')) return enumLabel('audio')
   if (normalizedMediaType?.startsWith('video/')) return enumLabel('video')
