@@ -364,10 +364,8 @@ async fn an_ineligible_connected_runner_preserves_daemon_echo_fallback()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and the packaged runner"]
-async fn a_lost_claim_releases_the_live_tool_loop_into_durable_runner_recovery()
+async fn daemon_shutdown_loses_a_claim_and_releases_the_live_tool_loop_into_recovery()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_persistence::runner_protocol::RunnerConnectionTransition;
-    use signalboxd::runner_protocol_runtime::RunnerRegistrationService as _;
     let directory = tempfile::tempdir()?;
     let fixture = ToolLoopFixture::with_creation_placement(
         DangerousToolAutoApproval::Disabled,
@@ -419,13 +417,7 @@ async fn a_lost_claim_releases_the_live_tool_loop_into_durable_runner_recovery()
             .recovery_store()
             .claim_tool_lease(enrollment, epoch, lease.correlation())
             .await?;
-        host.service
-            .transition_connection(
-                signalbox_runner_wire::CanonicalUuid::from_uuid(enrollment.into_uuid()),
-                signalbox_runner_wire::PositiveU64::try_new(epoch.get())?,
-                RunnerConnectionTransition::TransportClosed,
-            )
-            .await?;
+        host.shutdown.send_replace(true);
         Ok::<_, Box<dyn Error>>(())
     };
     let outcome = tokio::time::timeout(Duration::from_secs(60), async {

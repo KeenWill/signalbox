@@ -134,6 +134,62 @@ pub struct SessionMetadataRepository {
     request_shape: MetadataRequestShape,
 }
 
+/// Validates the preserved snapshot and optionally installs an initial title.
+pub(crate) async fn accept_generated_title(
+    transaction: &mut Transaction<'_, Postgres>,
+    command_id: Option<DurableCommandId>,
+    session: SessionId,
+    title: String,
+) -> Result<(), SessionMetadataRepositoryError> {
+    let exists = sqlx::query_scalar::<_, Uuid>(lock_inventory::REPLACE_SESSION_METADATA)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(sqlx::Error::RowNotFound.into());
+    }
+    let current = load_current_snapshot(transaction, session)
+        .await?
+        .ok_or(SessionMetadataCorruption::Missing("locked session"))?;
+    let replacement = SessionMetadataContent::try_new(
+        Some(title),
+        current.content().tags().map(str::to_owned).collect(),
+        current
+            .content()
+            .attributes()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        current.content().archived(),
+    )
+    .map_err(SessionMetadataRepositoryError::InvalidTitleMerge)?;
+    let Some(command_id) = command_id.filter(|_| current.content().title().is_none()) else {
+        return Ok(());
+    };
+    let command = ReplaceSessionMetadata::for_title_generation(command_id, session, replacement);
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at, issuer_kind)
+            VALUES ($1, $2, $3, statement_timestamp(), 'core')",
+    )
+    .bind(command_id.into_uuid())
+    .bind(REPLACE_SESSION_METADATA_KIND)
+    .bind(STORAGE_VERSION)
+    .execute(&mut **transaction)
+    .await?;
+    let updated_at = replacement_statement_timestamp(transaction).await?;
+    let prepared = command.prepare_applied(updated_at);
+    replace_current_snapshot(transaction, prepared.command(), updated_at).await?;
+    insert_typed_record(
+        transaction,
+        &prepared,
+        Some(updated_at),
+        MetadataRequestShape::TitleOnly,
+    )
+    .await?;
+    Ok(())
+}
+
 impl SessionMetadataRepository {
     /// Uses the supplied pool for independent commands and snapshots.
     pub const fn new(pool: PgPool) -> Self {
@@ -158,11 +214,18 @@ impl SessionMetadataRepository {
     /// User-global registry inspection is the first durable read. An unseen
     /// command serializes with other metadata writers by locking the session
     /// row before a separate statement samples its timestamp and replaces
-    /// satellites.
+    /// satellites. Core receipt commands are rejected; Core writes are confined
+    /// to the title settlement transaction.
     pub async fn handle(
         &self,
         command: ReplaceSessionMetadata,
     ) -> Result<ReplaceSessionMetadataHandlingOutcome, SessionMetadataRepositoryError> {
+        if command.actor() == Actor::Core {
+            return Err(SessionMetadataCorruption::Inconsistent(
+                "core metadata requires title settlement",
+            )
+            .into());
+        }
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
 
@@ -993,6 +1056,9 @@ fn decode_command(
         required(row, "replacement_archived")?,
     )?;
     let command = match (issuer_kind.as_str(), issuer_tool) {
+        ("core", None) => {
+            ReplaceSessionMetadata::for_title_generation(command_id, session, content)
+        }
         ("user", None) => ReplaceSessionMetadata::new(command_id, session, content),
         ("tool", Some(request)) => ReplaceSessionMetadata::new_for_tool(
             command_id,
@@ -1019,8 +1085,8 @@ fn decode_command(
         "command actor",
     )?;
     match command_actor {
-        Actor::User | Actor::Tool { .. } => {}
-        Actor::Core | Actor::Model { .. } | Actor::Recovery | Actor::Program { .. } => {
+        Actor::Core | Actor::User | Actor::Tool { .. } => {}
+        Actor::Model { .. } | Actor::Recovery | Actor::Program { .. } => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
                 value: actor_kind,

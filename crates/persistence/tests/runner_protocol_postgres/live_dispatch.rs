@@ -4,6 +4,7 @@ use super::*;
 use signalbox_domain::{
     RunnerLeaseState, ToolAttemptObservation, ToolResultContent, ToolResultText,
 };
+use signalbox_persistence::runner_protocol::RunnerConnectionTransitionOutcome;
 
 fn mismatches(correlation: &RunnerLeaseCorrelation) -> Vec<RunnerLeaseCorrelation> {
     let mut changed = Vec::new();
@@ -566,6 +567,85 @@ async fn omitted_or_started_claims_require_loss_and_cannot_be_replayed_afterward
                 .await
                 .is_err()
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn shutdown_loses_offered_and_claimed_leases_but_preserves_completed_results()
+-> Result<(), Box<dyn Error>> {
+    for transition in [
+        RunnerConnectionTransition::DaemonShutdown,
+        RunnerConnectionTransition::RunnerShutdown,
+    ] {
+        for state in [
+            RunnerLeaseState::Offered,
+            RunnerLeaseState::Claimed,
+            RunnerLeaseState::Completed,
+        ] {
+            let (_container, pool) = migrated_postgres().await?;
+            let (store, enrollment, _, pin, epoch) = stored_active_pin_fixture_with_authorization(
+                &pool,
+                ActivePinEffectCase::EffectFree,
+            )
+            .await?;
+            let correlation = pin.lease.correlation();
+            if state != RunnerLeaseState::Offered {
+                store
+                    .claim_tool_lease(enrollment.enrollment(), epoch, correlation.clone())
+                    .await?;
+            }
+            if state == RunnerLeaseState::Completed {
+                store
+                    .record_tool_lease_result(
+                        enrollment.enrollment(),
+                        epoch,
+                        correlation.clone(),
+                        success("settled"),
+                    )
+                    .await?;
+            }
+            let outcome = store
+                .transition_connection(enrollment.enrollment(), epoch, transition)
+                .await?;
+            let RunnerConnectionTransitionOutcome::Current(snapshot) = outcome else {
+                panic!("current shutdown epoch");
+            };
+            if state == RunnerLeaseState::Completed {
+                assert_eq!(snapshot.state(), RunnerConnectionState::Shutdown);
+                assert_eq!(
+                    snapshot.cause(),
+                    if transition == RunnerConnectionTransition::DaemonShutdown {
+                        RunnerConnectionCause::DaemonShutdown
+                    } else {
+                        RunnerConnectionCause::RunnerShutdown
+                    }
+                );
+            } else {
+                assert_eq!(snapshot.state(), RunnerConnectionState::Lost);
+                assert_eq!(snapshot.cause(), RunnerConnectionCause::TransportClosed);
+                let loss = store
+                    .load_current_connection_loss(enrollment.enrollment())
+                    .await?
+                    .expect("durable loss");
+                store
+                    .propagate_connection_loss_session(loss, correlation.dispatch.session())
+                    .await?;
+                assert_eq!(
+                    store
+                        .load_lease(correlation.lease, correlation.generation)
+                        .await?
+                        .expect("retained lease")
+                        .state(),
+                    if state == RunnerLeaseState::Offered {
+                        RunnerLeaseState::LostUnclaimed
+                    } else {
+                        RunnerLeaseState::LostClaimed
+                    }
+                );
+            }
+        }
     }
     Ok(())
 }

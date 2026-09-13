@@ -14,9 +14,9 @@ use crate::tests::planting::{
 use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{
     CHANGED_CONTENT, EMBEDDED_REPOSITORY_PATH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
-    MODEL_MESSAGE, NESTED_TRACKED_DIRECTORY, NESTED_TRACKED_PATH, TRACKED_PATH, commit_all,
-    create_fifo, execute, install_deleted_conflict, install_missing_skip_worktree_entry,
-    status_uses_bound_index_without_fifo_wait,
+    MODEL_MESSAGE, NESTED_TRACKED_DIRECTORY, NESTED_TRACKED_PATH, TRACKED_PATH, UNTRACKED_CONTENT,
+    UNTRACKED_PATH, commit_all, create_fifo, execute, install_deleted_conflict,
+    install_missing_skip_worktree_entry, status_uses_bound_index_without_fifo_wait,
 };
 
 #[test]
@@ -194,7 +194,7 @@ fn status_does_not_prune_a_malformed_embedded_repository_marker() {
 }
 
 #[test]
-fn status_bounds_directories_even_when_an_ignore_file_names_them() {
+fn status_prunes_directories_named_by_repository_ignore_rules() {
     let fixture = Fixture::new();
     fs::write(fixture.root().join(".gitignore"), "ignored/\n").expect("ignore fixture writes");
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -202,11 +202,9 @@ fn status_bounds_directories_even_when_an_ignore_file_names_them() {
     plant_over_budget_directory(fixture.root(), "ignored");
     let executor = fixture.executor();
 
-    let failure = executor
-        .execute_operation(LocalOperation::Status)
-        .expect_err("ignored over-budget directory still rejects safely");
+    let status = execute(&executor, LocalOperation::Status);
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(status["entries"], serde_json::json!([]));
 }
 
 #[test]
@@ -303,7 +301,7 @@ fn read_only_worktree_tools_leave_no_repository_lock() {
 }
 
 #[test]
-fn status_never_opens_an_oversized_repository_exclude() {
+fn status_accepts_repository_excludes_larger_than_the_object_fixture_budget() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
     let exclude = fs::OpenOptions::new()
@@ -369,5 +367,98 @@ fn status_does_not_reclassify_a_conflict_stage_as_untracked() {
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("conflict worktree file reads"),
         conflict_worktree_content.as_bytes()
+    );
+}
+
+#[test]
+fn status_honors_nested_ignore_rules_without_hiding_tracked_changes() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::create_dir(fixture.root().join("target")).expect("tracked artifact directory creates");
+    fs::write(fixture.root().join("target/tracked.txt"), INITIAL_CONTENT)
+        .expect("tracked artifact writes");
+    commit_all(&repository, "track an artifact");
+    fs::create_dir(fixture.root().join("nested")).expect("nested directory creates");
+    fs::create_dir(fixture.root().join("sibling")).expect("sibling directory creates");
+    fs::write(
+        fixture.root().join(".gitignore"),
+        "target/\n*.tmp\n!keep.tmp\ntracked.txt\n",
+    )
+    .expect("root ignore rules write");
+    fs::write(
+        fixture.root().join("nested/.gitignore"),
+        "!nested.tmp\nlocal.txt\n",
+    )
+    .expect("nested ignore rules write");
+    commit_all(&repository, "record ignore rules");
+    fs::write(repository.path().join("info/exclude"), "local-only.txt\n")
+        .expect("repository excludes write");
+    for path in [
+        "drop.tmp",
+        "keep.tmp",
+        "nested/nested.tmp",
+        "nested/hidden.tmp",
+        "nested/local.txt",
+        "sibling/nested.tmp",
+        "sibling/local.txt",
+        "local-only.txt",
+    ] {
+        fs::write(fixture.root().join(path), UNTRACKED_CONTENT).expect("untracked fixture writes");
+    }
+    for path in [TRACKED_PATH, "target/tracked.txt"] {
+        fs::write(fixture.root().join(path), CHANGED_CONTENT).expect("tracked fixture changes");
+    }
+
+    let status = execute(&fixture.executor(), LocalOperation::Status);
+    let paths = status["entries"]
+        .as_array()
+        .expect("status entries")
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("status path"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        paths,
+        [
+            "keep.tmp",
+            "nested/nested.tmp",
+            "sibling/local.txt",
+            "target/tracked.txt",
+            TRACKED_PATH
+        ]
+    );
+    let ignore_path = fixture.root().join(".gitignore");
+    let mut rules = fs::read_to_string(&ignore_path).expect("root rules read");
+    rules.push_str("!local-only.txt\n");
+    fs::write(ignore_path, rules).expect("worktree exception writes");
+    let status = execute(&fixture.executor(), LocalOperation::Status);
+    assert!(
+        status["entries"]
+            .as_array()
+            .expect("status entries")
+            .iter()
+            .any(|entry| entry["path"] == "local-only.txt")
+    );
+}
+
+#[test]
+fn status_does_not_follow_a_worktree_ignore_symlink() {
+    let fixture = Fixture::new();
+    let outside = tempfile::TempDir::new().expect("outside fixture creates");
+    let source = outside.path().join("rules");
+    fs::write(&source, "untracked.txt\n").expect("outside rules write");
+    std::os::unix::fs::symlink(&source, fixture.root().join(".gitignore"))
+        .expect("ignore symlink creates");
+    fs::write(fixture.root().join(UNTRACKED_PATH), UNTRACKED_CONTENT)
+        .expect("untracked file writes");
+
+    let status = execute(&fixture.executor(), LocalOperation::Status);
+
+    assert!(
+        status["entries"]
+            .as_array()
+            .expect("status entries")
+            .iter()
+            .any(|entry| entry["path"] == UNTRACKED_PATH)
     );
 }

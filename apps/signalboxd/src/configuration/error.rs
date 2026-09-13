@@ -154,6 +154,8 @@ pub enum HubModelConfigurationError {
     InvalidApprovalJudge,
     /// The configured approval judge names no direct model selection.
     DanglingApprovalJudgeSelection,
+    /// Session titles must name one configured direct model selection.
+    InvalidSessionTitles,
     /// One daemon tool family appeared more than once.
     DuplicateToolFamily,
     /// The required compaction configuration table is absent.
@@ -315,6 +317,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::DanglingApprovalJudgeSelection => {
                 "model configuration contains a dangling approval judge selection"
+            }
+            Self::InvalidSessionTitles => {
+                "session_titles must contain a selection_id naming a configured model"
             }
             Self::MissingCredentialProfiles => {
                 "model configuration has no credential profile billing registry"

@@ -244,6 +244,7 @@ fn parse_usage_call_kind(value: &str) -> Option<UsageCallKind> {
         "model_call" => Some(UsageCallKind::ModelCall),
         "approval_judge" => Some(UsageCallKind::ApprovalJudge),
         "context_compaction" => Some(UsageCallKind::ContextCompaction),
+        "session_title" => Some(UsageCallKind::SessionTitle),
         _ => None,
     }
 }
@@ -489,6 +490,7 @@ const fn usage_call_kind_dto(kind: UsageCallKind) -> WebUsageCallKind {
         UsageCallKind::ModelCall => WebUsageCallKind::ModelCall,
         UsageCallKind::ApprovalJudge => WebUsageCallKind::ApprovalJudge,
         UsageCallKind::ContextCompaction => WebUsageCallKind::ContextCompaction,
+        UsageCallKind::SessionTitle => WebUsageCallKind::SessionTitle,
     }
 }
 

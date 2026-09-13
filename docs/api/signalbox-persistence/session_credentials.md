@@ -73,6 +73,11 @@ impl ModelCredentialFamilyCatalog {
         selected: signalbox_domain::ResolvedProviderTarget,
         fast_mode: signalbox_domain::FastMode,
     ) -> option::Option<&str>;
+    pub fn migration_fallback_family_for_call(
+        &self,
+        selected: signalbox_domain::ResolvedProviderTarget,
+        fast_mode: signalbox_domain::FastMode,
+    ) -> option::Option<&str>;
     pub fn serving_target_for_call(
         &self,
         selected: signalbox_domain::ResolvedProviderTarget,

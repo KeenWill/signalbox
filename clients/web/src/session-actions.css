@@ -1,0 +1,107 @@
+.session-actions {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--product-space);
+  font-size: 0.75rem;
+}
+
+.session-actions > .session-compact-header {
+  padding: calc(var(--product-space) / 2) var(--product-space);
+}
+
+.session-action-buttons,
+.session-action-confirmation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--product-space);
+}
+
+.session-action-entry {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.session-actions p {
+  margin: 0;
+}
+
+.session-actions button {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.session-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.session-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.session-actions button:disabled {
+  opacity: 0.5;
+}
+
+.session-actions small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.catalog-surface .attention-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.catalog-surface .attention-judge {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--product-space);
+  margin: 0;
+  padding: 0 var(--product-space) var(--product-space);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.catalog-surface > .catalog-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--product-space);
+  font-size: 0.75rem;
+}
+
+.catalog-surface .attention-list li > p {
+  margin: 0;
+  padding: 0 var(--product-space) var(--product-space);
+  overflow-wrap: anywhere;
+}
+
+.session-action-buttons {
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-action-buttons button {
+  flex-shrink: 0;
+  padding: 2px 4px;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.session-actions > .session-action-confirmation,
+.session-actions > p {
+  margin: 0 12px;
+}
+
+.session-actions .session-header-line {
+  gap: 4px;
+}
+
+.session-actions .session-header-context {
+  flex: 1;
+}

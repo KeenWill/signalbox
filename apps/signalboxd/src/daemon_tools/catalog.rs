@@ -154,6 +154,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
                 || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
                 || LOCAL_GIT_TOOL_NAMES.contains(&name)
                 || name == signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME
+                || name == super::review_diff::NAME
                 || matches!(
                     name,
                     SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME

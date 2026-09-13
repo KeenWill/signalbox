@@ -183,9 +183,7 @@ impl RunnerProtocolStore {
                 if !intact
                     || !matches!(
                         connection.state(),
-                        RunnerConnectionState::Connected
-                            | RunnerConnectionState::Suspect
-                            | RunnerConnectionState::Shutdown
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
                     )
                 {
                     RunnerLeaseResumeOutcome::LoseConnection(connection)

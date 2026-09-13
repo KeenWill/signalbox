@@ -24,7 +24,7 @@ enum InventoryCase {
 #[derive(Clone, Copy, Debug)]
 enum PriorConnection {
     Connected,
-    Shutdown,
+    RunnerShutdown,
     Lost,
 }
 
@@ -48,7 +48,7 @@ async fn reconnect_phases_obey_recorded_results_and_connection_loss() -> Result<
 {
     for prior in [
         PriorConnection::Connected,
-        PriorConnection::Shutdown,
+        PriorConnection::RunnerShutdown,
         PriorConnection::Lost,
     ] {
         for inventory in [
@@ -111,7 +111,7 @@ async fn check_reconnect(
     )?
     .into_parts();
     let arguments = serde_json::json!({"text": "reconciled echo"}).to_string();
-    let completes = !matches!(prior, PriorConnection::Lost)
+    let completes = matches!(prior, PriorConnection::Connected)
         && matches!(
             inventory,
             InventoryCase::Waiting
@@ -178,7 +178,7 @@ async fn check_reconnect(
         assert_eq!(claimed.correlation, offer.correlation);
         match prior {
             PriorConnection::Connected => {}
-            PriorConnection::Shutdown => {
+            PriorConnection::RunnerShutdown => {
                 service
                     .transition_connection(
                         receipt.enrollment_id,
@@ -231,21 +231,7 @@ async fn check_reconnect(
                 ..Default::default()
             },
         };
-        let first = service.resume(request.clone()).await;
-        let resumed = if matches!(prior, PriorConnection::Shutdown) && !completes {
-            assert_eq!(
-                first.expect_err("a closed epoch is not rewritten to lost"),
-                signalboxd::runner_protocol_runtime::RunnerRegistrationFailure::resume(
-                    signalbox_runner_wire::AvailableCorrelation::ConnectionEpoch(
-                        receipt.connection_epoch
-                    ),
-                    signalbox_runner_wire::RejectionCode::Unavailable
-                )
-            );
-            service.resume(request.clone()).await?
-        } else {
-            first?
-        };
+        let resumed = service.resume(request.clone()).await?;
         resumed.directives.validate_against(&request.inventory)?;
         assert!(resumed.connection_epoch > receipt.connection_epoch);
         assert_eq!(

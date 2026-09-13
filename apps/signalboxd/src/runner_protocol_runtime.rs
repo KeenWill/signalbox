@@ -723,21 +723,6 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::Unavailable,
             )
         };
-        let was_shutdown = connection.state() == RunnerConnectionState::Shutdown;
-        let connection = if was_shutdown {
-            self.store
-                .open_connection(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
-                .await
-                .map_err(|error| {
-                    store_failure(
-                        RunnerInboundFrameKind::Resume,
-                        AvailableCorrelation::ConnectionEpoch(prior_epoch),
-                        error,
-                    )
-                })?
-        } else {
-            connection
-        };
         let outcome = self
             .transition_connection_durably(
                 enrollment,
@@ -745,8 +730,7 @@ impl PostgresRunnerRegistrationService {
                 RunnerConnectionTransition::TransportClosed,
             )
             .await?;
-        if was_shutdown
-            || !matches!(outcome, RunnerConnectionTransitionOutcome::Current(snapshot) if snapshot.state() == RunnerConnectionState::Lost)
+        if !matches!(outcome, RunnerConnectionTransitionOutcome::Current(snapshot) if snapshot.state() == RunnerConnectionState::Lost)
         {
             return Err(retry());
         }
@@ -1913,18 +1897,32 @@ where
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    if transition_or_reject_not_current(
-                        &service,
-                        context,
-                        &mut writer,
-                        RunnerInboundFrameKind::Shutdown,
+                    let outcome = service.transition_connection(
+                        context.enrollment,
                         context.epoch,
                         RunnerConnectionTransition::DaemonShutdown,
-                    ).await? {
-                        write_message(&mut writer, Message::Shutdown(Shutdown {
-                            connection_epoch: context.epoch,
-                            reason: ShutdownReason::DaemonShutdown,
-                        })).await?;
+                    ).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?;
+                    match outcome {
+                        RunnerConnectionTransitionOutcome::Stale { .. } => {
+                            write_stale_epoch(&mut writer, RunnerInboundFrameKind::Shutdown, context.epoch).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(snapshot)
+                            if snapshot.cause() == RunnerConnectionCause::EnrollmentRevoked => {
+                            write_rejected(&mut writer, RunnerRegistrationFailure::new(
+                                RunnerInboundFrameKind::Shutdown,
+                                AvailableCorrelation::ConnectionEpoch(context.epoch),
+                                RejectionCode::EnrollmentRevoked,
+                            )).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(snapshot)
+                            if snapshot.state() == RunnerConnectionState::Shutdown
+                                && snapshot.cause() == RunnerConnectionCause::DaemonShutdown => {
+                            write_message(&mut writer, Message::Shutdown(Shutdown {
+                                connection_epoch: context.epoch,
+                                reason: ShutdownReason::DaemonShutdown,
+                            })).await?;
+                        }
+                        RunnerConnectionTransitionOutcome::Current(_) => {}
                     }
                     return Ok(());
                 }

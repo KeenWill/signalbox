@@ -453,3 +453,26 @@ fn worktree_diff_bounds_lossy_utf8_rendering() {
     assert_eq!(diff["truncated"], true);
     assert!(diff["patch"].as_str().expect("patch is text").len() <= MAX_DIFF_BYTES);
 }
+
+#[test]
+fn worktree_diff_admits_an_ignored_build_directory_above_the_discovery_boundary() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root().join(".gitignore"), "target/\n")
+        .expect("fixture ignores build artifacts");
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    commit_all(&repository, "ignore build artifacts");
+    let executor = fixture.executor();
+    executor
+        .execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree))
+        .expect("worktree diff succeeds before the build");
+    let build_directory = fixture.root().join("target");
+    fs::create_dir(&build_directory).expect("fixture build directory creates");
+    plant_over_budget_worktree(&build_directory);
+
+    let result = executor.execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree));
+
+    assert!(
+        result.is_ok(),
+        "build artifacts must not reject the diff: {result:?}"
+    );
+}
