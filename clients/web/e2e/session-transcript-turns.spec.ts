@@ -327,6 +327,34 @@ test('Escape collapses the focused turn before closing the product workspace', a
   await expect(page).not.toHaveURL(/workspace=true/)
 })
 
+for (const level of ['Summary', 'Tools', 'All details']) {
+  test(`Escape collapses the focused ${level} turn while session details stays open`, async ({
+    page,
+  }) => {
+    await turnApi(page)
+    await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+    await page.getByRole('radio', { name: level, exact: true }).check()
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    if (level !== 'All details')
+      await transcript.getByRole('button', { name: 'Open turn details', exact: true }).click()
+    const details = page.getByText('Session details', { exact: true })
+    const telemetry = page.getByText('Up to date as of', { exact: true })
+    await details.click()
+    await expect(telemetry).toBeVisible()
+    await transcript.getByRole('button', { name: 'Collapse turn', exact: true }).focus()
+    await page.keyboard.press('Escape')
+    await expect(
+      transcript.getByRole('button', { name: 'Open turn details', exact: true }),
+    ).toBeFocused()
+    await expect(telemetry).toBeVisible()
+    await expect(page.getByRole('radio', { name: level, exact: true })).toBeChecked()
+    await details.press('Escape')
+    await expect(telemetry).toBeHidden()
+    await expect(details).toBeFocused()
+    await expect(transcript).toBeVisible()
+  })
+}
+
 test('Escape collapses a focused turn while All details is selected', async ({ page }) => {
   await turnApi(page)
   await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
