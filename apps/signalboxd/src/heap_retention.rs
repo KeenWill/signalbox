@@ -6,9 +6,9 @@
 use std::{
     hint::black_box,
     process::Command,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 // Arbitrary nonzero fill makes each allocated page resident.
@@ -16,7 +16,7 @@ const PAGE_FILL: u8 = 0x55;
 const COMPLETION: &str = "heap retention verified";
 
 #[test]
-fn freed_worker_buffers_do_not_stay_resident_behind_small_live_objects() {
+fn freed_buffers_leave_resident_memory_while_allocating_workers_are_idle() {
     let output = Command::new(std::env::current_exe().expect("daemon test executable"))
         .args([
             "--exact",
@@ -41,29 +41,33 @@ fn freed_worker_buffers_do_not_stay_resident_behind_small_live_objects() {
 #[test]
 #[ignore = "invoked by the parent regression in an isolated daemon test process"]
 fn allocation_workload() {
-    // Each worker frees 4 MiB while retaining 2 KiB interleaved with those buffers.
-    let workload = WorkerBuffers {
+    // One live object in each size class keeps sparse worker pages alive.
+    // The 32 classes span small collection and buffer allocations.
+    let workload = SparseWorkerBuffers {
         workers: 32,
-        buffers_per_worker: 64,
-        buffer_bytes: 64 * 1024,
-        retained_bytes: 32,
+        sizes: &[
+            32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896,
+            1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 16384,
+        ],
+        bytes_per_class: 128 * 1024,
     };
-    let resident = workload.observe_reclamation();
-
-    // Of the fixture's 128 MiB burst, at least 96 MiB must leave the resident set.
-    // The allowance covers thread stacks, allocator metadata and continuing work.
+    // Reclaim at least 96 MiB from the roughly 128 MiB burst; stacks,
+    // live objects, slab fragmentation and allocator metadata retain the rest.
+    let minimum_released_kib = 96 * 1024;
+    // Allow background decay to run on a loaded test host, without forcing it.
+    let deadline = Duration::from_secs(30);
+    let resident = workload.observe_reclamation(minimum_released_kib, deadline);
     assert!(
-        resident.peak_kib.saturating_sub(resident.after_kib) >= 96 * 1024,
+        resident.peak_kib.saturating_sub(resident.after_kib) >= minimum_released_kib,
         "temporary buffers stayed resident: {resident:?}"
     );
     println!("{COMPLETION}: {resident:?}");
 }
 
-struct WorkerBuffers {
+struct SparseWorkerBuffers {
     workers: usize,
-    buffers_per_worker: usize,
-    buffer_bytes: usize,
-    retained_bytes: usize,
+    sizes: &'static [usize],
+    bytes_per_class: usize,
 }
 
 #[derive(Debug)]
@@ -72,35 +76,49 @@ struct ResidentObservation {
     after_kib: usize,
 }
 
-impl WorkerBuffers {
-    fn observe_reclamation(self) -> ResidentObservation {
-        let barrier = Arc::new(Barrier::new(self.workers + 1));
+impl SparseWorkerBuffers {
+    fn observe_reclamation(
+        self,
+        minimum_released_kib: usize,
+        deadline: Duration,
+    ) -> ResidentObservation {
+        let release_workers = Arc::new(Barrier::new(self.workers + 1));
+        let (send, receive) = mpsc::channel();
         let handles: Vec<_> = (0..self.workers)
             .map(|_| {
-                let barrier = Arc::clone(&barrier);
+                let release_workers = Arc::clone(&release_workers);
+                let send = send.clone();
                 thread::spawn(move || {
-                    let mut buffers = Vec::with_capacity(self.buffers_per_worker);
-                    let mut retained = Vec::with_capacity(self.buffers_per_worker);
-                    for _ in 0..self.buffers_per_worker {
-                        buffers.push(black_box(vec![PAGE_FILL; self.buffer_bytes]));
-                        retained.push(black_box(vec![PAGE_FILL; self.retained_bytes]));
+                    let mut buffers = Vec::new();
+                    let mut retained = Vec::new();
+                    for &size in self.sizes {
+                        retained.push(black_box(vec![PAGE_FILL; size]));
+                        for _ in 0..self.bytes_per_class / size {
+                            buffers.push(black_box(vec![PAGE_FILL; size]));
+                        }
                     }
-                    barrier.wait();
-                    barrier.wait();
-                    drop(buffers);
-                    continue_small_allocations();
-                    barrier.wait();
-                    barrier.wait();
+                    send.send(buffers).expect("freeing thread receives buffers");
+                    drop(send);
+                    release_workers.wait();
                     black_box(retained);
                 })
             })
             .collect();
-        barrier.wait();
+        drop(send);
+        let buffers = receive.into_iter().collect::<Vec<_>>();
         let peak_kib = resident_kib();
-        barrier.wait();
-        barrier.wait();
-        let after_kib = resident_kib();
-        barrier.wait();
+        drop(buffers);
+        let start = Instant::now();
+        let mut after_kib = resident_kib();
+        while peak_kib.saturating_sub(after_kib) < minimum_released_kib
+            && start.elapsed() < deadline
+        {
+            // Only the freeing thread stays active; allocating workers remain idle.
+            black_box((0..128).map(|_| vec![PAGE_FILL; 1024]).collect::<Vec<_>>());
+            thread::sleep(Duration::from_millis(1));
+            after_kib = resident_kib();
+        }
+        release_workers.wait();
         for handle in handles {
             handle.join().expect("allocation worker completed");
         }
@@ -108,14 +126,6 @@ impl WorkerBuffers {
             peak_kib,
             after_kib,
         }
-    }
-}
-
-fn continue_small_allocations() {
-    // Keep worker heaps active through ordinary allocations, without forced collection.
-    for _ in 0..2500 {
-        black_box((0..128).map(|_| vec![PAGE_FILL; 1024]).collect::<Vec<_>>());
-        thread::sleep(Duration::from_millis(1));
     }
 }
 
