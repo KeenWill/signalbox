@@ -26,12 +26,9 @@ export const excerptFields = (excerpt?: WebTimelineTextExcerpt | null): Fields =
     return {}
   try {
     return fields(
-      JSON.parse(excerpt.text, (_key, value: unknown) => {
-        // Keep the original excerpt when Number would change integer evidence, including overflow.
-        if (
-          typeof value === 'number' &&
-          (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value)))
-        )
+      JSON.parse(excerpt.text, (_key, value: unknown, context?: { source?: string }) => {
+        // Keep the original excerpt whenever rendering the parsed number would change its token.
+        if (typeof value === 'number' && String(value) !== context?.source)
           throw new RangeError('JSON number requires its original representation')
         return value
       }),

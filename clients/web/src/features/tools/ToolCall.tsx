@@ -104,14 +104,12 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
   const argv = Array.isArray(args.arguments)
     ? args.arguments.map((arg) => JSON.stringify(arg)).join(' ')
     : ''
-  const command =
-    textField(args.command ?? args.cmd) ||
-    [typeof args.program === 'string' ? JSON.stringify(args.program) : '', argv]
-      .filter(Boolean)
-      .join(' ')
+  const command = [typeof args.program === 'string' ? JSON.stringify(args.program) : '', argv]
+    .filter(Boolean)
+    .join(' ')
   const outcome = fields(result.outcome)
   const confinement = fields(result.confinement)
-  const code = result.exit_code ?? outcome.code
+  const code = outcome.code
   const stdout = fields(result.stdout)
   const stderr = fields(result.stderr)
   return (
@@ -120,9 +118,7 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
       {typeof args.timeout_seconds === 'number' && (
         <small>Timeout: {args.timeout_seconds} seconds</small>
       )}
-      {textField(args.working_directory ?? args.workdir) && (
-        <small>In {textField(args.working_directory ?? args.workdir)}</small>
-      )}
+      {textField(args.working_directory) && <small>In {textField(args.working_directory)}</small>}
       {typeof code === 'number' && <strong>Exit {code}</strong>}
       {typeof outcome.kind === 'string' && (
         <span>
@@ -137,8 +133,8 @@ function Command({ arguments: args, result, resultExcerpt }: RendererProps) {
         <small>Sandbox availability: {fieldLabel(confinement.availability)}</small>
       )}
       {typeof result.diagnostic === 'string' && <small>{fieldLabel(result.diagnostic)}</small>}
-      <TextPreview text={textField(stdout.text ?? result.stdout ?? result.output)} label="Output" />
-      <TextPreview text={textField(stderr.text ?? result.stderr)} label="Error output" />
+      <TextPreview text={textField(stdout.text)} label="Output" />
+      <TextPreview text={textField(stderr.text)} label="Error output" />
       {(stdout.completeness === 'truncated' || stderr.completeness === 'truncated') && (
         <small>Output was trimmed</small>
       )}
