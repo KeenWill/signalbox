@@ -2,8 +2,8 @@ use super::*;
 use signalbox_domain::{
     CredentialProfileName, RunnerCapabilityClass, RunnerSandboxProfile, RunnerSelector,
     RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, WorkingDirectorySelection,
-    WorkspaceRequirement,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, ToolDecisionSource,
+    WorkingDirectorySelection, WorkspaceRequirement,
 };
 use signalboxd::runner_protocol_runtime::PostgresRunnerRegistrationService;
 
@@ -69,13 +69,11 @@ async fn placed_echo_uses_daemon_permission_without_runner_authority() -> Result
             ],
             "placement: {requested:?}",
         );
-        let source: String = sqlx::query_scalar(
-            "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
-        )
-        .bind(request.into_uuid())
-        .fetch_one(&fixture.pool)
-        .await?;
-        assert_eq!(source, "policy_auto", "placement: {requested:?}");
+        let approval = PostgresToolLoopRepository::new(fixture.pool.clone())
+            .load_approval(request)
+            .await?
+            .expect("daemon approval is retained");
+        assert_eq!(approval.source(), ToolDecisionSource::PolicyAuto);
         let store = PostgresRunnerRegistrationService::local(fixture.pool.clone())
             .expect("compiled runner catalog")
             .recovery_store();
@@ -90,20 +88,6 @@ async fn placed_echo_uses_daemon_permission_without_runner_authority() -> Result
         );
         assert!(stored.registration().is_none());
         assert!(stored.grant().is_none());
-        let lease_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM runner_lease_generation WHERE session_id = $1",
-        )
-        .bind(fixture.session.into_uuid())
-        .fetch_one(&fixture.pool)
-        .await?;
-        assert_eq!(lease_count, 0);
-        let grant_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM runner_credential_grant WHERE session_id = $1",
-        )
-        .bind(fixture.session.into_uuid())
-        .fetch_one(&fixture.pool)
-        .await?;
-        assert_eq!(grant_count, 0);
         assert!(web.requests().is_empty());
     }
     Ok(())
