@@ -393,6 +393,13 @@ session; its Git executor enforces the bound repository's format. Local Git
 requests for a plain bound root return a known tool failure. Configured pushes
 use the same bound workspace.
 
+Local Git status and worktree diff honor repository `.gitignore` files and the
+common Git directory's `info/exclude` when discovering untracked paths. Ignored
+directories are pruned before their contents consume the worktree inspection
+budget; tracked changes remain visible. Nested ignore rules and negations use
+Git precedence. Ignore files are read through pinned, no-follow filesystem
+handles; ambient global excludes are not loaded.
+
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
 correlated with that exact attempt. Delegated turns retain the same recovery
