@@ -142,6 +142,16 @@ The web timeline descriptor includes the current catalog title summary and last
 activity category and timestamp, including for archived sessions. These header
 facts are read separately from the timeline bounds.
 
+`PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
+title, rejects other fields, and replaces metadata through the user command
+service. It loads and preserves tags, attributes, and the archive flag under the
+session lock in the replacement transaction. A title that exceeds the complete
+metadata size limit after merging returns 400 without changing metadata. A 204
+response acknowledges the committed replacement; equal replay returns the
+recorded result without reinstalling it. Title-only intent is retained with the
+receipt; reusing a full-replacement command ID for a title request, or the
+reverse, is conflicting reuse.
+
 ## Design decisions
 
 Cause and ancestry are recorded as independent facts, because deriving one from
@@ -521,7 +531,9 @@ issued it and is rejected under the other order. The catalog keeps only sessions
 carrying every required tag, excludes archived sessions unless they are
 requested, and searches by an exact case-sensitive substring of the title or the
 canonical session UUID. A catalog page, its exact total, and its cursor are read
-in one snapshot.
+in one snapshot. Catalog summaries require `repository_watch`, with null for a
+non-watch session; provenance requires nullable `head_branch` and `base_branch`
+members.
 
 The follow stream subscribes to the daemon's browser monitor fanout before
 reading the session state and its observed cursor from one repeatable-read

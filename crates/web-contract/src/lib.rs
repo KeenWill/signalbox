@@ -203,6 +203,20 @@ pub struct WebCreateSessionResponse {
     pub summary: WebSessionCatalogSummary,
 }
 
+/// Human title replacement preserving the other loaded metadata fields.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTitleRequest {
+    /// Durable identity retained when retrying the title edit.
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub command_id: String,
+    /// Exact nonempty human-facing title.
+    #[schemars(length(min = 1))]
+    pub title: String,
+}
+
 /// Small generated-contract fixture proving Rust/TypeScript round trips.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -586,6 +600,79 @@ pub enum WebModelSelection {
         /// Model alias UUID.
         alias_id: String,
     },
+}
+
+/// Complete loaded template catalog in name order.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateList {
+    pub templates: Vec<WebTemplateSummary>,
+}
+
+/// Creation defaults and workflow authority for one loaded template.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSummary {
+    pub name: String,
+    pub digest: String,
+    pub version: WebPositiveU64,
+    pub model: WebModelSelection,
+    pub model_label: String,
+    pub dangerous_tool_auto_approval: bool,
+    pub workflow_tools: Vec<WebTemplateWorkflowTool>,
+}
+
+/// One declared workflow operation with its effective approval posture.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateWorkflowTool {
+    pub name: String,
+    pub grant: WebTemplateWorkflowGrant,
+    pub posture: WebTemplateApprovalPosture,
+}
+
+/// Operation authority copied from the accepted template.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebTemplateWorkflowGrant {
+    Enabled { enabled: bool },
+    AllRegistrations,
+    Registrations { names: Vec<String> },
+}
+
+/// Effective workflow approval selection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTemplateApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+/// Source section that defines the selected template.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTemplateSourceKind {
+    Template,
+    ReviewLibrary,
+}
+
+/// Replacement source for one template or its shared review library.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateSaveRequest {
+    pub definition_toml: String,
+}
+
+/// Full accepted definition, including retained external prompt contents.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTemplateDetail {
+    pub summary: WebTemplateSummary,
+    pub system_prompt: String,
+    pub source_kind: WebTemplateSourceKind,
+    /// Version-one TOML document containing this template or its shared review library.
+    pub definition_toml: String,
 }
 
 /// Idempotent continuation command for one selected immutable frontier.
@@ -2726,6 +2813,11 @@ pub struct WebSessionCatalogActivity {
 #[serde(deny_unknown_fields)]
 pub struct WebSessionCatalogSummary {
     /// Retained origin of a repository-watch create action.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(
+        required,
+        schema_with = "nullable_schema::<WebRepositoryWatchProvenance>"
+    )]
     pub repository_watch: Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     #[serde(deserialize_with = "deserialize_present_option")]
@@ -2981,6 +3073,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             schema: create_session_response_schema,
         },
         ContractSchema {
+            name: "WebSessionTitleRequest",
+            decoder: "decodeWebSessionTitleRequest",
+            schema: canonical_schema(schemars::schema_for!(WebSessionTitleRequest).to_value()),
+        },
+        ContractSchema {
             name: "WebContractExample",
             decoder: "decodeWebContractExample",
             schema: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
@@ -3039,6 +3136,21 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebSessionLiveStreamEvent",
             decoder: "decodeWebSessionLiveStreamEvent",
             schema: live_event_schema,
+        },
+        ContractSchema {
+            name: "WebTemplateList",
+            decoder: "decodeWebTemplateList",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateList).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateSaveRequest",
+            decoder: "decodeWebTemplateSaveRequest",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateSaveRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebTemplateDetail",
+            decoder: "decodeWebTemplateDetail",
+            schema: canonical_schema(schemars::schema_for!(WebTemplateDetail).to_value()),
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -5373,8 +5485,12 @@ fn typescript_object(
 #[serde(deny_unknown_fields)]
 pub struct WebRepositoryWatchProvenance {
     /// Head branch in the dispatched pull-request context.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_schema::<String>")]
     pub head_branch: Option<String>,
     /// Base branch in the dispatched pull-request context.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_schema::<String>")]
     pub base_branch: Option<String>,
     /// Exact retained dispatch.
     pub dispatch_id: WebLiveResourceId,
@@ -5463,6 +5579,46 @@ mod tests {
             .expect("generated web-contract artifact is checked in");
 
         assert_eq!(checked_in, artifact.contents);
+    }
+
+    #[test]
+    fn repository_watch_members_require_explicit_nulls() {
+        let origin = serde_json::json!({
+            "head_branch": null, "base_branch": null,
+            "dispatch_id": "00000000-0000-0000-0000-000000000063",
+            "event_id": "00000000-0000-0000-0000-000000000064",
+            "repository": "signalbox/example", "rule_id": "review-response",
+            "rule_revision": "3", "action_ordinal": "2",
+            "event_kind": "review_submitted", "pull_request": "81",
+        });
+        assert!(
+            serde_json::from_value::<super::WebRepositoryWatchProvenance>(origin.clone()).is_ok()
+        );
+        for field in ["head_branch", "base_branch"] {
+            let mut missing = origin.clone();
+            missing
+                .as_object_mut()
+                .expect("origin object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebRepositoryWatchProvenance>(missing).is_err()
+            );
+        }
+        let summary = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "repository_watch": null, "title_summary": null, "title_truncated": false,
+            "archived": false, "current_turn_id": null, "active_turn_count": "0",
+            "queued_turn_count": "0", "state": "idle", "action": null, "goal_block": null,
+            "judge": { "actionable": "0", "completed": "0", "escalated": "0", "failed": "0" },
+            "last_activity": { "unix_microseconds": "1", "kind": "session" },
+        });
+        assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(summary.clone()).is_ok());
+        let mut missing = summary;
+        missing
+            .as_object_mut()
+            .expect("summary object")
+            .remove("repository_watch");
+        assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(missing).is_err());
     }
 
     #[test]

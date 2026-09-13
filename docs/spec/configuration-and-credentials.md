@@ -147,20 +147,38 @@ launch unshares the user, pid, ipc, uts, and network namespaces and mounts a
 fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
 container already isolates that namespace. The child inherits none of the
-daemon's environment; deployment settings supply additional runtime inputs. The
-required `[daemon_tools].sandboxed_exec_timeout_bound` is a friendly duration of
-at least one second or `"none"` and bounds the timeout requested from
-`sandboxed_exec`. The optional `[daemon_tools]` keys `sandbox_network` (default
-`"none"`, or `"host"`), `sandbox_read_only_binds` (default `[]`), and
-`sandbox_path_prepend` (default `[]`) select networking, absolute host paths
-bound read-only at the same paths, and absolute directories prepended to `PATH`.
-Programmatic read-only mounts at explicit destinations overlay the workspace,
-worktree, and working-directory binds. Host networking shares the daemon's
-network namespace and DNS configuration without destination filtering,
-independently of web-egress and tool-mapping policies. Optional
-`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
-`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
-stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
+daemon's environment by default; deployment settings and approved ambient
+credential requests supply additional runtime inputs. The required
+`[daemon_tools].sandboxed_exec_timeout_bound` is a friendly duration of at least
+one second or `"none"` and bounds the timeout requested from `sandboxed_exec`.
+The optional `[daemon_tools]` keys `sandbox_network` (default `"none"`, or
+`"host"`), `sandbox_read_only_binds` (default `[]`), and `sandbox_path_prepend`
+(default `[]`) select networking, absolute host paths bound read-only at the
+same paths, and absolute directories prepended to `PATH`. Programmatic read-only
+mounts at explicit destinations overlay the workspace, worktree, and
+working-directory binds. Host networking shares the daemon's network namespace
+and DNS configuration without destination filtering, independently of web-egress
+and tool-mapping policies. Optional `sandbox_rustup_home` and
+`sandbox_rustup_toolchain` set `RUSTUP_HOME` and `RUSTUP_TOOLCHAIN`; automatic
+toolchain installation is disabled, `CARGO_HOME` stays private and writable, and
+`npm_config_cache` is `/workspace/.npm`.
+
+A `sandboxed_exec` request may name `credential_purpose`, selecting an
+operator's `adapter = "sandboxed_exec"`, `delivery = "ambient"` credential
+profile. The profile names exactly one absolute `file` or environment
+`variable`, without model billing or pool membership. The judge's request
+context names the purpose. Only the judge's approval of that exact request
+admits the credential; blanket, per-tool automatic, and user-override approval
+do not substitute. The task reads the current catalog and receives a private
+read-only file snapshot at the configured path or that variable through the
+cleared supervisor and bubblewrap environment, never through command-line
+arguments. Ambient credential values must be valid UTF-8; load, reload, and use
+reject invalid encoding with `InvalidUtf8` and values empty after trimming
+trailing line termination with `Unavailable`. Its expanded path or environment
+set ends with the task, and the file snapshot is removed. Captured output passes
+through credential redaction before becoming tool evidence. Truncated captures
+redact a trailing credential prefix before JSON serialization; a truncated
+capture with lossy UTF-8 is fully redacted.
 
 Loss of sandbox supervision retains a supervision failure even when the dispatch
 capture is lost; an unconfirmed dispatch does not prove that the command never
@@ -197,27 +215,32 @@ name; the two integration constants are `brave-search-primary` and
 mapping names nothing else. A profile's delivery states how its secret reaches
 the provider. `file` reads an external credential file, `environment` reads the
 process variable named by `variable`, and `kubernetes_secret` reads the mounted
-Secret projection named by `file`. These deliveries serve Anthropic, OpenAI,
-Claude CLI, and GitHub profiles; a direct-HTTP adapter forms its header from the
-resolved value and rejects `env_key` because it uses no child environment. Each
-`FileCredentialAccess` instance binds one consumer-scoped map of references to
-sources, and a model adapter receives the complete byte-delivered profile
-catalog declared for it. `ambient` leaves login resolution to a CLI.
-`codex_home` names the Codex login directory; a configured home is an existing
-readable directory. An empty home makes that pool member unavailable. Delivery
-links the selected profile's `auth.json` into a private per-operation
-`CODEX_HOME` with an empty `config.toml`.
+Secret projection named by `file`. `onepassword` resolves the `op://` field
+reference in `item` through the absolute CLI path in `executable`. These
+deliveries serve Anthropic, OpenAI, Claude CLI, and GitHub profiles; a
+direct-HTTP adapter forms its header from the resolved value and rejects
+`env_key` because it uses no child environment. Each `FileCredentialAccess`
+instance binds one consumer-scoped map of references to sources, and a model
+adapter receives the complete byte-delivered profile catalog declared for it.
+`ambient` leaves login resolution to a CLI. `codex_home` names the Codex login
+directory; a configured home is an existing readable directory. An empty home
+makes that pool member unavailable. Delivery links the selected profile's
+`auth.json` into a private per-operation `CODEX_HOME` with an empty
+`config.toml`.
 
 GitHub integration profiles declare `adapter = "github"` without model billing
 or pool membership. `delivery = "file"` and `delivery = "kubernetes_secret"`
 require `file`; `delivery = "environment"` requires `variable`;
+`delivery = "onepassword"` requires `item` and `executable`;
 `delivery = "github_app"` requires positive `app_id` and `installation_id`
 integers and an absolute `private_key_file`. Validation names a missing or
 invalid App field. The `code_host` and `github` mappings use `github-primary`; a
 declared profile supplies that reference, otherwise `GITHUB_TOKEN_FILE` supplies
 it. Repository-watch entries select either `credential_file` or
 `credential_profile`. Environment-backed tool and polling profiles conflict when
-they name the same source variable.
+they name the same source variable. Vault item identity is independent of the
+CLI executable: model profiles within one adapter, different watched
+repositories, and the GitHub tool and polling roles may not share one item.
 
 The App key is read at token minting under the credential-file admission rules,
 never at boot. The daemon signs an RS256 JWT with issuance sixty seconds in the
@@ -288,6 +311,18 @@ SHA-256 over length-framed canonical values in a fixed frame order. Unknown
 fields, mistyped values, duplicate names, and every invalid field fail as
 sanitized `SessionTemplateConfigurationError` variants without file paths,
 prompt content, or document text.
+
+`GET /api/templates` lists the loaded templates in name order;
+`GET /api/templates/{name}` returns the selected definition with retained prompt
+contents and its template or shared review-library TOML source. Both use the
+browser API authority gate. `PUT /api/templates/{name}` uses browser mutation
+admission and the JSON request-body limit, validates a replacement TOML
+definition, atomically saves the template file, and installs it through serial
+configuration reload before returning its new digest. Unknown request and TOML
+fields are rejected; validation failures leave the file and loaded catalog
+unchanged. Generated review templates edit their shared library. A reload
+failure after writing reports that the file was saved but reload did not
+complete.
 
 Every session carries an append-only credential history. First handling of a
 native or imported session-creation command appends event ordinal 1 in the same
@@ -510,7 +545,9 @@ copy of it; a stored copy would be a second source.
 
 Each profile is its own credential; pointing two profiles at one vault item
 gives one account two names and two availability judgments, not a second
-account.
+account. Item identity is the vault and item components of the `op://`
+reference; section, field, and executable differences do not establish
+independence.
 
 Model-provider credentials are daemon-only and cannot be granted or injected to
 a runner. An explicit `ambient` login nevertheless retains same-user filesystem
@@ -575,12 +612,13 @@ contents. The credential of a currently routed S3 blob store is read after the
 recovery scan and before socket admission, as [blob storage](blob-storage.md)
 requires.
 
-Environment sources are checked at startup, reload, and use for presence and the
-same 64 KiB ceiling. Mounted Kubernetes Secrets use the file admission rules,
-including final-target checks through projection symlinks. Both sources are read
-at each use, trim trailing line termination, and seed the same exact-value
-redaction as file credentials. Source values never enter configuration
-snapshots.
+Environment sources, including ambient-task profiles, are checked at startup,
+reload, and use for presence, a nonempty value after trimming trailing line
+termination, and the same 64 KiB ceiling. Mounted Kubernetes Secrets use the
+file admission rules, including final-target checks through projection symlinks.
+Both sources are read at each use, trim trailing line termination, and seed the
+same exact-value redaction as file credentials. Source values never enter
+configuration snapshots.
 
 Unauthenticated session, search, usage, attention, and blob reads require an IP
 or `localhost` `Host` authority; another authority receives a 403
@@ -641,12 +679,14 @@ opaque to code: no build-provided constant is compared against it. Catalogs are
 read at startup. `reload_configuration` validates the complete replacement and
 atomically replaces the model and alias catalog, session-template catalog, and
 repository-watch configuration, existing Codex-home profile paths, and the
-source delivery, file path, or variable of existing byte-delivered model
-profiles. GitHub profile source fields are startup-only; changing them rejects
-reload. Other profile fields, pool policies, and other sections are
-startup-only. A replacement whose startup-only sections differ leaves the
-running configuration in place. Reload never rewrites evidence already recorded.
-File watching and polling are external callers of the verb.
+source delivery, file path, variable, item reference, or executable of existing
+byte-delivered model profiles, including switches to and from 1Password, and
+ambient sandboxed-task profiles and their source fields. GitHub profile source
+fields are startup-only; changing them rejects reload. Other profile fields,
+pool policies, and other sections are startup-only. A replacement whose
+startup-only sections differ leaves the running configuration in place. Reload
+never rewrites evidence already recorded. File watching and polling are external
+callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
@@ -761,9 +801,8 @@ changed in the current catalog; the claim protocol is owned by
 identity resolves against the loaded catalog and copies the complete bundle into
 the session's immutable defaults version one. The session records the template
 name and content digest and retains no live catalog reference, so an edit
-affects only creations first handled under the new catalog. The daemon exposes
-only sorted name and version summaries to clients; clients never receive prompt
-text or parse the file.
+affects only creations first handled under the new catalog. The process-protocol
+template list returns sorted name and version summaries.
 
 Model-selection validation happens at two boundaries on frozen semantic meaning
 only; credential presence is never consulted. At session creation the requested
@@ -802,6 +841,19 @@ cannot form an HTTP header, is a typed known preparation failure: the call ends
 `KnownFailed` with no automatic retry and no fallback. A provider rejecting the
 credential after send is ordinary outcome evidence, not a preparation failure;
 [model-call execution](model-call-execution.md) owns that outcome.
+
+1Password resolution runs
+[`op read`](https://developer.1password.com/docs/cli/reference/commands/read/)
+with no appended newline and caching disabled on each use. The daemon retains no
+secret cache, caps stdout at 64 KiB, discards stderr, and cancels the child when
+resolution is dropped. A single thirty-second deadline bounds capture and exit;
+timeout is credential unavailability. Source admission requires an `op://`
+reference with three or four non-empty slash-separated segments (vault, item,
+and field, with an optional section) and an absolute executable path without
+contacting the vault. Missing CLI, failed reads, unsuccessful exits, empty
+values, and oversized output are credential unavailability, never provider
+failures. Resolved bytes seed the same exact-value redaction as file credentials
+and never enter configuration snapshots.
 
 A code-host tool resolves its fixed `github-primary` reference only after the
 durable tool attempt is authorized `InFlight` and immediately before its

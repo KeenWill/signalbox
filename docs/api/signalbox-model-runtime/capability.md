@@ -28,6 +28,11 @@ impl ModelCapabilities {
         capability: option::Option<ImagePresentationCapability>,
     ) -> Self;
     pub const fn image_presentation(&self) -> option::Option<&ImagePresentationCapability>;
+    pub fn with_document_presentation(
+        self,
+        capability: option::Option<DocumentPresentationCapability>,
+    ) -> Self;
+    pub const fn document_presentation(&self) -> option::Option<&DocumentPresentationCapability>;
     pub fn with_reasoning_replay_family(self, family: option::Option<string::String>) -> Self;
     pub fn reasoning_replay_family(&self) -> option::Option<&str>;
     pub const fn reasoning_levels(&self) -> &set::BTreeSet<ReasoningLevel>;
