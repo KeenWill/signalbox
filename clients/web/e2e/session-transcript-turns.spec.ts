@@ -1897,3 +1897,105 @@ for (const [level, command] of [
       ).toContainText('passed')
   })
 }
+
+test('automatically scans past goal-only batch windows to earlier conversation', async ({
+  page,
+}) => {
+  const reads: string[] = []
+  const goal = detailExcerpt('Earlier goal outcome')
+  const batch = detailItems[1]
+  if (batch?.body.type !== 'tool_batch') throw new Error('Batch fixture missing')
+  await page.route('**/api/**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    const payload = transcriptFixture(url)
+    if (url.pathname.endsWith('/timeline')) {
+      if (url.searchParams.get('max_items') === '8')
+        reads.push(url.searchParams.get('anchor') ?? '')
+      const window = payload as WebSessionTimelineWindow
+      const items = window.items.map((item) => {
+        const kind = Number(item.address.event_sequence) > 99984 ? batch.kind : item.kind
+        return { ...item, kind, projected_structured_bytes: 64 + kind.length }
+      })
+      return route.fulfill({
+        json: {
+          ...window,
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
+          ),
+        },
+      })
+    }
+    if (
+      url.pathname.endsWith('/timeline-detail') &&
+      Number(url.searchParams.get('first')) > 99984
+    ) {
+      const item = {
+        ...batch,
+        address: { event_sequence: url.searchParams.get('first') ?? '' },
+        projected_body_bytes: 128 + Number(goal.total_bytes),
+        body: {
+          ...batch.body,
+          tools: [],
+          goal_events: [{ type: 'achieved' as const, generation: '1', text: goal }],
+        },
+      }
+      const detail = detailPage([item])
+      return route.fulfill({ json: { ...detail, session_id: transcriptSessionId } })
+    }
+    return route.fulfill({ json: payload })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await expect(transcript.getByText('Message 99984', { exact: true })).toBeVisible()
+  expect(reads).toEqual(['latest', 'before', 'before'])
+  await expect(transcript.getByRole('region', { name: 'Tools used' })).toHaveCount(0)
+  expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
+})
+
+test('does not offer a goal-text continuation inside a tool disclosure', async ({ page }) => {
+  const item = detailItems[1]
+  if (item?.body.type !== 'tool_batch') throw new Error('Tool fixture missing')
+  const tool = {
+    ...item,
+    body: {
+      ...item.body,
+      tools: item.body.tools.map((entry) => ({
+        ...entry,
+        evidence: { type: 'request_only' as const },
+      })),
+    },
+  }
+  await turnApi(
+    page,
+    undefined,
+    [detailItems[0], tool].filter((entry) => entry !== undefined),
+  )
+  await page.route('**/timeline-detail?**', (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('first') !== '2') return route.fallback()
+    return route.fulfill({
+      json: detailPage([tool], {
+        ...resultCursor,
+        body: { ...resultCursor.body, field: 'goal_text' },
+      }),
+    })
+  })
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.getByRole('button', { name: 'exec_command', exact: true }).click()
+  await expect(transcript.getByRole('region', { name: 'exec_command details' })).toContainText(
+    'release status',
+  )
+  await expect(transcript.getByRole('button', { name: 'Read more', exact: true })).toHaveCount(0)
+  await expect(
+    transcript.getByRole('button', { name: 'Show more tools', exact: true }),
+  ).toHaveCount(0)
+})

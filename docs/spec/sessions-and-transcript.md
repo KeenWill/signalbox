@@ -559,25 +559,29 @@ each with at most eight headers and a shared detail budget of eight items and
 an equal share of the detail budget; unread body continuations remain available
 on demand. Attachment references are included in the response bound. Scrolling
 loads earlier or later windows. Loading a later window preserves the reading
-position; it does not automatically request the remaining history. Session and
-anchor changes reset the view; observation refreshes retain visible text while
-rereading loaded windows, or refresh from latest when following the confirmed
-actual timeline tail. User-driven backward navigation clears that tail intent;
-automatic scans through hidden tail records preserve it. Refreshes continue
-retaining current text through a failed reread. The session-scoped reader
-compares immutable detail facts, including identities, attachment references and
-excerpt byte totals and overlapping excerpt content, across initial reads and
-expanded event rereads. It retains facts for at most 24 recently read event
-addresses; changed excerpt lengths under different read budgets preserve
-compatible prefixes and retain the longest checked excerpt.
+position even when that window reaches the actual tail; it does not
+automatically request the remaining history. Following live growth resumes when
+the reader scrolls to that tail. Session and anchor changes reset the view;
+observation refreshes retain visible text while rereading loaded windows, or
+refresh from latest when following the confirmed actual timeline tail.
+User-driven backward navigation clears that tail intent; automatic scans through
+hidden tail records preserve it. Refreshes continue retaining current text
+through a failed reread. The session-scoped reader compares immutable detail
+facts, including identities, attachment references and excerpt byte totals and
+overlapping excerpt content, across initial reads and expanded event rereads. It
+retains facts for at most 24 recently read event addresses; changed excerpt
+lengths under different read budgets preserve compatible prefixes and retain the
+longest checked excerpt.
 
 Windows advance past metadata-only detail records, including goal-only tool
-batches hidden by the selected conversation summary, automatically within the
-workspace record budget and projected-byte budget. All returned headers, detail
-items and projected bytes are charged, including discarded records. The scan
-item budget is clamped to the advertised detail limit; each automatic read uses
-only the remaining scan allowance. Scanning stops at a visible item, a detail
-continuation, or an exhausted budget. An empty detail page preserves its
+batches hidden by the selected conversation summary, in the requested direction
+automatically within the workspace record budget and projected-byte budget. All
+returned headers, detail items and projected bytes are charged, including
+discarded records. The scan item budget is clamped to the advertised detail
+limit; each automatic read uses only the remaining scan allowance. Scanning
+stops at a visible item, a detail continuation, or an exhausted budget. Rapid
+edge events share one in-flight page read. Programmatic anchor and measurement
+adjustments do not start page reads. An empty detail page preserves its
 unreturned-item continuation. Scrolling again starts a fresh bounded scan using
 the timeline continuation. Turn segments retain window boundaries so prepending
 history preserves existing rows and their disclosures. Retained tool chips stay
@@ -595,12 +599,15 @@ message when its completed-turn closure is not loaded. Distinct physical tool
 attempts remain independently inspectable in event order even when they share
 one request. Later batch members load on demand at the batch position as
 separate tool chips. A cursor advancing to another member is exposed outside the
-preceding tool disclosure; same-member fields remain inside that disclosure.
+preceding tool disclosure; same-member argument, output and failure fields
+remain inside that disclosure. Goal-text cursors do not belong to tool
+disclosures.
 Provider failures remain visible at their event position, including before a
 later successful retry. Tool output reads use the matching physical attempt in
 the retained detail pages, including later turn segments. Expanded tool evidence
 stays beside its originating chip before later messages. Repeated terminal
-outcomes for the same turn and cause appear once. New browser profiles start in
+outcomes for the same turn and cause appear once at their first chronological
+position. New browser profiles start in
 Summary; stored level choices are preserved. Applying a level command clears
 local turn overrides and opened continuation readers even when that level is
 already selected. Tools shows tool chips with argument and output summaries. All

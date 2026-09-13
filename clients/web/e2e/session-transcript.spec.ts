@@ -38,8 +38,8 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   expect(Number(await transcript.getAttribute('data-mounted-rows'))).toBeLessThanOrEqual(24)
   await transcript.evaluate((element) => {
     element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
   })
-  await page.mouse.wheel(0, 900)
   await expect.poll(() => reads.filter((anchor) => anchor === 'after').length).toBeGreaterThan(0)
   await expect(surface).toHaveAttribute('aria-busy', 'false')
   // Allow completed-query renders and their scroll adjustments to settle.
@@ -47,11 +47,118 @@ test('scrolls a hundred thousand messages in both directions with bounded rows',
   expect(reads.filter((anchor) => anchor === 'after')).toHaveLength(1)
   await transcript.evaluate((element) => {
     element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
   })
-  await page.mouse.wheel(0, 900)
   await expect.poll(() => reads.filter((anchor) => anchor === 'after').length).toBe(2)
   await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('transcript-scroll.png') })
+})
+
+test('preserves the reading position when loading the final later window', async ({
+  page,
+}, testInfo) => {
+  const problems: string[] = []
+  page.on('pageerror', (error) => problems.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') problems.push(message.text())
+  })
+  let latest = 16
+  let releaseGrowth = () => {}
+  const growth = new Promise<void>((resolve) => {
+    releaseGrowth = resolve
+  })
+  let requestedLater = false
+  let releaseLater = () => {}
+  const later = new Promise<void>((resolve) => {
+    releaseLater = resolve
+  })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.pathname === `/api/sessions/${transcriptSessionId}/follow`) {
+      await growth
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body:
+          [
+            {
+              kind: 'snapshot',
+              snapshot: {
+                session_id: transcriptSessionId,
+                observed_through: '16',
+                active: null,
+                queued_turn_count: '0',
+                queued_turn_ids: [],
+                reconciliation: null,
+                runner: null,
+              },
+            },
+            {
+              kind: 'durable',
+              cursor: '17',
+              address: { event_sequence: '17' },
+              event_kind: 'input_accepted',
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      })
+    }
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+    if (url.pathname === '/api/attention')
+      return route.fulfill({
+        json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+      })
+    if (url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'after') {
+      requestedLater = true
+      await later
+    }
+    return route.fulfill({ json: transcriptFixture(url, latest) })
+  })
+  await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /^First/ }).click()
+  await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect.poll(() => requestedLater).toBe(true)
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  const anchor = transcript.getByText('Message 8', { exact: true })
+  await expect(anchor).toBeVisible()
+  const anchorTop = await anchor.evaluate((element) => element.getBoundingClientRect().top)
+  releaseLater()
+  await expect(surface).toHaveAttribute('aria-busy', 'false')
+  await expect(transcript).toHaveAttribute('data-total-loaded', '16')
+  await expect
+    .poll(async () =>
+      Math.abs(
+        (await anchor.evaluate((element) => element.getBoundingClientRect().top)) - anchorTop,
+      ),
+    )
+    .toBeLessThan(2)
+  await expect(transcript.getByText('Message 16', { exact: true })).not.toBeInViewport()
+  await page.screenshot({ path: testInfo.outputPath('final-window-anchor.png') })
+  await transcript.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(transcript.getByText('Message 16', { exact: true })).toBeVisible()
+  latest = 17
+  releaseGrowth()
+  await expect(transcript.getByText('Message 17', { exact: true })).toBeVisible()
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (element) => element.scrollHeight - element.scrollTop - element.clientHeight,
+      ),
+    )
+    .toBeLessThanOrEqual(1)
+  expect(problems).toEqual([])
 })
 
 for (const [maximumItems, internal] of [
@@ -612,5 +719,121 @@ for (const [itemLimit, byteLimit, expectedReads] of [
     await transcript.hover({ position: { x: 10, y: 10 } })
     await page.mouse.wheel(0, -900)
     await expect.poll(() => reads.length).toBeGreaterThan(expectedReads)
+  })
+}
+
+for (const budget of [8, 128]) {
+  test(`serializes rapid edge events and scans hidden later windows within the ${budget}-item budget`, async ({
+    page,
+  }) => {
+    const problems: string[] = []
+    page.on('pageerror', (error) => problems.push(error.message))
+    page.on('console', (message) => {
+      if (message.type() === 'error') problems.push(message.text())
+    })
+    const after: string[] = []
+    let release = () => {}
+    const nextPage = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const hidden = (sequence: string) => Number(sequence) > 8 && Number(sequence) <= 24
+    await page.route('**/api/**', async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/follow'))
+        return route.fulfill({ contentType: 'application/x-ndjson', body: '' })
+      if (url.pathname === '/api/attention')
+        return route.fulfill({
+          json: { cursor: '0', summaries: [], continuation_after_session_id: null },
+        })
+      const payload = transcriptFixture(url, 48)
+      if (url.pathname === '/api/bootstrap') {
+        const bootstrap =
+          payload as typeof import('../src/product.fixture').webContractBootstrapFixture
+        return route.fulfill({
+          json: {
+            ...bootstrap,
+            limits: { ...bootstrap.limits, max_timeline_detail_items: budget },
+          },
+        })
+      }
+      if (url.pathname.endsWith('/timeline')) {
+        if (url.searchParams.get('anchor') === 'after') {
+          after.push(url.searchParams.get('address') ?? '')
+          if (url.searchParams.get('address') === '8') await nextPage
+        }
+        const window =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineWindow
+        return route.fulfill({
+          json: {
+            ...window,
+            items: window.items.map((item) =>
+              hidden(item.address.event_sequence) ? { ...item, kind: 'turn_completed' } : item,
+            ),
+          },
+        })
+      }
+      if (
+        url.pathname.endsWith('/timeline-detail') &&
+        hidden(url.searchParams.get('first') ?? '0')
+      ) {
+        const detail =
+          payload as import('../src/generated/web-contract.mjs').WebSessionTimelineDetailPage
+        return route.fulfill({
+          json: {
+            ...detail,
+            projected_body_bytes: 128,
+            items: detail.items.map((item) => ({
+              ...item,
+              kind: 'turn_completed',
+              projected_body_bytes: 128,
+              body: {
+                type: 'turn_lifecycle',
+                turn_id: transcriptSessionId,
+                lifecycle: 'terminalized',
+                cause_code: 'completed',
+              },
+            })),
+          },
+        })
+      }
+      return route.fulfill({ json: payload })
+    })
+    await page.goto(`/sessions?workspace=true&session=${transcriptSessionId}`)
+    const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+    const surface = page.getByRole('region', { name: 'Transcript text', exact: true })
+    await expect(transcript.getByText('Message 48', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: /^First/ }).click()
+    await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    await transcript.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+      for (let index = 0; index < 40; index++) {
+        element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
+        element.dispatchEvent(new Event('scroll'))
+      }
+    })
+    await expect.poll(() => after.length).toBe(1)
+    await expect(surface).toHaveAttribute('aria-busy', 'true')
+    release()
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    if (budget === 8) {
+      // A hidden eight-item page exhausts this scan; each new gesture gets a fresh budget.
+      await page.waitForTimeout(200)
+      expect(after).toEqual(['8'])
+      for (const address of ['16', '24']) {
+        await transcript.evaluate((element) => {
+          element.scrollTop = element.scrollHeight
+          element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
+        })
+        await expect.poll(() => after).toContain(address)
+        await expect(surface).toHaveAttribute('aria-busy', 'false')
+      }
+    }
+    await expect(transcript.getByText('Message 25', { exact: true })).toBeVisible()
+    await expect(surface).toHaveAttribute('aria-busy', 'false')
+    await page.waitForTimeout(200)
+    expect(after).toEqual(['8', '16', '24'])
+    expect(Number(await transcript.getAttribute('data-total-loaded'))).toBeLessThanOrEqual(24)
+    expect(problems).toEqual([])
   })
 }

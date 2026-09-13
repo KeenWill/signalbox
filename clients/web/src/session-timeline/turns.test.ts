@@ -426,3 +426,26 @@ it('preserves an existing physical disclosure when earlier evidence is prepended
   expect(after.get(toolEvidenceKey(retained))).toBe(before.get(toolEvidenceKey(retained)))
   expect(new Set(after.values()).size).toBe(2)
 })
+
+it('keeps the first repeated outcome before an intervening turn', () => {
+  const terminal = detailItems[4]
+  const input = detailItems[0]
+  if (terminal?.body.type !== 'turn_lifecycle' || input?.body.type !== 'user_input')
+    throw new Error('Turn fixture missing')
+  const first = {
+    ...terminal,
+    address: { event_sequence: '1' },
+    kind: 'turn_failed' as const,
+    body: { ...terminal.body, cause_code: 'failed' },
+  }
+  const intervening = {
+    ...input,
+    address: { event_sequence: '2' },
+    body: { ...input.body, turn_id: '00000000-0000-0000-0000-000000000126' },
+  }
+  const duplicate = { ...first, address: { event_sequence: '3' } }
+  const turns = groupTranscriptTurns([first, intervening, duplicate])
+  expect(
+    turns.flatMap((turn) => [...turn.messages, ...(turn.outcome ? [turn.outcome] : [])]),
+  ).toEqual([first, intervening])
+})

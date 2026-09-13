@@ -284,13 +284,34 @@ function TranscriptWindow({
             eventSequence: page.window.continuation_before.event_sequence,
           }
         : undefined,
-    getNextPageParam: (page): SessionWindowAnchor | undefined =>
+    getNextPageParam: (page): TranscriptReadAnchor | undefined =>
       page.window.continuation_after
-        ? { kind: 'after', eventSequence: page.window.continuation_after.event_sequence }
+        ? {
+            kind: 'after',
+            detailLimits: automaticLimits.current,
+            eventSequence: page.window.continuation_after.event_sequence,
+          }
         : undefined,
     maxPages: TRANSCRIPT_RETAINED_WINDOWS,
     gcTime: 0,
   })
+  const pageRead = useRef(false)
+  const scanDirection = useRef<'before' | 'after'>(
+    initialAnchor.kind === 'first' || initialAnchor.kind === 'after' ? 'after' : 'before',
+  )
+  const readPage = useCallback(
+    (direction: 'before' | 'after') => {
+      if (pageRead.current) return
+      pageRead.current = true
+      const fetchPage =
+        direction === 'before' ? transcript.fetchPreviousPage : transcript.fetchNextPage
+      void fetchPage().finally(() => {
+        pageRead.current = false
+        automaticLimits.current = undefined
+      })
+    },
+    [transcript.fetchPreviousPage, transcript.fetchNextPage],
+  )
   useEffect(() => {
     if (transcript.error) console.error('Transcript load failed', transcript.error)
   }, [transcript.error])
@@ -654,9 +675,10 @@ function TranscriptWindow({
     )?.id ?? rows.find((row) => row.sequence === selectedSequence)?.id
   const emptyScanned = useRef({ headers: 0, items: 0, bytes: 0, first: '' })
   useEffect(() => {
-    const oldest = pages?.[0]
+    const direction = scanDirection.current
+    const boundary = direction === 'before' ? pages?.[0] : pages?.at(-1)
     if (
-      oldest?.details.some(
+      boundary?.details.some(
         (page) =>
           page.continuation ||
           page.items.some((item) =>
@@ -675,18 +697,24 @@ function TranscriptWindow({
       emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
       return
     }
-    if (transcript.isFetching || transcript.isError || !transcript.hasPreviousPage) return
-    const window = pages?.[0]?.window
+    if (
+      pageRead.current ||
+      transcript.isFetching ||
+      transcript.isError ||
+      !(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage)
+    )
+      return
+    const window = boundary?.window
     const first = window?.items[0]?.address.event_sequence
     if (first && first !== emptyScanned.current.first) {
       emptyScanned.current = {
         headers: emptyScanned.current.headers + (window?.items.length ?? 0),
         items:
           emptyScanned.current.items +
-          (oldest?.details.reduce((sum, page) => sum + page.items.length, 0) ?? 0),
+          (boundary?.details.reduce((sum, page) => sum + page.items.length, 0) ?? 0),
         bytes:
           emptyScanned.current.bytes +
-          (oldest?.details.reduce((sum, page) => sum + page.projected_body_bytes, 0) ?? 0),
+          (boundary?.details.reduce((sum, page) => sum + page.projected_body_bytes, 0) ?? 0),
         first,
       }
     }
@@ -703,9 +731,7 @@ function TranscriptWindow({
       max_timeline_detail_items: itemsLeft,
       max_timeline_detail_bytes: bytesLeft,
     }
-    void transcript.fetchPreviousPage().finally(() => {
-      automaticLimits.current = undefined
-    })
+    readPage(direction)
   }, [
     turns,
     detail,
@@ -716,7 +742,8 @@ function TranscriptWindow({
     transcript.isFetching,
     transcript.isError,
     transcript.hasPreviousPage,
-    transcript.fetchPreviousPage,
+    transcript.hasNextPage,
+    readPage,
   ])
   return (
     <section
@@ -773,6 +800,7 @@ function TranscriptWindow({
       <VirtualTranscript
         scrollRef={scrollRef}
         ids={ids}
+        loadingLater={transcript.isFetchingNextPage}
         initialEnd={initialAnchor.kind === 'latest'}
         onEndChange={(atEnd) => {
           readerAtEnd.current = atEnd
@@ -801,13 +829,13 @@ function TranscriptWindow({
         }
         selectedId={selectedId}
         onEdge={(direction) => {
-          if (transcript.isFetching || transcript.isError) return
-          if (direction === 'before' && transcript.hasPreviousPage) {
-            followLatest.current = false
-            emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
-            void transcript.fetchPreviousPage()
-          }
-          if (direction === 'after' && transcript.hasNextPage) void transcript.fetchNextPage()
+          if (pageRead.current || transcript.isFetching || transcript.isError) return
+          if (!(direction === 'before' ? transcript.hasPreviousPage : transcript.hasNextPage))
+            return
+          if (direction === 'before') followLatest.current = false
+          scanDirection.current = direction
+          emptyScanned.current = { headers: 0, items: 0, bytes: 0, first: '' }
+          readPage(direction)
         }}
         renderRow={(index, measure, style) => {
           const row = rows[index]
