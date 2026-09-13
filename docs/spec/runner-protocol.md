@@ -21,9 +21,10 @@ have durable request, receipt, and daemon handlers. The local catalog admits the
 `echo` capability class, the `ambient` profile, and the existing daemon `echo`
 tool as a combined-locus pure declaration with the identical model definition
 and permission default. The runner advertises configured availability for those
-entries, credential profiles, and repositories. An ambient runner also
-advertises `worktree_per_session`. It executes `echo` in a plain child process
-under `ambient` and retains the claimed phase and terminal result in a
+entries, credential profiles, and anonymous repositories. Credential-bound
+repositories remain configured locally but are not advertised. An ambient runner
+also advertises `worktree_per_session`. It executes `echo` in a plain child
+process under `ambient` and retains the claimed phase and terminal result in a
 versioned, fsynced, atomically published private journal. An initialized state
 root without that journal fails startup. Resume reconciles the retained lease
 phase and terminal result against durable daemon state. Provisioning resumes the

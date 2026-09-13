@@ -21,8 +21,8 @@ git_author_email = "runner@example.invalid"
 file = "/run/secrets/signalbox-github-token"
 injection_env = "GH_TOKEN"
 
-# Repository availability is advertised as one exact key/profile pair; neither
-# the credential path nor its value crosses the runner wire.
+# Anonymous repositories are advertised for acquisition. Credential-bound entries
+# remain local and unavailable for provisioning; secret paths and values stay local.
 [repositories.signalbox]
 clone_url = "https://github.com/KeenWill/signalbox.git"
 credential_profile = "github-runner"

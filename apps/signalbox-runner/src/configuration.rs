@@ -836,6 +836,24 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
     }
 
     #[test]
+    fn anonymous_repositories_are_advertised_for_provisioning() {
+        let fixture = configured_fixture();
+        let document = fixture.document.replace(
+            &format!(r#"credential_profile = "{CONFIGURED_PROFILE}""#),
+            "",
+        );
+        let configuration =
+            RunnerConfiguration::parse(&document).expect("anonymous repository configuration");
+        assert_eq!(
+            configuration.advertisement().repositories,
+            vec![signalbox_runner_wire::RepositoryEntry {
+                key: fixture.repository,
+                credential_profile: None,
+            }]
+        );
+    }
+
+    #[test]
     fn configured_credential_resolves_its_exact_non_secret_structure() {
         let fixture = configured_fixture();
         let configuration = RunnerConfiguration::parse(&fixture.document)
@@ -855,7 +873,7 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
             .expect("the configured credential and repository are valid");
         let repository = configuration
             .repository(&fixture.repository)
-            .expect("the advertised repository resolves");
+            .expect("the configured repository resolves");
 
         assert_eq!(repository.clone_url(), CONFIGURED_CLONE_URL);
         assert_eq!(repository.credential_profile(), Some(&fixture.profile));
