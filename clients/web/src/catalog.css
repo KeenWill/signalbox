@@ -87,3 +87,77 @@
 .catalog-title-truncated {
   flex-shrink: 0;
 }
+
+.catalog-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--product-space);
+  padding: 0 var(--product-space) var(--product-space);
+}
+
+.catalog-metadata > button {
+  margin-left: auto;
+}
+
+.catalog-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--product-space);
+  width: 100%;
+}
+
+.catalog-rename label {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.catalog-rename input {
+  width: 100%;
+  min-width: 0;
+}
+
+.catalog-rename [role="alert"] {
+  width: 100%;
+}
+
+.catalog-metadata {
+  background: var(--surface-1);
+  font-size: 0.65rem;
+}
+
+.catalog-metadata button,
+.catalog-metadata input {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.25rem 0.4rem;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.catalog-metadata button:focus-visible,
+.catalog-metadata input:focus-visible,
+.catalog-metadata a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.catalog-metadata button:disabled {
+  opacity: 0.6;
+}
+
+.catalog-metadata > a {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.4rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.catalog-metadata > a:hover {
+  background: var(--surface-3);
+}

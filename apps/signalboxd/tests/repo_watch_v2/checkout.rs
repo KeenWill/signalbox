@@ -635,7 +635,7 @@ async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(
     assert!(text.contains("This session has no Git push authority."));
     assert!(text.contains("No unresolved review threads were present at dispatch time."));
     assert!(text.contains("one-turn convergence check of mergeability and gating checks"));
-    assert!(text.contains("Post a plain reply on the pull request"));
+    assert!(text.contains("finish without a pull request comment or review submission"));
     assert!(text.contains("Target pull request: checkout/project#1"));
     assert!(text.contains("Title: Review the retained head"));
     assert!(text.contains("Head branch: review"));
