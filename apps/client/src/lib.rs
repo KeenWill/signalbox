@@ -424,6 +424,7 @@ async fn execute(
             command_id,
             system_prompt_file: _,
             placement,
+            runner_placement,
         } => match (selection, template) {
             (Some(selection), None) => {
                 create(
@@ -433,12 +434,20 @@ async fn execute(
                     command_id,
                     system_prompt_text,
                     placement,
+                    runner_placement.map(|placement| *placement),
                 )
                 .await
             }
             (None, Some(template)) => {
-                create_from_template(&mut client, &mut output, template, command_id, placement)
-                    .await
+                create_from_template(
+                    &mut client,
+                    &mut output,
+                    template,
+                    command_id,
+                    placement,
+                    runner_placement.map(|placement| *placement),
+                )
+                .await
             }
             _ => Err(ClientError::Protocol(
                 "create source was internally invalid",

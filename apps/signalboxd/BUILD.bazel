@@ -598,6 +598,33 @@ rust_integration_test(
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
 )
 
+rust_integration_test(
+    name = "runner_end_to_end",
+    srcs = ["tests/runner_end_to_end.rs", "tests/support/runner_process.rs"],
+    compile_data = [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+    ],
+    crate_features = ["test-support"],
+    crate_root = "tests/runner_end_to_end.rs",
+    data = [":signalboxd", "//apps/signalbox-runner:signalbox-runner"],
+    env = {
+        "TMPDIR": "/tmp",
+        "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+        "NEXTEST_BIN_EXE_signalbox_runner": "$(rootpath //apps/signalbox-runner:signalbox-runner)",
+    },
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "apps/signalboxd",
+        "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
+    },
+    tags = ["external", "no-sandbox"],
+    deps = CRATE_DEPS + [
+        "//apps/signalbox-runner:signalbox_runner",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
 rust_quality_tests(documented_crates = [
     ":signalboxd_lib",
     ":approval-judge-eval",

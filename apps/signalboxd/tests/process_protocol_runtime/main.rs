@@ -166,4 +166,5 @@ use input_admission::*;
 use reconciliation::*;
 use stop_turn::*;
 
+mod creation_runner_placement;
 mod runner_status;
