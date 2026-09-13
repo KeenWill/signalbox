@@ -2720,6 +2720,11 @@ pub struct WebSessionCatalogActivity {
 #[serde(deny_unknown_fields)]
 pub struct WebSessionCatalogSummary {
     /// Retained origin of a repository-watch create action.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(
+        required,
+        schema_with = "nullable_schema::<WebRepositoryWatchProvenance>"
+    )]
     pub repository_watch: Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     #[serde(deserialize_with = "deserialize_present_option")]
@@ -5367,8 +5372,12 @@ fn typescript_object(
 #[serde(deny_unknown_fields)]
 pub struct WebRepositoryWatchProvenance {
     /// Head branch in the dispatched pull-request context.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_schema::<String>")]
     pub head_branch: Option<String>,
     /// Base branch in the dispatched pull-request context.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_schema::<String>")]
     pub base_branch: Option<String>,
     /// Exact retained dispatch.
     pub dispatch_id: WebLiveResourceId,
@@ -5457,6 +5466,46 @@ mod tests {
             .expect("generated web-contract artifact is checked in");
 
         assert_eq!(checked_in, artifact.contents);
+    }
+
+    #[test]
+    fn repository_watch_members_require_explicit_nulls() {
+        let origin = serde_json::json!({
+            "head_branch": null, "base_branch": null,
+            "dispatch_id": "00000000-0000-0000-0000-000000000063",
+            "event_id": "00000000-0000-0000-0000-000000000064",
+            "repository": "signalbox/example", "rule_id": "review-response",
+            "rule_revision": "3", "action_ordinal": "2",
+            "event_kind": "review_submitted", "pull_request": "81",
+        });
+        assert!(
+            serde_json::from_value::<super::WebRepositoryWatchProvenance>(origin.clone()).is_ok()
+        );
+        for field in ["head_branch", "base_branch"] {
+            let mut missing = origin.clone();
+            missing
+                .as_object_mut()
+                .expect("origin object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<super::WebRepositoryWatchProvenance>(missing).is_err()
+            );
+        }
+        let summary = serde_json::json!({
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "repository_watch": null, "title_summary": null, "title_truncated": false,
+            "archived": false, "current_turn_id": null, "active_turn_count": "0",
+            "queued_turn_count": "0", "state": "idle", "action": null, "goal_block": null,
+            "judge": { "actionable": "0", "completed": "0", "escalated": "0", "failed": "0" },
+            "last_activity": { "unix_microseconds": "1", "kind": "session" },
+        });
+        assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(summary.clone()).is_ok());
+        let mut missing = summary;
+        missing
+            .as_object_mut()
+            .expect("summary object")
+            .remove("repository_watch");
+        assert!(serde_json::from_value::<super::WebSessionCatalogSummary>(missing).is_err());
     }
 
     #[test]

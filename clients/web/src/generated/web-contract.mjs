@@ -1294,6 +1294,8 @@ const schemas = {
           }
         },
         "required": [
+          "head_branch",
+          "base_branch",
           "dispatch_id",
           "action_ordinal",
           "repository",
@@ -1400,6 +1402,7 @@ const schemas = {
           }
         },
         "required": [
+          "repository_watch",
           "session_id",
           "title_summary",
           "title_truncated",
@@ -3020,6 +3023,8 @@ const schemas = {
           }
         },
         "required": [
+          "head_branch",
+          "base_branch",
           "dispatch_id",
           "action_ordinal",
           "repository",
@@ -3133,6 +3138,7 @@ const schemas = {
           }
         },
         "required": [
+          "repository_watch",
           "session_id",
           "title_summary",
           "title_truncated",
@@ -4612,6 +4618,8 @@ const schemas = {
               }
             },
             "required": [
+              "head_branch",
+              "base_branch",
               "dispatch_id",
               "action_ordinal",
               "repository",
