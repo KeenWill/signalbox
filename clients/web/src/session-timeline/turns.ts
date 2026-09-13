@@ -100,8 +100,10 @@ export function groupTranscriptTurns(items: readonly WebSessionTimelineDetail[])
           BigInt(event.address.event_sequence) >
             BigInt(group.result?.address.event_sequence ?? '0'),
       )
-    )
+    ) {
+      if (group.result && !group.messages.includes(group.result)) group.messages.push(group.result)
       group.result = undefined
+    }
     // A tool-producing model response is intermediate conversation, not the turn's final text.
     if (group.result?.body.type === 'model_call') {
       const callId = group.result.body.model_call_id

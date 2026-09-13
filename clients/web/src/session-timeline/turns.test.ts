@@ -71,8 +71,20 @@ it('keeps an unowned retired outcome visible without assigning it to a neighbori
   })
 })
 
-it('requires a completed turn before presenting a completed model response as final', () => {
-  expect(groupTranscriptTurns(detailItems.slice(0, 4))[0]?.result).toBeUndefined()
+it('keeps a completed response visible until its turn closure supplies final status', () => {
+  const pending = groupTranscriptTurns(detailItems.slice(0, 4))[0]
+  if (!pending) throw new Error('turn fixture missing')
+  expect(pending.result).toBeUndefined()
+  expect(pending.messages).toEqual([detailItems[0], detailItems[3]])
+  expect(
+    turnSummaryParts(pending).flatMap((part) =>
+      part.kind === 'message' ? [part.item.address.event_sequence] : [],
+    ),
+  ).toEqual(['1', '4'])
+
+  const completed = groupTranscriptTurns(detailItems)[0]
+  expect(completed?.result).toEqual(detailItems[3])
+  expect(completed?.messages).toEqual([detailItems[0]])
 })
 
 it('preserves steering messages after the tools that precede them', () => {
