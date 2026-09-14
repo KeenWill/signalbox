@@ -3243,9 +3243,9 @@ dependencies = [
 
 [[package]]
 name = "opus-rs"
-version = "0.1.32"
+version = "0.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f18e50e3ad1d816434f675150eca1b4c669e49cac7b685f733a88127cd75551"
+checksum = "a8380ecc3f3861651992dad78a8c135b3dcd94a3bcd279a733b5a078174742f6"
 
 [[package]]
 name = "outref"
