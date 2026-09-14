@@ -1164,5 +1164,8 @@ use attention::{
     web_attention_activity_kind, web_attention_state,
 };
 
+#[cfg(all(test, feature = "test-support"))]
+mod import_list_path_tests;
+
 #[cfg(test)]
 mod tests;
