@@ -514,6 +514,7 @@ pub struct RunnerConnection<S> {
     deferred_dispatch: Option<signalbox_runner_wire::Dispatch>,
     deferred_release: Option<signalbox_runner_wire::WorkspaceRelease>,
     deferred_provision: Option<signalbox_runner_wire::WorkspaceProvision>,
+    deferred_promotion: Option<signalbox_runner_wire::Enrolled>,
     offer_claimed: bool,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
@@ -726,6 +727,7 @@ where
             deferred_dispatch: None,
             deferred_release: None,
             deferred_provision: None,
+            deferred_promotion: None,
             offer_claimed: false,
             receipt,
             advertisement: advertisement.clone(),
@@ -935,6 +937,17 @@ where
                     return Err(RunnerConnectionError::Violation(
                         ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
+                }
+                if !self.startup_report.complete() {
+                    if self
+                        .deferred_promotion
+                        .as_ref()
+                        .is_some_and(|prior| prior != &promoted)
+                    {
+                        return Err(RunnerStateError::InvalidTransition.into());
+                    }
+                    self.deferred_promotion = Some(promoted);
+                    return Ok(None);
                 }
                 let receipt = EnrollmentReceipt::new(
                     promoted.request_id,

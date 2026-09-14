@@ -71,6 +71,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
             self.leak_sent = true;
         }
         if self.startup_report.complete()
+            && let Some(promoted) = self.deferred_promotion.take()
+        {
+            self.serve_message(state, Message::Enrolled(promoted))
+                .await?;
+        }
+        if self.startup_report.complete()
             && state.reconnect_inventory().workspace_operation.is_none()
         {
             if let Some(provision) = self.deferred_provision.take() {
