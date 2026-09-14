@@ -185,6 +185,19 @@ mod tests {
 
     #[test]
     fn context_prefix_reports_exact_utf8_counts_within_escaped_budget() {
+        let source = "💡\t\n\"\u{000b}".repeat(103);
+        let limit = 160;
+        let bounded = context_text(&source, limit);
+        let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
+        let (prefix, marker) = bounded.split_at(marker_start);
+        assert_eq!(prefix, "");
+        assert_eq!(
+            marker,
+            "\n[tool result truncated: retained 0 bytes; dropped 824 bytes]"
+        );
+        assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
+        assert_eq!(context_text(&bounded, limit), bounded);
+
         for source in [
             "🙂\u{0008}\u{000c}\t\"".repeat(101),
             "𝄞\r\n\\\"".repeat(100),
