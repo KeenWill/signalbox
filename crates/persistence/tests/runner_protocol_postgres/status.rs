@@ -99,11 +99,11 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
     let mut failures = Vec::new();
     let mut cursors = Vec::new();
     loop {
-        let page = read_runner_status(&pool, 1, after).await?;
+        let page = read_runner_status(&pool, 1, after.clone()).await?;
         assert_eq!(page.runners.len() + page.failures.len(), 1);
-        if let Some(next) = page.next_after {
-            assert_ne!(Some(next), after);
-            cursors.push(next);
+        if let Some(next) = &page.next_after {
+            assert_ne!(Some(next), after.as_ref());
+            cursors.push(next.clone());
         }
         runners.extend(page.runners);
         failures.extend(page.failures);
@@ -150,7 +150,20 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
     assert_eq!(all.runners, runners);
     assert_eq!(all.failures, failures);
     assert!(all.next_after.is_none());
-    let beyond = read_runner_status(&pool, 100, Some(RunnerStatusAfter::WorkspaceLeak)).await?;
+    let beyond = read_runner_status(
+        &pool,
+        100,
+        Some(RunnerStatusAfter::WorkspaceLeak {
+            runner: Uuid::max(),
+            locator: "sessions".to_owned(),
+            entry_digest:
+                signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest::try_new(
+                    "f".repeat(64),
+                )
+                .expect("canonical digest"),
+        }),
+    )
+    .await?;
     assert!(beyond.runners.is_empty());
     assert!(beyond.failures.is_empty());
     assert!(beyond.next_after.is_none());
@@ -195,4 +208,86 @@ fn private_workspace(
         manifest_id: WorkspaceManifestId::from_uuid(Uuid::now_v7()),
         recovery: None,
     }
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::workspaces::{
+        RunnerEvidenceDigest, RunnerWorkspaceLeak, RunnerWorkspaceLeakKind, RunnerWorkspaceLeakPage,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    store
+        .open_connection(receipt.identities().enrollment())
+        .await?;
+    let digest = |byte: char| {
+        RunnerEvidenceDigest::try_new(byte.to_string().repeat(64))
+            .expect("arbitrary canonical evidence identity")
+    };
+    let mut page = RunnerWorkspaceLeakPage {
+        registration_revision: RunnerGeneration::try_from_u64(1).expect("first revision"),
+        report_digest: digest('a'),
+        page: RunnerGeneration::try_from_u64(1).expect("first page"),
+        prior_page_digest: None,
+        final_page: true,
+        page_digest: digest('b'),
+        facts: ["sessions/orphan-a", "sessions/orphan-b"]
+            .into_iter()
+            .map(|locator| RunnerWorkspaceLeak {
+                kind: RunnerWorkspaceLeakKind::UnknownManifest,
+                locator: WorkspaceRelativePath::try_new(locator.to_owned())
+                    .expect("relative locator"),
+                entry_digest: digest('c'),
+                session: None,
+                placement_revision: None,
+            })
+            .collect(),
+    };
+    store
+        .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+        .await?;
+    store
+        .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+        .await?;
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak_page")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored, 1);
+    page.facts[0].kind = RunnerWorkspaceLeakKind::CleanupFailed;
+    assert!(
+        store
+            .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+            .await
+            .is_err()
+    );
+    let first = read_runner_status(&pool, 2, None).await?;
+    assert_eq!(first.runners.len(), 1);
+    assert_eq!(first.leaks.len(), 1);
+    assert_eq!(
+        first.leaks[0].1.kind,
+        RunnerWorkspaceLeakKind::UnknownManifest
+    );
+    let next = read_runner_status(&pool, 2, first.next_after).await?;
+    assert!(next.runners.is_empty());
+    assert!(next.failures.is_empty());
+    assert_eq!(next.leaks.len(), 1);
+    assert_eq!(next.leaks[0].1.locator.as_str(), "sessions/orphan-b");
+    assert!(next.next_after.is_none());
+    assert!(next.leaks[0].1.session.is_none());
+    page.page = page.page.checked_next().expect("next page");
+    page.prior_page_digest = Some(digest('b'));
+    assert!(
+        store
+            .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+            .await
+            .is_err(),
+        "a final page cannot be extended"
+    );
+    Ok(())
 }

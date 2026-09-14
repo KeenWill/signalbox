@@ -6,15 +6,11 @@ This design is not built; it extends
 ## Goal
 
 Complete the durable storage that built subsystems already reserve space for:
-general runner operation-failure evidence; retirement of an unacknowledged
-workspace release; imported-create placement authentication on replay; the
-instruction admitted set; credential-pool state and availability waits; and
-OAuth member-availability wakeups.
+general runner operation-failure evidence; imported-create placement
+authentication on replay; the instruction admitted set; credential-pool state
+and availability waits; and OAuth member-availability wakeups.
 
 ## Design
-
-A daemon transaction retires a workspace release the lost runner never
-acknowledged, so a lost runner leaves no release outstanding.
 
 For operations other than replacement provisioning, runner operation-failure
 evidence is stored in the transaction that resolves the correlated operation as
@@ -69,10 +65,6 @@ appended in the committing transaction, and the row locks the inventory names
 issued from that file.
 
 ## Acceptance criteria
-
-After a runner is lost, no workspace release that runner held stays
-unacknowledged; a daemon transaction has retired it. Releases held by reachable
-runners stay pending.
 
 Every acknowledged operation failure is readable after restart, and an equal
 retransmission returns the recorded receipt.

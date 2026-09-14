@@ -35,9 +35,35 @@ async fn unborn_repository_placement_and_replacement_receipt_round_trip_without_
     provision_with_candidate_capabilities(ProvisionCase::UnbornRepository).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_private_placement_releases_only_to_its_connected_owner()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::RetiredWorkspace).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_plain_directory_has_neither_release_nor_leak() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, runner, _, pin) = stored_pin_fixture(&pool).await?;
+    store.register(&runner, narrowed_advertisement()).await?;
+    append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
+    store
+        .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session: pin.placement.session(),
+        })
+        .await?;
+    let retained: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM runner_workspace_release) + (SELECT count(*) FROM runner_workspace_leak)").fetch_one(&pool).await?;
+    assert_eq!(retained, 0);
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProvisionCase {
     Supported,
+    RetiredWorkspace,
     UnbornRepository,
     Unsupported,
     RevisionWithoutRepository,
@@ -122,7 +148,9 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     };
     if !matches!(
         case,
-        ProvisionCase::Supported | ProvisionCase::UnbornRepository
+        ProvisionCase::Supported
+            | ProvisionCase::RetiredWorkspace
+            | ProvisionCase::UnbornRepository
     ) {
         let rejected =
             RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
@@ -194,7 +222,7 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     wrong.runner = predecessor.identities().runner();
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, &wrong)
+            .record_replacement_workspace_ready(authorization, &wrong, &ready_digest())
             .await
             .is_err()
     );
@@ -206,16 +234,16 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         )
         .await?;
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
         .await?;
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
         .await?;
     let mut changed = ready.clone();
     changed.manifest_id = WorkspaceManifestId::from_uuid(Uuid::now_v7());
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, &changed)
+            .record_replacement_workspace_ready(authorization, &changed, &ready_digest())
             .await
             .is_err()
     );
@@ -266,6 +294,47 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         .load_placement(session)
         .await?
         .expect("installed placement");
+    if case == ProvisionCase::RetiredWorkspace {
+        assert!(
+            store
+                .workspace_releases(candidate.identities().enrollment())
+                .await?
+                .is_empty(),
+            "an installed current manifest cannot be released"
+        );
+        let active = store
+            .load_enrollment(candidate.identities().enrollment())
+            .await?
+            .expect("promoted owner");
+        store.register(&active, narrowed_advertisement()).await?;
+        append_runner_registration_loss_projection(&pool, session).await?;
+        store
+            .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+            })
+            .await?;
+        let release = release_receipt(&ready, ready.manifest_id);
+        assert_eq!(
+            store
+                .workspace_releases(candidate.identities().enrollment())
+                .await?,
+            vec![release.clone()]
+        );
+        assert!(
+            store
+                .record_workspace_release_outcome(
+                    predecessor.identities().enrollment(),
+                    &release,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        store
+            .record_workspace_release_outcome(candidate.identities().enrollment(), &release, None)
+            .await?;
+    }
     if case == ProvisionCase::UnbornRepository {
         let persisted: (String, Option<String>, String) = sqlx::query_as("SELECT workspace_recovery_kind, workspace_revision, workspace_branch_name FROM runner_session_placement_record WHERE session_id = $1 AND workspace_manifest_id = $2")
             .bind(session.into_uuid()).bind(ready.manifest_id.into_uuid()).fetch_one(&pool).await?;
@@ -458,7 +527,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
     );
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
             .await
             .is_err()
     );
@@ -544,7 +613,7 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
         authorization.placement_revision,
     );
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
         .await?;
     let connection = store
         .load_connection(candidate.identities().enrollment())
@@ -577,7 +646,7 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
     );
     assert!(
         store
-            .replacement_workspace_releases(candidate.identities().enrollment())
+            .workspace_releases(candidate.identities().enrollment())
             .await?
             .is_empty()
     );
@@ -593,26 +662,34 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, false).await
+    rejected_staging_releases_ready_workspace(false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(true, false).await
+    rejected_staging_releases_ready_workspace(true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, true).await
+    rejected_staging_releases_ready_workspace(false, true, false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cleanup_failure_retires_release_and_preserves_exact_detail() -> Result<(), Box<dyn Error>>
+{
+    rejected_staging_releases_ready_workspace(false, false, true).await
 }
 
 async fn rejected_staging_releases_ready_workspace(
     late_ready: bool,
     successor_epoch: bool,
+    cleanup_failed: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -690,7 +767,7 @@ async fn rejected_staging_releases_ready_workspace(
     );
     if !late_ready {
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
             .await?;
     }
     let candidate_connection = store
@@ -724,18 +801,18 @@ async fn rejected_staging_releases_ready_workspace(
         wrong.runner = predecessor.identities().runner();
         assert!(
             store
-                .record_replacement_workspace_ready(authorization, &wrong)
+                .record_replacement_workspace_ready(authorization, &wrong, &ready_digest())
                 .await
                 .is_err()
         );
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
             .await?;
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, &ready, &ready_digest())
             .await?;
     }
-    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release WHERE authorization_id = $1 AND connection_epoch = $2")
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_release WHERE authorization_id = $1 AND connection_epoch = $2")
         .bind(authorization.authorization.into_uuid()).bind(Decimal::from(candidate_connection.epoch().get())).fetch_one(&pool).await?;
     assert_eq!(releases, 1);
     store
@@ -747,9 +824,9 @@ async fn rejected_staging_releases_ready_workspace(
         .await?;
     assert_eq!(
         store
-            .replacement_workspace_releases(candidate.identities().enrollment())
+            .workspace_releases(candidate.identities().enrollment())
             .await?,
-        vec![ready.clone()]
+        vec![release_receipt(&ready, ready.manifest_id)]
     );
     if successor_epoch {
         store
@@ -765,61 +842,141 @@ async fn rejected_staging_releases_ready_workspace(
         assert_ne!(successor.epoch(), candidate_connection.epoch());
         assert!(
             store
-                .replacement_workspace_releases(candidate.identities().enrollment())
+                .workspace_releases(candidate.identities().enrollment())
                 .await?
                 .is_empty()
         );
         assert!(
             store
-                .record_replacement_workspace_released(
+                .record_workspace_release_outcome(
                     candidate.identities().enrollment(),
-                    session,
-                    ready.placement_revision,
-                    ready.runner,
-                    ready.manifest_id
+                    &release_receipt(&ready, ready.manifest_id),
+                    None
                 )
                 .await
                 .is_err()
         );
-        let released: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_released WHERE authorization_id = $1").bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        let released: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_release_outcome outcome JOIN runner_workspace_release release USING (manifest_id) WHERE release.authorization_id = $1 AND outcome.outcome = 'completed'").bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(released, 0);
+        use signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceReleaseState;
+        assert_eq!(
+            store
+                .workspace_release_state(
+                    candidate.identities().enrollment(),
+                    &release_receipt(&ready, ready.manifest_id)
+                )
+                .await?,
+            Some(RunnerWorkspaceReleaseState::Unowned)
+        );
+        let page =
+            signalbox_persistence::runner_protocol::status::read_runner_status(&pool, 100, None)
+                .await?;
+        assert!(
+            page.leaks.iter().any(
+                |(runner, leak)| *runner == ready.runner && leak.locator == ready.relative_path
+            )
+        );
         return Ok(());
     }
     assert!(
         store
-            .record_replacement_workspace_released(
+            .record_workspace_release_outcome(
                 candidate.identities().enrollment(),
-                session,
-                ready.placement_revision,
-                ready.runner,
-                WorkspaceManifestId::from_uuid(Uuid::now_v7())
+                &release_receipt(&ready, WorkspaceManifestId::from_uuid(Uuid::now_v7())),
+                None
             )
             .await
             .is_err()
     );
+    let detail = serde_json::json!({"code":"rename-denied", "message":"cannot rename /private/work", "payload":{"path":"/private/work"}});
+    if cleanup_failed {
+        for _ in 0..2 {
+            store
+                .record_workspace_release_outcome(
+                    candidate.identities().enrollment(),
+                    &release_receipt(&ready, ready.manifest_id),
+                    Some(&detail),
+                )
+                .await?;
+        }
+        use signalbox_persistence::runner_protocol::workspaces::{
+            RunnerWorkspaceLeakKind, RunnerWorkspaceReleaseState,
+        };
+        assert_eq!(
+            store
+                .workspace_release_state(
+                    candidate.identities().enrollment(),
+                    &release_receipt(&ready, ready.manifest_id)
+                )
+                .await?,
+            Some(RunnerWorkspaceReleaseState::CleanupFailed(detail))
+        );
+        assert!(
+            store
+                .record_workspace_release_outcome(
+                    candidate.identities().enrollment(),
+                    &release_receipt(&ready, ready.manifest_id),
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .workspace_releases(candidate.identities().enrollment())
+                .await?
+                .is_empty()
+        );
+        let page =
+            signalbox_persistence::runner_protocol::status::read_runner_status(&pool, 100, None)
+                .await?;
+        assert!(
+            page.leaks
+                .iter()
+                .any(|(runner, leak)| *runner == ready.runner
+                    && leak.kind == RunnerWorkspaceLeakKind::CleanupFailed)
+        );
+        return Ok(());
+    }
     store
-        .record_replacement_workspace_released(
+        .record_workspace_release_outcome(
             candidate.identities().enrollment(),
-            session,
-            ready.placement_revision,
-            ready.runner,
-            ready.manifest_id,
+            &release_receipt(&ready, ready.manifest_id),
+            None,
         )
         .await?;
     store
-        .record_replacement_workspace_released(
+        .record_workspace_release_outcome(
             candidate.identities().enrollment(),
-            session,
-            ready.placement_revision,
-            ready.runner,
-            ready.manifest_id,
+            &release_receipt(&ready, ready.manifest_id),
+            None,
         )
         .await?;
     assert!(
         store
-            .replacement_workspace_releases(candidate.identities().enrollment())
+            .workspace_releases(candidate.identities().enrollment())
             .await?
             .is_empty()
     );
     Ok(())
+}
+
+fn ready_digest() -> signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest {
+    // Arbitrary canonical identity for typed persistence receipt fixtures.
+    signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest::try_new(
+        "d".repeat(64),
+    )
+    .expect("fixture digest")
+}
+
+fn release_receipt(
+    workspace: &ProvisionedWorkspace,
+    manifest: WorkspaceManifestId,
+) -> signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
+    signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
+        session: workspace.session,
+        placement_revision: workspace.placement_revision,
+        runner: workspace.runner,
+        manifest,
+    }
 }

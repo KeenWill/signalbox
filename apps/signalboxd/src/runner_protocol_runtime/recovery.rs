@@ -83,7 +83,7 @@ impl PostgresRunnerRegistrationService {
     ) -> Result<Vec<signalbox_runner_wire::WorkspaceRelease>, RunnerRegistrationFailure> {
         let workspaces = self
             .store
-            .replacement_workspace_releases(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
+            .workspace_releases(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
             .await
             .map_err(|error| {
                 store_failure(
@@ -109,7 +109,7 @@ impl PostgresRunnerRegistrationService {
                             )
                         })?,
                         runner_id: CanonicalUuid::from_uuid(workspace.runner.into_uuid()),
-                        manifest_id: CanonicalUuid::from_uuid(workspace.manifest_id.into_uuid()),
+                        manifest_id: CanonicalUuid::from_uuid(workspace.manifest.into_uuid()),
                     },
                 })
             })
@@ -137,12 +137,17 @@ impl PostgresRunnerRegistrationService {
                     ))
                 })?;
         self.store
-            .record_replacement_workspace_released(
+            .record_workspace_release_outcome(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
-                signalbox_domain::SessionId::from_uuid(correlation.session_id.into_uuid()),
-                revision,
-                RunnerId::from_uuid(correlation.runner_id.into_uuid()),
-                WorkspaceManifestId::from_uuid(correlation.manifest_id.into_uuid()),
+                &signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
+                    session: signalbox_domain::SessionId::from_uuid(
+                        correlation.session_id.into_uuid(),
+                    ),
+                    placement_revision: revision,
+                    runner: RunnerId::from_uuid(correlation.runner_id.into_uuid()),
+                    manifest: WorkspaceManifestId::from_uuid(correlation.manifest_id.into_uuid()),
+                },
+                None,
             )
             .await
             .map_err(failure)?;
@@ -164,6 +169,29 @@ impl PostgresRunnerRegistrationService {
             )
         };
         failure.validate().map_err(|_| rejected())?;
+        if let OperationCorrelation::Release(correlation) = &failure.correlation {
+            if failure.category != FailureCategory::WorkspaceCleanupFailed {
+                return Err(rejected());
+            }
+            let detail = serde_json::to_value(&failure.detail).map_err(|_| rejected())?;
+            self.store
+                .record_workspace_release_outcome(
+                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                    &super::workspaces::release_receipt(correlation).map_err(|_| rejected())?,
+                    Some(&detail),
+                )
+                .await
+                .map_err(|error| {
+                    store_failure(
+                        RunnerInboundFrameKind::OperationFailed,
+                        AvailableCorrelation::OperationFailure(failure.correlation.clone()),
+                        error,
+                    )
+                })?;
+            return Ok(signalbox_runner_wire::OperationFailureRecorded {
+                correlation: failure.correlation,
+            });
+        }
         let OperationCorrelation::Provision(correlation) = &failure.correlation else {
             return Err(rejected());
         };
@@ -310,7 +338,18 @@ impl PostgresRunnerRegistrationService {
             },
         };
         self.store
-            .record_replacement_workspace_ready(&authorization, &workspace)
+            .record_replacement_workspace_ready(
+                &authorization,
+                &workspace,
+                &signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest::try_new(
+                    receipt.ready.manifest_digest.as_str().to_owned(),
+                )
+                .ok_or_else(|| {
+                    failure(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::CorrelationMismatch,
+                    ))
+                })?,
+            )
             .await
             .map_err(failure)?;
         let outcome = self

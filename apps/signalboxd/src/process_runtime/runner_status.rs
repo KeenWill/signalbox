@@ -2,6 +2,9 @@
 
 use super::*;
 use signalbox_persistence::runner_protocol::status::{self as store, RunnerStatusAfter};
+use signalbox_persistence::runner_protocol::workspaces::{
+    RunnerEvidenceDigest, RunnerWorkspaceLeak, RunnerWorkspaceLeakKind,
+};
 use signalbox_process_protocol::{
     RunnerAuthorityState, RunnerFailureCategory, RunnerFailureDetail, RunnerOperationFailure,
     RunnerProvisionFailureCorrelation, RunnerStatusCursor, RunnerStatusFact,
@@ -16,19 +19,37 @@ pub(super) async fn handle_read_runner_status<Writer: AsyncWrite + Unpin>(
     services: &ConnectionServices,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError> {
-    let after = after.map(|cursor| match cursor {
-        RunnerStatusCursor::Enrollment { runner_id } => {
-            RunnerStatusAfter::Enrollment(runner_id.into_uuid())
+    let after = after
+        .map(|cursor| {
+            Ok(match cursor {
+                RunnerStatusCursor::Enrollment { runner_id } => {
+                    RunnerStatusAfter::Enrollment(runner_id.into_uuid())
+                }
+                RunnerStatusCursor::Placement { session_id } => {
+                    RunnerStatusAfter::Placement(session_id.into_uuid())
+                }
+                RunnerStatusCursor::OperationFailure { authorization_id } => {
+                    RunnerStatusAfter::OperationFailure(authorization_id.into_uuid())
+                }
+                RunnerStatusCursor::WorkspaceLeak {
+                    runner_id,
+                    locator,
+                    entry_digest,
+                } => RunnerStatusAfter::WorkspaceLeak {
+                    runner: runner_id.into_uuid(),
+                    locator,
+                    entry_digest: RunnerEvidenceDigest::try_new(entry_digest.as_str().to_owned())
+                        .ok_or(ErrorCode::Unavailable)?,
+                },
+            })
+        })
+        .transpose();
+    let spool = match after {
+        Ok(after) => {
+            spool_runner_status(&services.pool, version, request_id, page_size, after).await
         }
-        RunnerStatusCursor::Placement { session_id } => {
-            RunnerStatusAfter::Placement(session_id.into_uuid())
-        }
-        RunnerStatusCursor::OperationFailure { authorization_id } => {
-            RunnerStatusAfter::OperationFailure(authorization_id.into_uuid())
-        }
-        RunnerStatusCursor::WorkspaceLeak { .. } => RunnerStatusAfter::WorkspaceLeak,
-    });
-    let spool = spool_runner_status(&services.pool, version, request_id, page_size, after).await;
+        Err(code) => Err(code),
+    };
     drop(snapshot_permit);
     match spool {
         Ok(mut file) => write_spooled_file(writer, &mut file).await,
@@ -77,6 +98,12 @@ async fn spool_runner_status(
             .await
             .map_err(|_| ErrorCode::Unavailable)?;
     }
+    let leak_count = CanonicalU64::new(page.leaks.len() as u64);
+    for (runner, leak) in page.leaks {
+        write_spool_message(&mut file, version, request_id, project_leak(runner, leak)?)
+            .await
+            .map_err(|_| ErrorCode::Unavailable)?;
+    }
     write_spool_message(
         &mut file,
         version,
@@ -84,7 +111,7 @@ async fn spool_runner_status(
         ServerMessage::RunnerStatusEnd {
             runner_count: CanonicalU64::new(runner_count),
             failure_count,
-            leak_count: CanonicalU64::new(0),
+            leak_count,
             next_after: page
                 .next_after
                 .map(|after| match after {
@@ -99,7 +126,18 @@ async fn spool_runner_status(
                             authorization_id: wire_uuid(id),
                         })
                     }
-                    RunnerStatusAfter::WorkspaceLeak => Err(ErrorCode::Internal),
+                    RunnerStatusAfter::WorkspaceLeak {
+                        runner,
+                        locator,
+                        entry_digest,
+                    } => Ok(RunnerStatusCursor::WorkspaceLeak {
+                        runner_id: wire_uuid(runner),
+                        locator,
+                        entry_digest: signalbox_process_protocol::CanonicalDigest::try_new(
+                            entry_digest.as_str().to_owned(),
+                        )
+                        .map_err(|_| ErrorCode::Internal)?,
+                    }),
                 })
                 .transpose()?,
         },
@@ -153,6 +191,32 @@ fn project_fact(status: store::RunnerStatusFact) -> Result<ServerMessage, ErrorC
         },
     };
     Ok(ServerMessage::RunnerStatus { status })
+}
+
+fn project_leak(
+    runner: signalbox_domain::RunnerId,
+    leak: RunnerWorkspaceLeak,
+) -> Result<ServerMessage, ErrorCode> {
+    use signalbox_process_protocol::RunnerWorkspaceLeakKind as Kind;
+    Ok(ServerMessage::RunnerWorkspaceLeak {
+        leak: signalbox_process_protocol::RunnerWorkspaceLeak {
+            runner_id: wire_uuid(runner.into_uuid()),
+            kind: match leak.kind {
+                RunnerWorkspaceLeakKind::UnknownManifest => Kind::UnknownManifest,
+                RunnerWorkspaceLeakKind::RetiredPresent => Kind::RetiredPresent,
+                RunnerWorkspaceLeakKind::ManifestConflict => Kind::ManifestConflict,
+                RunnerWorkspaceLeakKind::CleanupFailed => Kind::CleanupFailed,
+                RunnerWorkspaceLeakKind::Unreconciled => Kind::Unreconciled,
+            },
+            locator: leak.locator.as_str().to_owned(),
+            entry_digest: signalbox_process_protocol::CanonicalDigest::try_new(
+                leak.entry_digest.as_str().to_owned(),
+            )
+            .map_err(|_| ErrorCode::Internal)?,
+            session_id: leak.session.map(|session| wire_uuid(session.into_uuid())),
+            placement_revision: leak.placement_revision.map(Into::into),
+        },
+    })
 }
 
 fn project_failure(failure: store::RunnerStatusFailure) -> Result<ServerMessage, ErrorCode> {

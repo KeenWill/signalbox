@@ -491,6 +491,7 @@ impl RunnerStateRoot {
     ) -> Option<(
         &signalbox_runner_wire::ReleaseCorrelation,
         signalbox_runner_wire::ReleasePhase,
+        Option<&signalbox_runner_wire::OperationFailure>,
     )> {
         self.journal.release()
     }
@@ -516,12 +517,35 @@ impl RunnerStateRoot {
     ) -> Result<(), RunnerStateError> {
         self.journal.complete_release(&self.directory, correlation)
     }
+    pub(crate) fn fail_release(
+        &mut self,
+        failure: signalbox_runner_wire::OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.fail_release(&self.directory, failure)
+    }
     pub(crate) fn acknowledge_release(
         &mut self,
         correlation: &signalbox_runner_wire::ReleaseCorrelation,
+        failed: bool,
     ) -> Result<(), RunnerStateError> {
         self.journal
-            .acknowledge_release(&self.directory, correlation)
+            .acknowledge_release(&self.directory, correlation, failed)
+    }
+    pub(crate) fn retained_leak_page(&self) -> Option<&signalbox_runner_wire::LeakPage> {
+        self.journal.leak_page()
+    }
+    pub(crate) fn record_leak_page(
+        &mut self,
+        page: signalbox_runner_wire::LeakPage,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.record_leak_page(&self.directory, page)
+    }
+    pub(crate) fn acknowledge_leak_page(
+        &mut self,
+        correlation: &signalbox_runner_wire::LeakPageCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_leak_page(&self.directory, correlation)
     }
 
     pub(crate) fn retained_provision(

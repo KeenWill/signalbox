@@ -10,24 +10,21 @@ Git configuration.
 
 A runner executes tools for the sessions pinned to it under one serial lease
 protocol whose every step is journaled on both sides, so a crash on either side
-resumes from durable state and never repeats a side effect unknowingly. Each
-placement has exactly one writable root that the runner can re-identify after a
-restart; a manifest-backed root is released when the placement retires and
-reported as a leak when it cannot be released. Restricted tools run inside a
-namespace with no host interface, reach the network only through a
-hostname-checked HTTPS broker, and run Git only under configuration the runner
-forces and a canonical-URL check the model cannot defeat.
+resumes from durable state and never repeats a side effect unknowingly.
+Restricted tools run inside a namespace with no host interface, reach the
+network only through a hostname-checked HTTPS broker, and run Git only under
+configuration the runner forces and a canonical-URL check the model cannot
+defeat.
 
 ## Design
 
 ### Lease and dispatch
 
-The runner spools `workspace_leak_page`, `workspace_ready`,
-`workspace_released`, and `operation_failed` until each is acknowledged. A
-runner that cannot perform an admitted operation reports it with
-`operation_failed` rather than sending nothing. A failure the daemon has durably
-recorded resolves the corresponding provisioning, release, or lease authority as
-refused, and neither side waits on it further.
+The runner spools `operation_failed` for general admitted operations until
+acknowledgement. A runner that cannot perform an admitted operation reports it
+with `operation_failed` rather than sending nothing. A failure the daemon has
+durably recorded resolves the corresponding provisioning, release, or lease
+authority as refused, and neither side waits on it further.
 
 For operations other than replacement provisioning, the daemon retains
 runner-authored `operation_failed` detail verbatim and never parses or branches
@@ -80,38 +77,6 @@ the ambient anonymous clone, private root, protected manifest, and restart
 re-adoption. Restricted acquisition clones inside the restricted profile. Each
 placement has exactly one writable root, whether a repository, selected plain
 directory, or private root. Confinement is defined over that root.
-
-Runners are not cleanup authorities. Only the runner that provisioned a
-workspace can delete it; a replaced, revoked, or dead runner leaves its
-workspace on disk. No cleanup authority resumes for a retired identity, and no
-mechanism transfers ownership of an existing clone to a successor. The leak
-report is the whole response to a workspace left on disk.
-
-### Release and leak reconciliation
-
-The daemon enqueues a release only for an exact retired placement revision,
-superseded by replacement or terminal abandonment, after no live lease or
-unacknowledged result remains; the session itself may continue on its successor
-placement or with daemon-only tools. A retired plain-directory placement has no
-manifest and therefore no release: the daemon enqueues nothing, the runner never
-renames or deletes it, and it is not reported as a leak. Reachability is a
-second, independent precondition: a release is enqueued only while the runner
-holding the workspace is still connected. Retirement whose predecessor
-connection is already lost enqueues no release, and losing a connection that
-still owed one retires that release as unowned; either way the workspace becomes
-a recorded leak.
-
-[Workspace publication](../spec/runner-protocol.md#workspace-publication) owns
-the accepted release journal, descriptor cleanup, and completion exchange. A
-release whose rename or deletion keeps failing reports
-`workspace_cleanup_failed`; its acknowledgement retires the release journal with
-the failure, and the surviving placement is reported as a `cleanup_failed` leak.
-
-Startup reconciles every ready or active manifest with the daemon before any
-execution and reports every unknown, retired-but-present, conflicting, or
-otherwise unreconciled workspace as a typed leak. The runner never silently
-deletes a reported leak, and the startup report is visible even when no session
-can be resumed.
 
 ### Sandbox profiles
 
@@ -230,10 +195,6 @@ active.
 directory with a `RunnerPlacementChanged` entry and no loss.
 
 Every placement has exactly one writable root that a restarted runner re-adopts.
-Provisioned workspaces live at the fixed path with a manifest, release deletes
-only retired, reachable, manifest-named workspaces through the journal, and
-every unreconciled workspace appears as a typed leak in the startup report.
-
 Restricted tools run in a bubblewrap namespace with one writable root and reach
 the network only through the broker; every surface names the unconfined profile
 `ambient`.

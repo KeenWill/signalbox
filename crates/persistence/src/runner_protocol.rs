@@ -47,6 +47,7 @@ pub use resume::{RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome};
 mod provisioning;
 mod recovery;
 pub mod status;
+pub mod workspaces;
 pub(crate) use recovery::retire_replacement_for_terminal_batch;
 pub use recovery::{RunnerRecoveryError, RunnerRecoveryOutcome};
 
@@ -3537,6 +3538,7 @@ async fn append_runner_connection_loss_epoch(
         .bind(Decimal::from(loss_epoch.get()))
         .execute(&mut *connection)
         .await?;
+    workspaces::retire_releases_on_loss(connection, enrollment, snapshot.epoch()).await?;
     let connection_event_ordinal = NonZeroU64::new(snapshot.event_ordinal())
         .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     Ok(Some(RunnerConnectionLossSnapshot {
@@ -4575,6 +4577,7 @@ async fn insert_placement_record(
         .execute(&mut *transaction)
         .await?;
     }
+    workspaces::retain_retired_placement(transaction, placement.session(), event_ordinal).await?;
     Ok(())
 }
 

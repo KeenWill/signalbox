@@ -56,6 +56,7 @@ const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 64;
 const RUNNER_CREDENTIAL_PROFILE: &str = "github-runner";
 
 mod recovery;
+mod workspaces;
 
 /// Boxed future returned by the injected durable registration service.
 pub type RunnerRegistrationFuture<'a, T> =
@@ -162,6 +163,20 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
         enrollment: CanonicalUuid,
         failure: signalbox_runner_wire::OperationFailed,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded>;
+    /// Stores one validated startup diagnostic page before acknowledging it.
+    fn workspace_leak_page(
+        &self,
+        _enrollment: CanonicalUuid,
+        page: signalbox_runner_wire::WorkspaceLeakPage,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceLeakRecorded> {
+        Box::pin(async move {
+            Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceLeakPage,
+                AvailableCorrelation::LeakPage(page.page.correlation),
+                RejectionCode::Unavailable,
+            ))
+        })
+    }
     /// Loads committed command-bound operations for this candidate.
     fn replacement_operations(
         &self,
@@ -385,13 +400,17 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::RegistrationRejected,
             )
         })?;
-        let advertisement = request.advertisement.try_into_domain().map_err(|_| {
-            RunnerRegistrationFailure::new(
-                RunnerInboundFrameKind::Enroll,
-                correlation.clone(),
-                RejectionCode::RegistrationRejected,
-            )
-        })?;
+        let advertisement = request
+            .advertisement
+            .clone()
+            .try_into_domain()
+            .map_err(|_| {
+                RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Enroll,
+                    correlation.clone(),
+                    RejectionCode::RegistrationRejected,
+                )
+            })?;
         let issued = IssuedRunnerEnrollmentIdentities::new(
             RunnerEnrollmentId::from_uuid(uuid::Uuid::now_v7()),
             RunnerId::from_uuid(uuid::Uuid::now_v7()),
@@ -477,13 +496,6 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::UnsupportedDigestVersion,
             ));
         }
-        if request.inventory.leak_page.is_some() {
-            return Err(RunnerRegistrationFailure::new(
-                RunnerInboundFrameKind::Resume,
-                correlation,
-                RejectionCode::Unavailable,
-            ));
-        }
         let prior =
             RunnerRegistrationRevision::try_from_u64(request.prior_registration_revision.get())
                 .ok_or_else(|| {
@@ -493,13 +505,17 @@ impl PostgresRunnerRegistrationService {
                         RejectionCode::RegistrationRejected,
                     )
                 })?;
-        let advertisement = request.advertisement.try_into_domain().map_err(|_| {
-            RunnerRegistrationFailure::new(
-                RunnerInboundFrameKind::Resume,
-                correlation.clone(),
-                RejectionCode::RegistrationRejected,
-            )
-        })?;
+        let advertisement = request
+            .advertisement
+            .clone()
+            .try_into_domain()
+            .map_err(|_| {
+                RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Resume,
+                    correlation.clone(),
+                    RejectionCode::RegistrationRejected,
+                )
+            })?;
         let identities = IssuedRunnerEnrollmentIdentities::new(
             RunnerEnrollmentId::from_uuid(request.enrollment_id.into_uuid()),
             RunnerId::from_uuid(request.runner_id.into_uuid()),
@@ -512,16 +528,27 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::CorrelationMismatch,
             )
         };
-        if let Some(failure) = &request.inventory.operation_failure
-            && (request.inventory.lease.is_some()
-                || request.inventory.result.is_some()
-                || !matches!(
-                    &request.inventory.workspace_operation,
-                    Some(signalbox_runner_wire::WorkspaceOperation::Provision { correlation, phase: signalbox_runner_wire::ProvisionPhase::Provisioning })
-                        if failure.correlation == signalbox_runner_wire::OperationCorrelation::Provision(correlation.clone())
-                ))
-        {
-            return Err(invalid_inventory());
+        if let Some(failure) = &request.inventory.operation_failure {
+            let paired = match (&failure.correlation, &request.inventory.workspace_operation) {
+                (
+                    signalbox_runner_wire::OperationCorrelation::Provision(failed),
+                    Some(signalbox_runner_wire::WorkspaceOperation::Provision {
+                        correlation,
+                        phase: signalbox_runner_wire::ProvisionPhase::Provisioning,
+                    }),
+                ) => failed == correlation,
+                (
+                    signalbox_runner_wire::OperationCorrelation::Release(failed),
+                    Some(signalbox_runner_wire::WorkspaceOperation::Release {
+                        correlation,
+                        phase: signalbox_runner_wire::ReleasePhase::ReleaseAccepted,
+                    }),
+                ) => failed == correlation,
+                _ => false,
+            };
+            if !paired || request.inventory.lease.is_some() || request.inventory.result.is_some() {
+                return Err(invalid_inventory());
+            }
         }
         let evidence = match (&request.inventory.lease, &request.inventory.result) {
             (None, None) => None,
@@ -586,48 +613,14 @@ impl PostgresRunnerRegistrationService {
                     store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
                 })?;
         }
-        let workspace_directive = if let Some(operation) = &request.inventory.workspace_operation {
-            use signalbox_runner_wire::{OperationCorrelation, WorkspaceOperation};
-            if let WorkspaceOperation::Release {
-                correlation: release,
-                phase,
-            } = operation
-            {
-                if request.inventory.lease.is_some()
-                    || request.inventory.result.is_some()
-                    || request.inventory.operation_failure.is_some()
-                {
-                    return Err(invalid_inventory());
-                }
-                let action = match phase {
-                    signalbox_runner_wire::ReleasePhase::ReleaseAccepted => {
-                        let pending = self
-                            .replacement_releases_durably(request.enrollment_id)
-                            .await?;
-                        if !pending
-                            .iter()
-                            .any(|pending| pending.correlation == *release)
-                        {
-                            return Err(invalid_inventory());
-                        }
-                        DirectiveAction::Await
-                    }
-                    signalbox_runner_wire::ReleasePhase::ReleaseCompleted => {
-                        self.workspace_released_durably(
-                            request.enrollment_id,
-                            signalbox_runner_wire::WorkspaceReleased {
-                                correlation: release.clone(),
-                            },
-                        )
-                        .await?;
-                        DirectiveAction::DiscardAsRecorded
-                    }
-                };
-                Some(Directive {
-                    correlation: OperationCorrelation::Release(release.clone()),
-                    action,
-                })
-            } else {
+        let workspace_directive = if matches!(
+            request.inventory.workspace_operation,
+            Some(signalbox_runner_wire::WorkspaceOperation::Release { .. })
+        ) {
+            Some(self.release_resume_directive(&request, identities).await?)
+        } else {
+            if let Some(operation) = &request.inventory.workspace_operation {
+                use signalbox_runner_wire::{OperationCorrelation, WorkspaceOperation};
                 let WorkspaceOperation::Provision {
                     correlation: provision,
                     ..
@@ -692,19 +685,7 @@ impl PostgresRunnerRegistrationService {
                 {
                     return Err(invalid_inventory());
                 }
-                let operation_correlation = OperationCorrelation::Provision(provision.clone());
                 let action = if let Some(failure) = &request.inventory.operation_failure {
-                    if failure.correlation != operation_correlation
-                        || !matches!(
-                            operation,
-                            WorkspaceOperation::Provision {
-                                phase: signalbox_runner_wire::ProvisionPhase::Provisioning,
-                                ..
-                            }
-                        )
-                    {
-                        return Err(invalid_inventory());
-                    }
                     self.provisioning_failed_durably(
                         request.enrollment_id,
                         signalbox_runner_wire::OperationFailed {
@@ -717,10 +698,26 @@ impl PostgresRunnerRegistrationService {
                     DirectiveAction::Await
                 };
                 Some(signalbox_runner_wire::Directive {
-                    correlation: operation_correlation,
+                    correlation: OperationCorrelation::Provision(provision.clone()),
                     action,
                 })
+            } else {
+                None
             }
+        };
+        let leak_directive = if let Some(page) = &request.inventory.leak_page {
+            if page.correlation.registration_revision > request.prior_registration_revision {
+                return Err(invalid_inventory());
+            }
+            self.leak_page_durably(
+                request.enrollment_id,
+                signalbox_runner_wire::WorkspaceLeakPage { page: page.clone() },
+            )
+            .await?;
+            Some(Directive {
+                correlation: page.correlation.clone(),
+                action: DirectiveAction::DiscardAsRecorded,
+            })
         } else {
             None
         };
@@ -747,13 +744,13 @@ impl PostgresRunnerRegistrationService {
                 })
         };
         let mut directives = ReconnectDirectives {
+            workspace_operation: workspace_directive.clone(),
             operation_failure: request
                 .inventory
                 .operation_failure
                 .as_ref()
-                .map(|_| workspace_directive.clone().ok_or_else(invalid_inventory))
-                .transpose()?,
-            workspace_operation: workspace_directive,
+                .and_then(|_| workspace_directive.clone()),
+            leak_page: leak_directive,
             lease: request
                 .inventory
                 .lease
@@ -766,7 +763,6 @@ impl PostgresRunnerRegistrationService {
                 .as_ref()
                 .map(|result| directive(result.correlation.clone()))
                 .transpose()?,
-            ..ReconnectDirectives::default()
         };
         let previous_registration_revision = match self
             .store
@@ -979,13 +975,17 @@ impl PostgresRunnerRegistrationService {
                 RejectionCode::RegistrationRejected,
             )
         })?;
-        let advertisement = request.advertisement.try_into_domain().map_err(|_| {
-            RunnerRegistrationFailure::new(
-                RunnerInboundFrameKind::Advertise,
-                correlation.clone(),
-                RejectionCode::RegistrationRejected,
-            )
-        })?;
+        let advertisement = request
+            .advertisement
+            .clone()
+            .try_into_domain()
+            .map_err(|_| {
+                RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Advertise,
+                    correlation.clone(),
+                    RejectionCode::RegistrationRejected,
+                )
+            })?;
         let registration = self
             .store
             .register_at_revision(&enrollment, expected, advertisement)
@@ -1311,6 +1311,13 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
         failure: signalbox_runner_wire::OperationFailed,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
         Box::pin(self.provisioning_failed_durably(enrollment, failure))
+    }
+    fn workspace_leak_page(
+        &self,
+        enrollment: CanonicalUuid,
+        page: signalbox_runner_wire::WorkspaceLeakPage,
+    ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceLeakRecorded> {
+        Box::pin(self.leak_page_durably(enrollment, page))
     }
     fn replacement_operations(
         &self,
@@ -1981,22 +1988,12 @@ where
             .map(|lease| lease.correlation.clone()),
         _ => None,
     };
-    let mut busy_release = match &first.message {
-        Message::Resume(request) => match &request.inventory.workspace_operation {
-            Some(signalbox_runner_wire::WorkspaceOperation::Release { correlation, .. }) => {
-                Some(correlation.clone())
-            }
-            _ => None,
-        },
-        _ => None,
-    };
-    let mut busy_provision = match &first.message {
-        Message::Resume(request) => match &request.inventory.workspace_operation {
-            Some(signalbox_runner_wire::WorkspaceOperation::Provision { correlation, .. }) => {
-                Some(correlation.authorization_id)
-            }
-            _ => None,
-        },
+    let mut pending_workspace = match &first.message {
+        Message::Resume(request) => request
+            .inventory
+            .workspace_operation
+            .as_ref()
+            .map(workspaces::operation_correlation),
         _ => None,
     };
     let context = match first.message {
@@ -2047,8 +2044,7 @@ where
                             )
                         })
                     {
-                        busy_provision = None;
-                        busy_release = None;
+                        pending_workspace = None;
                     }
                     if let Err(error) =
                         write_message(&mut writer, Message::Resumed(Box::new(response))).await
@@ -2088,7 +2084,6 @@ where
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         heartbeat.tick().await;
         let mut heartbeat_state = HeartbeatState::new();
-        let mut sent_provisions = std::collections::BTreeSet::new();
         let mut sent_promotion = false;
         let mut receive_buffer = Vec::new();
         let mut lease_changes = service.lease_changes();
@@ -2156,34 +2151,31 @@ where
                     Err(error) => return Err(error),
                 };
                 match frame.message {
+                    Message::WorkspaceLeakPage(page) => {
+                        if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceLeakPage, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
+                        match service.workspace_leak_page(context.enrollment, page).await {
+                            Ok(recorded) => write_message(&mut writer, Message::WorkspaceLeakRecorded(recorded)).await?,
+                            Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
+                        }
+                    }
                     Message::WorkspaceReleased(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReleased, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.workspace_released(context.enrollment, receipt).await {
-                            Ok(recorded) => {
-                                if busy_release.as_ref() == Some(&recorded.correlation) { busy_release = None; }
-                                write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?;
-                            },
+                            Ok(recorded) => { workspaces::settle_workspace(&mut pending_workspace, signalbox_runner_wire::OperationCorrelation::Release(recorded.correlation.clone())); write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?; },
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
                     }
                     Message::OperationFailed(failure) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::OperationFailed, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.provisioning_failed(context.enrollment, failure).await {
-                            Ok(recorded) => {
-                                if let signalbox_runner_wire::OperationCorrelation::Provision(correlation) = &recorded.correlation
-                                    && busy_provision == Some(correlation.authorization_id) { busy_provision = None; }
-                                write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?;
-                            },
+                            Ok(recorded) => { workspaces::settle_workspace(&mut pending_workspace, recorded.correlation.clone()); write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?; },
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
                     }
                     Message::WorkspaceReady(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.workspace_ready(context.enrollment, receipt).await {
-                            Ok(Some(recorded)) => {
-                                if busy_provision == Some(recorded.correlation.authorization_id) { busy_provision = None; }
-                                write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?;
-                            },
+                            Ok(Some(recorded)) => { workspaces::settle_workspace(&mut pending_workspace, signalbox_runner_wire::OperationCorrelation::Provision(recorded.correlation.clone())); write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?; },
                             Ok(None) => {},
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
@@ -2331,7 +2323,7 @@ where
                     }
                 }
             }
-            () = lease_changed(&mut lease_changes), if busy_provision.is_none() && busy_lease.is_none() && busy_release.is_none() => {
+            () = lease_changed(&mut lease_changes), if pending_workspace.is_none() && busy_lease.is_none() => {
                 if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
                     let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
                     if sent_lease != Some(identity) {
@@ -2351,18 +2343,14 @@ where
                             write_message(&mut writer, Message::Enrolled(receipt)).await?;
                             sent_promotion = true;
                         }
-                        let operation = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next();
-                        if let Some(operation) = operation
-                            && busy_lease.is_none() && busy_provision.is_none() && busy_release.is_none()
-                            && sent_provisions.insert(operation.correlation.authorization_id)
-                        {
-                            busy_provision = Some(operation.correlation.authorization_id);
-                            write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
-                        }
-                        if busy_lease.is_none() && busy_provision.is_none() && busy_release.is_none()
-                            && let Some(release) = service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next() {
-                            busy_release = Some(release.correlation.clone());
-                            write_message(&mut writer, Message::WorkspaceRelease(release)).await?;
+                        if pending_workspace.is_none() && busy_lease.is_none() {
+                            if let Some(operation) = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next() {
+                                pending_workspace = Some(signalbox_runner_wire::OperationCorrelation::Provision(operation.correlation.clone()));
+                                write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
+                            } else if let Some(release) = service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next() {
+                                pending_workspace = Some(signalbox_runner_wire::OperationCorrelation::Release(release.correlation.clone()));
+                                write_message(&mut writer, Message::WorkspaceRelease(release)).await?;
+                            }
                         }
                     }
                     HeartbeatTick::Missed(1) => {
@@ -2633,13 +2621,6 @@ impl HeartbeatState {
     }
 
     fn accept(&mut self, acknowledgement: &HeartbeatAck) -> Result<(), RunnerRegistrationFailure> {
-        if acknowledgement.lease_phase.is_some() || acknowledgement.workspace_phase.is_some() {
-            return Err(RunnerRegistrationFailure::new(
-                RunnerInboundFrameKind::HeartbeatAck,
-                heartbeat_ack_correlation(acknowledgement),
-                RejectionCode::Unavailable,
-            ));
-        }
         if Some(acknowledgement.challenge_sequence.get()) != self.outstanding_challenge
             || acknowledgement.runner_sequence.get() <= self.last_accepted_runner_sequence
         {
@@ -5656,7 +5637,7 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_operation_phase_is_unavailable_in_registration_only_runtime() {
+    fn heartbeat_operation_phase_preserves_sequence_validation() {
         let mut state = HeartbeatState::new();
         let challenge = challenge_tick(&mut state);
         let correlation = signalbox_runner_wire::ProvisionCorrelation {
@@ -5683,14 +5664,12 @@ mod tests {
             ),
         };
 
-        let failure = state
+        state
             .accept(&acknowledgement)
-            .expect_err("operation state is unavailable in this runtime");
-
-        assert_eq!(failure.code, RejectionCode::Unavailable);
-        assert_eq!(
-            failure.available_correlation.as_ref(),
-            &AvailableCorrelation::Provision(correlation)
+            .expect("workspace phase is diagnostic");
+        assert!(
+            state.accept(&acknowledgement).is_err(),
+            "duplicate sequences remain invalid"
         );
     }
 }

@@ -27,11 +27,9 @@ also advertises `worktree_per_session`. It executes `echo` in a plain child
 process under `ambient` and retains the claimed phase and terminal result in a
 versioned, fsynced, atomically published private journal. An initialized state
 root without that journal fails startup. Resume reconciles the retained lease
-phase and terminal result against durable daemon state. Provisioning resumes the
-exact retained workspace operation. Rejected staged workspaces retain accepted
-release and completion phases through daemon acknowledgement.
-Placement-retirement release, leak reconciliation, and sandbox supervision are
-listed under Planned.
+phase and terminal result against durable daemon state. Provisioning and release
+resume the exact retained workspace operation. Startup reconciles leak pages
+before execution. Sandbox supervision is listed under Planned.
 
 The daemon admits authenticated runner recovery after migrations and before the
 generic startup scan or blob checks. Ordinary enrollment waits until the process
@@ -142,10 +140,30 @@ identity and ready receipt. A changed repository mapping fails as
 `manifest_conflict`. Reconnect admits only the exact stored daemon authorization
 under the unchanged registration, and the runner resends its authenticated
 receipt until acknowledgement activates the manifest and clears the journal. The
-daemon serializes provisioning and lease delivery on each connection until the
-corresponding durable outcome is acknowledged. Expected acquisition refusals are
-journaled as `operation_failed` and retained through heartbeat and reconnect
-until acknowledged; the runner keeps serving.
+daemon serializes provisioning, release, and lease delivery on each connection
+until the corresponding durable outcome is acknowledged. Expected acquisition
+refusals are journaled as `operation_failed` and retained through heartbeat and
+reconnect until acknowledged; the runner keeps serving.
+
+## Workspace release and leak reporting
+
+The daemon issues cleanup for a retired manifest only to its connected owner,
+after its leases and results settle. Plain-directory placements have no manifest
+and receive no cleanup. Connection loss retires an outstanding release as
+unowned and retains a leak diagnostic; ownership never transfers to a successor.
+
+The runner fsyncs `release_accepted` before marking the manifest `releasing`,
+renaming the placement below `trash/`, and deleting it through directory
+descriptors without following symlinks. Restart continues accepted deletion even
+when its manifest is gone. Completion is journaled before `workspace_released`
+and retained until the exact acknowledgement. Failed cleanup retains
+`workspace_cleanup_failed` until durable acknowledgement and exposes the
+surviving workspace as a `cleanup_failed` leak.
+
+Before execution, startup reports ready and active manifests and unknown entries
+in bounded, digest-correlated pages. The daemon reconciles exact retained ready
+facts and stores unresolved diagnostics before acknowledging each page. Reports
+remain visible without a resumable session and authorize no deletion.
 
 ## Boundary contracts
 
@@ -397,20 +415,11 @@ directory. A rejected command's ready workspace, including a correlated receipt
 arriving after abandonment, is released only through its exact manifest
 correlation on the candidate's retained connection epoch. Suspicion retains that
 cleanup authority; loss does not transfer it. Release acknowledgement uses the
-same current-epoch fence as release dispatch. The runner journals the exact
-release before cleanup, verifies its protected manifest, marks it `releasing`,
-renames the placement into `trash/<manifest_id>`, and deletes through directory
-descriptors without following symlinks. An accepted journal authorizes
-completion after a partial trash deletion. The completion receipt remains
-journaled until its exact acknowledgement; resume rechecks pending release
-authority or records the retained completion. Cleanup storage errors retain the
-accepted journal. Lease offers, provisioning, and staged release run serially
-per runner.
+same current-epoch fence as release dispatch.
 
 ## Planned
 
-- General failure spooling and placement-release, failure, and leak
-  reconnect-inventory reconciliation over the wire:
+- General operation-failure evidence over the wire:
   [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
@@ -419,8 +428,6 @@ per runner.
 - Initial repository-placement provisioning admission and credentialed or
   restricted repository acquisition:
   [runner protocol design](../design/runner-protocol.md).
-- Placement-retirement release, cleanup-failure projection, and startup leak
-  reconciliation: [runner protocol design](../design/runner-protocol.md).
 - The restricted sandbox and ambient supervision under bubblewrap, with confined
   file tools: [runner protocol design](../design/runner-protocol.md).
 - The restricted-namespace HTTPS egress broker:

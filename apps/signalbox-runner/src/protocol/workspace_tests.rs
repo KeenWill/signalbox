@@ -32,9 +32,15 @@ fn connection(
         execution: None,
         last_recorded: None,
         workspace: None,
-        last_release_recorded: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
+        last_release_recorded: None,
+        startup_report: leaks::StartupReport::Disabled,
+        leak_sent: false,
+        last_leak_recorded: None,
+        deferred_dispatch: None,
+        deferred_release: None,
+        offer_claimed: false,
         receipt,
         advertisement: config.advertisement().clone(),
         configuration: Some(config),
@@ -464,6 +470,133 @@ async fn release_journal_survives_disconnect_and_clears_only_on_exact_acknowledg
         .await
         .expect("exact acknowledgement");
     assert!(state.retained_release().is_none());
+}
+
+#[tokio::test]
+async fn startup_report_without_a_session_is_retained_until_its_exact_page_is_recorded() {
+    use signalbox_runner_wire::WorkspaceLeakRecorded;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(directory.path().join("state/sessions"))
+        .expect("private sessions directory");
+    std::fs::write(directory.path().join("state/sessions/orphan"), b"unknown")
+        .expect("unowned entry");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt).with_configuration(configuration());
+    let mut hub = BufReader::new(hub);
+    runner.serve_one(&mut state).await.expect("scan completes");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("publish page");
+    let Message::WorkspaceLeakPage(report) = receive_message(&mut hub).await.expect("page") else {
+        panic!("leak page")
+    };
+    assert_eq!(report.page.facts.len(), 1);
+    assert!(report.page.facts[0].session.is_none());
+    assert!(!runner.startup_report.complete());
+    let mut wrong = WorkspaceLeakRecorded {
+        correlation: report.page.correlation.clone(),
+        page_digest: signalbox_runner_wire::Digest::try_new("f".repeat(64))
+            .expect("different digest"),
+    };
+    assert!(
+        runner
+            .serve_message(&mut state, Message::WorkspaceLeakRecorded(wrong.clone()))
+            .await
+            .is_err()
+    );
+    assert!(state.retained_leak_page().is_some());
+    wrong.page_digest = report.page.page_digest;
+    runner
+        .serve_message(&mut state, Message::WorkspaceLeakRecorded(wrong))
+        .await
+        .expect("exact acknowledgement");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("startup settled");
+    assert!(runner.startup_report.complete());
+    assert!(state.retained_leak_page().is_none());
+}
+
+#[tokio::test]
+async fn cleanup_failure_is_journaled_and_acknowledgement_preserves_the_survivor() {
+    use signalbox_runner_wire::{
+        FailureCategory, OperationCorrelation, OperationFailureRecorded, ReleaseCorrelation,
+    };
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let checked =
+        crate::workspace::provision::CheckedProvision::check(&configuration(), provision(&receipt))
+            .expect("private provision");
+    let ready = checked
+        .prepare(state.workspace_store().expect("store"))
+        .await
+        .expect("ready");
+    let correlation = ReleaseCorrelation {
+        session_id: ready.correlation.session_id,
+        placement_revision: ready.correlation.placement_revision,
+        runner_id: receipt.runner_id(),
+        manifest_id: ready.ready.manifest.manifest_id,
+    };
+    let trash = directory.path().join("state/trash");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&trash)
+        .expect("private trash");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(trash.join(correlation.manifest_id.to_string()))
+        .expect("conflicting release destination");
+    state
+        .record_release(correlation.clone())
+        .expect("accepted release");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt.clone());
+    let mut hub = BufReader::new(hub);
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("failed cleanup is evidence");
+    let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("failure frame")
+    else {
+        panic!("cleanup failure")
+    };
+    assert_eq!(
+        failed.failure.category,
+        FailureCategory::WorkspaceCleanupFailed
+    );
+    assert_eq!(
+        state.reconnect_inventory().operation_failure,
+        Some(failed.failure.clone())
+    );
+    drop(runner);
+    drop(state);
+    let mut state = RunnerStateRoot::open(&directory.path().join("state")).expect("restart");
+    assert_eq!(
+        state.reconnect_inventory().operation_failure,
+        Some(failed.failure)
+    );
+    let (stream, _hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt);
+    runner
+        .serve_message(
+            &mut state,
+            Message::OperationFailureRecorded(OperationFailureRecorded {
+                correlation: OperationCorrelation::Release(correlation),
+            }),
+        )
+        .await
+        .expect("durable failure acknowledgement");
+    assert!(state.reconnect_inventory().workspace_operation.is_none());
+    assert!(Path::new(&ready.working_directory).is_dir());
 }
 
 #[tokio::test]

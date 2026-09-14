@@ -449,11 +449,11 @@ fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
     drop(state);
     let mut reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
     assert_eq!(
-        reopened.retained_release().map(|(_, phase)| phase),
+        reopened.retained_release().map(|(_, phase, _)| phase),
         Some(signalbox_runner_wire::ReleasePhase::ReleaseCompleted)
     );
     reopened
-        .acknowledge_release(&correlation)
+        .acknowledge_release(&correlation, false)
         .expect("exact completion acknowledgement");
     assert!(reopened.retained_release().is_none());
 }
@@ -515,5 +515,35 @@ fn release_requires_the_provisioning_runner_and_exact_manifest() {
         store.release(&state.accepted_release().expect("journal authority")),
         Err(RunnerWorkspaceError::ManifestConflict)
     ));
+    assert!(Path::new(prepared.execution_directory.as_str()).exists());
+}
+
+#[test]
+fn startup_inventory_reports_manifests_and_strays_without_following_links() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned store");
+    let prepared = store
+        .prepare_private_root(&request(RUNNER))
+        .expect("ready workspace");
+    store.activate(&prepared).expect("active workspace");
+    let sessions = parent.path().join("runner-state/sessions");
+    std::os::unix::fs::symlink(parent.path(), sessions.join("unknown")).expect("untrusted link");
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("descriptor inventory");
+    assert_eq!(facts.len(), 2);
+    assert!(facts.iter().any(|fact| fact.kind
+        == signalbox_runner_wire::LeakFactKind::Unreconciled
+        && fact.entry_digest == prepared.manifest_digest
+        && fact.locator == prepared.manifest.relative_path));
+    assert!(facts.iter().any(|fact| fact.kind
+        == signalbox_runner_wire::LeakFactKind::UnknownManifest
+        && fact.locator == "sessions/unknown"));
+    let pages = leaks::pages(PositiveU64::try_new(1).expect("registration"), &facts)
+        .expect("bounded report");
+    assert_eq!(pages.len(), 1);
+    let page = pages.front().expect("report page");
+    assert!(page.final_page);
+    page.validate().expect("canonical page");
     assert!(Path::new(prepared.execution_directory.as_str()).exists());
 }

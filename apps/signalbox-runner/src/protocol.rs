@@ -30,6 +30,7 @@ use crate::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
 };
 
+mod leaks;
 mod workspaces;
 
 const SOCKET_MODE: u32 = 0o600;
@@ -503,9 +504,15 @@ pub struct RunnerConnection<S> {
     last_recorded: Option<LeaseCorrelation>,
     configuration: Option<crate::RunnerConfiguration>,
     workspace: Option<workspaces::WorkspaceExecution>,
-    last_release_recorded: Option<signalbox_runner_wire::ReleaseCorrelation>,
     last_workspace_recorded: Option<signalbox_runner_wire::WorkspaceRecorded>,
     last_provision_failure: Option<signalbox_runner_wire::OperationCorrelation>,
+    last_release_recorded: Option<(signalbox_runner_wire::ReleaseCorrelation, bool)>,
+    startup_report: leaks::StartupReport,
+    leak_sent: bool,
+    last_leak_recorded: Option<signalbox_runner_wire::WorkspaceLeakRecorded>,
+    deferred_dispatch: Option<signalbox_runner_wire::Dispatch>,
+    deferred_release: Option<signalbox_runner_wire::WorkspaceRelease>,
+    offer_claimed: bool,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
@@ -517,6 +524,7 @@ enum RunnerEvent {
     Message(Message),
     Result(RetainedResult),
     Workspace(workspaces::WorkspaceCompletion),
+    LeakScan(Vec<signalbox_runner_wire::LeakFact>),
 }
 
 struct RunnerExecution {
@@ -668,6 +676,19 @@ where
                     }
                 }
                 workspaces::apply_workspace_directives(state, &resumed.directives)?;
+                if let Some(directive) = &resumed.directives.leak_page {
+                    match directive.action {
+                        DirectiveAction::Resend => {}
+                        DirectiveAction::DiscardAsRecorded => {
+                            state.acknowledge_leak_page(&directive.correlation)?
+                        }
+                        _ => {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::ResumeDirectives,
+                            ));
+                        }
+                    }
+                }
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 if let Some(correlation) = &resumed_lease {
                     send_message(
@@ -694,9 +715,15 @@ where
             last_recorded: None,
             configuration: None,
             workspace: None,
-            last_release_recorded: None,
             last_workspace_recorded: None,
             last_provision_failure: None,
+            last_release_recorded: None,
+            startup_report: leaks::StartupReport::default(),
+            leak_sent: false,
+            last_leak_recorded: None,
+            deferred_dispatch: None,
+            deferred_release: None,
+            offer_claimed: false,
             receipt,
             advertisement: advertisement.clone(),
             outcome,
@@ -708,6 +735,7 @@ where
     /// Supplies the local repository and sandbox configuration for workspace operations.
     pub fn with_configuration(mut self, configuration: crate::RunnerConfiguration) -> Self {
         self.configuration = Some(configuration);
+        self.startup_report = leaks::StartupReport::Pending;
         self
     }
 
@@ -810,6 +838,7 @@ where
         let mut shutdown_requested = false;
         self.ensure_workspace(state)?;
         loop {
+            self.advance_local(state).await?;
             if shutdown_requested && !self.has_unsettled_lease(state) {
                 return Ok(ServeOutcome::ShutdownReady);
             }
@@ -833,6 +862,8 @@ where
             || inventory.lease.is_some()
             || inventory.result.is_some()
             || inventory.workspace_operation.is_some()
+            || inventory.leak_page.is_some()
+            || !self.startup_report.complete()
     }
 
     /// Handles one complete daemon frame or completed child result.
@@ -840,7 +871,7 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
-        self.ensure_workspace(state)?;
+        self.advance_local(state).await?;
         let event = self.receive_event().await?;
         self.serve_event(state, event).await
     }
@@ -850,6 +881,7 @@ where
             message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => message.map(RunnerEvent::Message),
             result = execution_finished(&mut self.execution) => result.map(RunnerEvent::Result),
             ready = workspaces::workspace_finished(&mut self.workspace) => ready.map(RunnerEvent::Workspace),
+            facts = leaks::scan_finished(&mut self.startup_report) => facts.map(RunnerEvent::LeakScan),
         }
     }
 
@@ -859,6 +891,13 @@ where
         event: RunnerEvent,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match event {
+            RunnerEvent::LeakScan(facts) => {
+                let pages =
+                    crate::workspace::leaks::pages(self.receipt.registration_revision(), &facts)
+                        .map_err(|error| RunnerConnectionError::Workspace(error.into()))?;
+                self.startup_report = leaks::StartupReport::Reporting(pages);
+                Ok(None)
+            }
             RunnerEvent::Message(message) => self.serve_message(state, message).await,
             RunnerEvent::Workspace(completion) => {
                 self.finish_workspace(state, completion).await?;
@@ -899,10 +938,11 @@ where
                 Ok(None)
             }
             Message::Heartbeat(challenge) => {
-                let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
+                let acknowledgement = self.heartbeat_acknowledgement(challenge, state)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
                 self.send_retained_result(state).await?;
                 self.send_retained_workspace(state).await?;
+                self.send_leak_page(state).await?;
                 Ok(None)
             }
             Message::Shutdown(shutdown)
@@ -946,15 +986,8 @@ where
                 self.send_retained_workspace(state).await?;
                 Ok(None)
             }
-            Message::OperationFailureRecorded(recorded) => {
-                if self.last_provision_failure.as_ref() == Some(&recorded.correlation)
-                    && state.retained_provision_failure().is_none()
-                {
-                    return Ok(None);
-                }
-                state.acknowledge_provision_failure(&recorded.correlation)?;
-                self.workspace = None;
-                self.last_provision_failure = Some(recorded.correlation);
+            Message::WorkspaceLeakRecorded(recorded) => {
+                self.record_leak_page(state, recorded)?;
                 Ok(None)
             }
             Message::WorkspaceRecorded(recorded) => {
@@ -962,12 +995,27 @@ where
                 Ok(None)
             }
             Message::WorkspaceRelease(release) => {
-                if release.correlation.runner_id != self.receipt.runner_id()
-                    || self.execution.is_some()
-                {
+                if release.correlation.runner_id != self.receipt.runner_id() {
                     return Err(RunnerConnectionError::Violation(
                         ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
+                }
+                if self.pending_offer.is_some()
+                    || state.reconnect_inventory().lease.is_some()
+                    || matches!(
+                        self.startup_report,
+                        leaks::StartupReport::Scanning(_) | leaks::StartupReport::Reporting(_)
+                    )
+                {
+                    if self
+                        .deferred_release
+                        .as_ref()
+                        .is_some_and(|prior| prior != &release)
+                    {
+                        return Err(RunnerStateError::InvalidTransition.into());
+                    }
+                    self.deferred_release = Some(release);
+                    return Ok(None);
                 }
                 state.record_release(release.correlation)?;
                 self.ensure_workspace(state)?;
@@ -975,7 +1023,30 @@ where
                 Ok(None)
             }
             Message::WorkspaceReleaseRecorded(recorded) => {
-                self.acknowledge_release(state, recorded.correlation)?;
+                self.acknowledge_release(state, recorded.correlation, false)?;
+                Ok(None)
+            }
+            Message::OperationFailureRecorded(recorded) => {
+                if matches!(
+                    recorded.correlation,
+                    signalbox_runner_wire::OperationCorrelation::Provision(_)
+                ) {
+                    if self.last_provision_failure.as_ref() == Some(&recorded.correlation)
+                        && state.retained_provision_failure().is_none()
+                    {
+                        return Ok(None);
+                    }
+                    state.acknowledge_provision_failure(&recorded.correlation)?;
+                    self.workspace = None;
+                    self.last_provision_failure = Some(recorded.correlation);
+                    return Ok(None);
+                }
+                let signalbox_runner_wire::OperationCorrelation::Release(correlation) =
+                    recorded.correlation
+                else {
+                    return Err(RunnerStateError::InvalidTransition.into());
+                };
+                self.acknowledge_release(state, correlation, true)?;
                 Ok(None)
             }
             Message::LeaseOffer(offer) => {
@@ -985,7 +1056,6 @@ where
                 )?;
                 if self.pending_offer.is_some()
                     || state.reconnect_inventory().lease.is_some()
-                    || state.reconnect_inventory().workspace_operation.is_some()
                     || offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
                     || self
                         .advertisement
@@ -1012,11 +1082,15 @@ where
                     .map_err(|_| lease_mismatch())?;
                 let correlation = offer.correlation.clone();
                 self.pending_offer = Some(offer);
-                send_message(
-                    &mut self.io,
-                    Message::LeaseClaim(LeaseClaim { correlation }),
-                )
-                .await?;
+                self.offer_claimed = self.startup_report.complete()
+                    && state.reconnect_inventory().workspace_operation.is_none();
+                if self.offer_claimed {
+                    send_message(
+                        &mut self.io,
+                        Message::LeaseClaim(LeaseClaim { correlation }),
+                    )
+                    .await?;
+                }
                 Ok(None)
             }
             Message::LeaseClaimed(claimed) => {
@@ -1037,6 +1111,17 @@ where
                 Ok(None)
             }
             Message::Dispatch(dispatch) => {
+                if !self.startup_report.complete() {
+                    if self
+                        .deferred_dispatch
+                        .as_ref()
+                        .is_some_and(|prior| prior != &dispatch)
+                    {
+                        return Err(lease_mismatch());
+                    }
+                    self.deferred_dispatch = Some(dispatch);
+                    return Ok(None);
+                }
                 let inventory = state.reconnect_inventory();
                 let resumed = self.resumed_lease.as_ref() == Some(&dispatch.correlation);
                 if self.execution.is_some()
@@ -1108,6 +1193,7 @@ where
     fn heartbeat_acknowledgement(
         &mut self,
         challenge: Heartbeat,
+        state: &RunnerStateRoot,
     ) -> Result<HeartbeatAck, RunnerConnectionError> {
         if let Some(previous) = &self.heartbeat {
             if challenge.sequence == previous.challenge.sequence {
@@ -1158,8 +1244,8 @@ where
             challenge_sequence: challenge.sequence,
             runner_sequence: PositiveU64::try_new(runner_sequence)
                 .map_err(RunnerConnectionError::InvalidLocalFrame)?,
-            lease_phase: None,
-            workspace_phase: None,
+            lease_phase: state.reconnect_inventory().lease,
+            workspace_phase: workspaces::heartbeat_phase(state),
         };
         self.heartbeat = Some(HeartbeatExchange {
             challenge,

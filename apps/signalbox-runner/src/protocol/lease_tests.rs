@@ -148,9 +148,15 @@ fn fixture(
         last_recorded: None,
         configuration: None,
         workspace: None,
-        last_release_recorded: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
+        last_release_recorded: None,
+        startup_report: leaks::StartupReport::Disabled,
+        leak_sent: false,
+        last_leak_recorded: None,
+        deferred_dispatch: None,
+        deferred_release: None,
+        offer_claimed: false,
         receipt,
         advertisement,
         outcome: EnrollmentOutcome::Enrolled,
@@ -735,4 +741,55 @@ async fn a_partial_daemon_frame_survives_a_child_completion_wakeup() {
         message
     );
     assert!(buffer.is_empty());
+}
+
+#[tokio::test]
+async fn startup_report_acknowledgement_precedes_a_queued_lease_claim() {
+    let parent = TempDir::new().expect("fixture parent");
+    let (mut state, mut connection, mut hub, offer) = fixture(&parent);
+    connection.startup_report = leaks::StartupReport::Pending;
+    connection
+        .serve_message(&mut state, Message::LeaseOffer(offer.clone()))
+        .await
+        .expect("offer waits for startup");
+    connection
+        .serve_one(&mut state)
+        .await
+        .expect("startup scan completes");
+    connection
+        .advance_local(&mut state)
+        .await
+        .expect("report sent");
+    let Message::WorkspaceLeakPage(report) =
+        receive_message(&mut hub).await.expect("startup report")
+    else {
+        panic!("report precedes lease claim")
+    };
+    assert!(state.reconnect_inventory().lease.is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), receive_message(&mut hub))
+            .await
+            .is_err(),
+        "claim waits for report acknowledgement"
+    );
+    connection
+        .serve_message(
+            &mut state,
+            Message::WorkspaceLeakRecorded(signalbox_runner_wire::WorkspaceLeakRecorded {
+                correlation: report.page.correlation,
+                page_digest: report.page.page_digest,
+            }),
+        )
+        .await
+        .expect("report recorded");
+    connection
+        .advance_local(&mut state)
+        .await
+        .expect("release queued claim");
+    assert_eq!(
+        receive_message(&mut hub).await.expect("claim after report"),
+        Message::LeaseClaim(LeaseClaim {
+            correlation: offer.correlation
+        })
+    );
 }

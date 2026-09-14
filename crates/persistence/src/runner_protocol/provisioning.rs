@@ -6,77 +6,6 @@ use signalbox_domain::{
 };
 
 impl RunnerProtocolStore {
-    /// Loads only this candidate's command-retired, manifest-backed staging workspaces.
-    pub async fn replacement_workspace_releases(
-        &self,
-        enrollment: RunnerEnrollmentId,
-    ) -> Result<Vec<ProvisionedWorkspace>, RunnerProtocolStoreError> {
-        let mut connection = self.pool.acquire().await?;
-        let rows = sqlx::query("SELECT operation.* FROM runner_replacement_provisioning_authorization AS operation
-            JOIN replace_lost_runner_result AS result USING (command_id)
-            JOIN runner_replacement_workspace_ready AS ready USING (authorization_id)
-            JOIN runner_replacement_workspace_release AS cleanup USING (authorization_id)
-            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
-            WHERE operation.registration_enrollment_id = $1 AND result.result_kind = 'rejected'
-              AND cleanup.connection_epoch = head.connection_epoch
-              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < cleanup.connection_epoch)
-              AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_released AS released WHERE released.authorization_id = operation.authorization_id)")
-            .bind(enrollment.into_uuid()).fetch_all(&mut *connection).await?;
-        let mut workspaces = Vec::new();
-        for row in rows {
-            let authorization = decode_authorization(&row)?;
-            workspaces.push(
-                load_ready(&mut connection, &authorization)
-                    .await?
-                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
-            );
-        }
-        Ok(workspaces)
-    }
-
-    /// Records cleanup only for the exact staging workspace a rejected command retired.
-    pub async fn record_replacement_workspace_released(
-        &self,
-        enrollment: RunnerEnrollmentId,
-        session: SessionId,
-        revision: RunnerGeneration,
-        runner: RunnerId,
-        manifest: WorkspaceManifestId,
-    ) -> Result<(), RunnerProtocolStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
-            .bind(session.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        sqlx::query(RUNNER_ENROLLMENT)
-            .bind(enrollment.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
-            .bind(enrollment.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        let authorization: Option<Uuid> = sqlx::query_scalar("SELECT operation.authorization_id
-            FROM runner_replacement_provisioning_authorization AS operation
-            JOIN replace_lost_runner_result AS result USING (command_id)
-            JOIN runner_replacement_workspace_ready AS ready USING (authorization_id)
-            JOIN runner_replacement_workspace_release AS cleanup USING (authorization_id)
-            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
-            WHERE operation.registration_enrollment_id = $1 AND operation.session_id = $2
-              AND operation.placement_revision = $3 AND operation.runner_id = $4
-              AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
-              AND cleanup.connection_epoch = head.connection_epoch
-              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < cleanup.connection_epoch)
-              AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption AS consumption WHERE consumption.authorization_id = operation.authorization_id)")
-            .bind(enrollment.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
-            .bind(runner.into_uuid()).bind(manifest.into_uuid()).fetch_optional(&mut *transaction).await?;
-        let authorization = authorization.ok_or(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::CorrelationMismatch,
-        ))?;
-        sqlx::query("INSERT INTO runner_replacement_workspace_released (authorization_id) VALUES ($1) ON CONFLICT DO NOTHING")
-            .bind(authorization).execute(&mut *transaction).await?;
-        commit_mutation(transaction).await
-    }
     /// Records an exact provisioning refusal and settles its owning command atomically.
     pub async fn record_replacement_provisioning_failure(
         &self,
@@ -162,6 +91,7 @@ impl RunnerProtocolStore {
         &self,
         authorization: &RunnerReplacementProvisioning,
         workspace: &ProvisionedWorkspace,
+        manifest_digest: &super::workspaces::RunnerEvidenceDigest,
     ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
@@ -177,7 +107,9 @@ impl RunnerProtocolStore {
             ));
         }
         if let Some(ready) = load_ready(transaction.as_mut(), authorization).await? {
-            if ready == *workspace {
+            let prior_digest: String = sqlx::query_scalar("SELECT manifest_digest FROM runner_replacement_workspace_ready WHERE authorization_id = $1")
+                .bind(authorization.authorization.into_uuid()).fetch_one(&mut *transaction).await?;
+            if ready == *workspace && prior_digest == manifest_digest.as_str() {
                 return Ok(());
             }
             return Err(RunnerProtocolStoreError::Domain(
@@ -240,11 +172,11 @@ impl RunnerProtocolStore {
             .as_ref()
             .map(encode_workspace_recovery)
             .unwrap_or((None, None, None));
-        sqlx::query("INSERT INTO runner_replacement_workspace_ready (authorization_id, manifest_id, working_directory, relative_path, clone_url_digest, recovery_revision, recovery_branch) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+        sqlx::query("INSERT INTO runner_replacement_workspace_ready (authorization_id, manifest_id, working_directory, relative_path, clone_url_digest, recovery_revision, recovery_branch, manifest_digest) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
             .bind(authorization.authorization.into_uuid()).bind(workspace.manifest_id.into_uuid())
             .bind(workspace.working_directory.as_str()).bind(workspace.relative_path.as_str())
             .bind(workspace.canonical_clone_url_digest.as_ref().map(CanonicalCloneUrlDigest::as_str))
-            .bind(revision).bind(branch).execute(&mut *transaction).await?;
+            .bind(revision).bind(branch).bind(manifest_digest.as_str()).execute(&mut *transaction).await?;
         if terminal {
             release_rejected_replacement_workspace(transaction.as_mut(), authorization.command)
                 .await?;
@@ -381,14 +313,21 @@ pub(super) async fn release_rejected_replacement_workspace(
     connection: &mut PgConnection,
     command: DurableCommandId,
 ) -> Result<(), RunnerProtocolStoreError> {
-    sqlx::query("INSERT INTO runner_replacement_workspace_release (authorization_id, connection_epoch)
-            SELECT operation.authorization_id, head.connection_epoch
-            FROM runner_replacement_provisioning_authorization AS operation
-            JOIN runner_replacement_workspace_ready USING (authorization_id)
-            JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
-            JOIN runner_connection_event AS event ON event.enrollment_id = head.enrollment_id
-                AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
-            WHERE operation.command_id = $1 AND event.state_kind IN ('connected', 'suspect')")
-            .bind(command.into_uuid()).execute(connection).await?;
+    sqlx::query("INSERT INTO runner_workspace_release (manifest_id,session_id,placement_revision,runner_id,enrollment_id,connection_epoch,connection_event_ordinal,relative_path,authorization_id)
+        SELECT ready.manifest_id,operation.session_id,operation.placement_revision,operation.runner_id,operation.registration_enrollment_id,
+            head.connection_epoch,head.connection_event_ordinal,ready.relative_path,operation.authorization_id
+        FROM runner_replacement_provisioning_authorization operation JOIN runner_replacement_workspace_ready ready USING (authorization_id)
+        JOIN runner_enrollment enrollment ON enrollment.enrollment_id = operation.registration_enrollment_id
+        JOIN runner_connection_authority_head head ON head.enrollment_id = enrollment.enrollment_id
+        JOIN runner_connection_event event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
+        WHERE operation.command_id = $1 AND enrollment.state_kind <> 'revoked' AND event.state_kind IN ('connected','suspect')
+        ON CONFLICT DO NOTHING")
+        .bind(command.into_uuid()).execute(&mut *connection).await?;
+    sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
+        SELECT operation.runner_id,ready.relative_path,ready.manifest_digest,'retired_present',operation.session_id,operation.placement_revision
+        FROM runner_replacement_provisioning_authorization operation JOIN runner_replacement_workspace_ready ready USING (authorization_id)
+        WHERE operation.command_id = $1 AND NOT EXISTS (SELECT 1 FROM runner_workspace_release release WHERE release.manifest_id = ready.manifest_id)
+        ON CONFLICT DO NOTHING")
+        .bind(command.into_uuid()).execute(connection).await?;
     Ok(())
 }

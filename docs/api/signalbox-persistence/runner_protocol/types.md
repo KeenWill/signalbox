@@ -615,21 +615,6 @@ impl runner_protocol::RunnerProtocolStore {
     ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
 }
 impl runner_protocol::RunnerProtocolStore {
-    pub async fn replacement_workspace_releases(
-        &self,
-        enrollment: signalbox_domain::RunnerEnrollmentId,
-    ) -> result::Result<
-        vec::Vec<signalbox_domain::ProvisionedWorkspace>,
-        runner_protocol::RunnerProtocolStoreError,
-    >;
-    pub async fn record_replacement_workspace_released(
-        &self,
-        enrollment: signalbox_domain::RunnerEnrollmentId,
-        session: signalbox_domain::SessionId,
-        revision: signalbox_domain::RunnerGeneration,
-        runner: signalbox_domain::RunnerId,
-        manifest: signalbox_domain::WorkspaceManifestId,
-    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn record_replacement_provisioning_failure(
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,
@@ -654,6 +639,7 @@ impl runner_protocol::RunnerProtocolStore {
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,
         workspace: &signalbox_domain::ProvisionedWorkspace,
+        manifest_digest: &runner_protocol::workspaces::RunnerEvidenceDigest,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
 }
 impl runner_protocol::RunnerProtocolStore {
@@ -711,6 +697,36 @@ impl runner_protocol::RunnerProtocolStore {
         runner_protocol::RunnerLeaseResumeOutcome,
         runner_protocol::RunnerProtocolStoreError,
     >;
+}
+impl runner_protocol::RunnerProtocolStore {
+    pub async fn workspace_releases(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+    ) -> result::Result<
+        vec::Vec<runner_protocol::workspaces::RunnerWorkspaceRelease>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn workspace_release_state(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        expected: &runner_protocol::workspaces::RunnerWorkspaceRelease,
+    ) -> result::Result<
+        option::Option<runner_protocol::workspaces::RunnerWorkspaceReleaseState>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn record_workspace_release_outcome(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        expected: &runner_protocol::workspaces::RunnerWorkspaceRelease,
+        failure_detail: option::Option<&value::Value>,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+}
+impl runner_protocol::RunnerProtocolStore {
+    pub async fn record_workspace_leak_page(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        page: &runner_protocol::workspaces::RunnerWorkspaceLeakPage,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
 }
 ```
 

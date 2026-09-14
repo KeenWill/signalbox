@@ -1,5 +1,6 @@
-//! Read-only traversal of current placements and retained provisioning refusals.
+//! Read-only traversal of placements, failures, and retained workspace diagnostics.
 
+use super::workspaces::{RunnerEvidenceDigest, RunnerWorkspaceLeak, RunnerWorkspaceLeakKind};
 use super::*;
 use crate::process_read::{
     ProcessReadError, ProcessRunnerProjection, load_process_runner_projection,
@@ -7,7 +8,7 @@ use crate::process_read::{
 use signalbox_domain::RunnerReplacementProvisioning;
 
 /// Exclusive position in the enrollment, placement, failure, then leak traversal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerStatusAfter {
     /// Last emitted enrollment, ordered by runner identity.
     Enrollment(Uuid),
@@ -15,8 +16,12 @@ pub enum RunnerStatusAfter {
     Placement(Uuid),
     /// Last emitted immutable provisioning authorization.
     OperationFailure(Uuid),
-    /// A leak cursor is beyond every provisioning failure.
-    WorkspaceLeak,
+    /// Last emitted leak, ordered by runner, locator, and evidence digest.
+    WorkspaceLeak {
+        runner: Uuid,
+        locator: String,
+        entry_digest: RunnerEvidenceDigest,
+    },
 }
 
 /// Current enrollment or session placement from the page's snapshot.
@@ -49,6 +54,7 @@ pub struct RunnerStatusFailure {
 pub struct RunnerStatusPage {
     pub runners: Vec<RunnerStatusFact>,
     pub failures: Vec<RunnerStatusFailure>,
+    pub leaks: Vec<(RunnerId, RunnerWorkspaceLeak)>,
     pub next_after: Option<RunnerStatusAfter>,
 }
 
@@ -170,7 +176,7 @@ pub async fn read_runner_status(
         }
     }
     let mut failures = Vec::new();
-    if runners.len() < limit && !matches!(after, Some(RunnerStatusAfter::WorkspaceLeak)) {
+    if runners.len() < limit && !matches!(after, Some(RunnerStatusAfter::WorkspaceLeak { .. })) {
         let last = match after {
             Some(RunnerStatusAfter::OperationFailure(id)) => Some(id),
             _ => None,
@@ -202,14 +208,67 @@ pub async fn read_runner_status(
             });
         }
     }
-    let next_after = if runners.len() + failures.len() > page_size as usize {
-        if failures.pop().is_none() {
+    let mut leaks = Vec::new();
+    if runners.len() + failures.len() < limit {
+        let (runner, locator, digest) = match &after {
+            Some(RunnerStatusAfter::WorkspaceLeak {
+                runner,
+                locator,
+                entry_digest,
+            }) => (
+                Some(*runner),
+                Some(locator.as_str()),
+                Some(entry_digest.as_str()),
+            ),
+            _ => (None, None, None),
+        };
+        let rows = sqlx::query(
+            "SELECT * FROM runner_workspace_leak
+            WHERE ($1::uuid IS NULL OR (runner_id, locator, entry_digest) > ($1, $2, $3))
+            ORDER BY runner_id, locator, entry_digest LIMIT $4",
+        )
+        .bind(runner)
+        .bind(locator)
+        .bind(digest)
+        .bind((limit - runners.len() - failures.len()) as i64)
+        .fetch_all(&mut *transaction)
+        .await?;
+        for row in rows {
+            leaks.push((
+                RunnerId::from_uuid(row.try_get("runner_id")?),
+                RunnerWorkspaceLeak {
+                    kind: RunnerWorkspaceLeakKind::parse(&row.try_get::<String, _>("kind")?)
+                        .ok_or(RunnerStatusError::Corruption)?,
+                    locator: WorkspaceRelativePath::try_new(row.try_get("locator")?)
+                        .map_err(|_| RunnerStatusError::Corruption)?,
+                    entry_digest: RunnerEvidenceDigest::try_new(row.try_get("entry_digest")?)
+                        .ok_or(RunnerStatusError::Corruption)?,
+                    session: row
+                        .try_get::<Option<Uuid>, _>("session_id")?
+                        .map(SessionId::from_uuid),
+                    placement_revision: row
+                        .try_get::<Option<Decimal>, _>("placement_revision")?
+                        .map(decode_generation)
+                        .transpose()?,
+                },
+            ));
+        }
+    }
+    let next_after = if runners.len() + failures.len() + leaks.len() > page_size as usize {
+        if leaks.pop().is_none() && failures.pop().is_none() {
             runners.pop();
         }
-        failures
+        leaks
             .last()
-            .map(|row| {
-                RunnerStatusAfter::OperationFailure(row.authorization.authorization.into_uuid())
+            .map(|(runner, leak)| RunnerStatusAfter::WorkspaceLeak {
+                runner: runner.into_uuid(),
+                locator: leak.locator.as_str().to_owned(),
+                entry_digest: leak.entry_digest.clone(),
+            })
+            .or_else(|| {
+                failures.last().map(|row| {
+                    RunnerStatusAfter::OperationFailure(row.authorization.authorization.into_uuid())
+                })
             })
             .or_else(|| {
                 runners.last().map(|row| match row {
@@ -228,6 +287,7 @@ pub async fn read_runner_status(
     Ok(RunnerStatusPage {
         runners,
         failures,
+        leaks,
         next_after,
     })
 }
