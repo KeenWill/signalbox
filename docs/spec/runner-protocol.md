@@ -165,7 +165,9 @@ and retained until the exact acknowledgement. Failed cleanup retains
 `workspace_cleanup_failed` until durable acknowledgement and exposes the
 surviving workspace as a `cleanup_failed` leak. Release diagnostics retain the
 manifest digest, so a startup report of the same workspace matches the retained
-leak.
+leak. A readable releasing manifest, whether still in place or below `trash/`,
+retains its canonical workspace locator, ready-manifest digest, and session
+correlation in the startup report, matching the stored cleanup diagnostic.
 
 Before accepting new provisioning or executing tools, startup reports ready and
 active manifests and unknown entries in bounded, digest-correlated pages.

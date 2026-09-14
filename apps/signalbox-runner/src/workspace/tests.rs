@@ -497,7 +497,7 @@ fn accepted_release_restarts_after_trash_manifest_was_deleted() {
 }
 
 #[test]
-fn startup_inventory_preserves_trashed_manifest_correlation() {
+fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
     let (parent, state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
     let prepared = store
@@ -511,6 +511,16 @@ fn startup_inventory_preserves_trashed_manifest_correlation() {
     releasing.lifecycle = ManifestLifecycle::Releasing;
     write_manifest(&placement, &releasing).expect("releasing manifest");
     drop(placement);
+    let in_place = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("in-place releasing inventory");
+    assert_eq!(in_place.len(), 1);
+    assert_eq!(
+        in_place[0].kind,
+        signalbox_runner_wire::LeakFactKind::Unreconciled
+    );
+    assert_eq!(in_place[0].entry_digest, prepared.manifest_digest);
+    assert_eq!(in_place[0].locator, prepared.manifest.relative_path);
 
     let trash = parent.path().join("runner-state/trash");
     fs::create_dir(&trash).expect("trash fixture");
@@ -520,6 +530,12 @@ fn startup_inventory_preserves_trashed_manifest_correlation() {
         trash.join(prepared.manifest.manifest_id.to_string()),
     )
     .expect("simulate committed release rename");
+    fs::remove_dir(
+        trash
+            .join(prepared.manifest.manifest_id.to_string())
+            .join(PRIVATE_WORKSPACE_DIRECTORY),
+    )
+    .expect("simulate partial recursive deletion with the manifest retained");
 
     let facts = store
         .startup_leaks(prepared.manifest.runner)
