@@ -1153,6 +1153,31 @@ fn runner_lifecycle_failure_class(cause: RunnerRegistrationFailureCause) -> Oper
     }
 }
 
+fn runner_listener_startup_failure(error: &RunnerProtocolRuntimeError) -> HubRuntimeError {
+    let database_failure = match error {
+        RunnerProtocolRuntimeError::Lifecycle(error) => matches!(
+            error.cause(),
+            RunnerRegistrationFailureCause::Database
+                | RunnerRegistrationFailureCause::CommitAmbiguous
+        ),
+        RunnerProtocolRuntimeError::ConnectionDrainTimeout {
+            initiating: Some(error),
+            ..
+        } => {
+            return runner_listener_startup_failure(error);
+        }
+        _ => false,
+    };
+    let mut failure = erase_startup_scan_cause(
+        runner_runtime_failure_class(error),
+        "runner_recovery_listener_stopped",
+        None,
+        None,
+    );
+    failure.database_failure = database_failure;
+    failure
+}
+
 fn report_runner_runtime_failure(error: &RunnerProtocolRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
@@ -1376,6 +1401,7 @@ async fn await_runner_reconciliation(
         stopped = runtime_tasks.join_next() => {
             if let Some(Ok(RuntimeTaskExit::Runner(Err(error)))) = stopped {
                 report_runner_runtime_failure(&error);
+                return Err(runner_listener_startup_failure(&error));
             }
             Err(erase_startup_cause(
                 RuntimePhase::StartupScan,
@@ -5832,6 +5858,59 @@ mod tests {
                 RuntimeTaskCompletion::Failed
             ),
             RuntimeStopCause::ExecutionFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_reacquires_after_a_runner_listener_database_failure() {
+        use signalbox_runner_wire::{Advertisement, CanonicalUuid, DIGEST_VERSION, Enroll};
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        use signalboxd::runner_protocol_runtime::{
+            PostgresRunnerRegistrationService, RunnerProtocolRuntimeError,
+            RunnerRegistrationService as _,
+        };
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .unwrap();
+        pool.close().await;
+        let service = PostgresRunnerRegistrationService::local(pool).unwrap();
+        let failure = service
+            .enroll(Enroll {
+                request_id: CanonicalUuid::from_uuid(uuid::Uuid::now_v7()),
+                digest_version: DIGEST_VERSION,
+                advertisement: Advertisement {
+                    default_working_directory: None,
+                    capability_classes: Vec::new(),
+                    tools: Vec::new(),
+                    workspace_capabilities: Vec::new(),
+                    sandbox_profiles: Vec::new(),
+                    credential_profiles: Vec::new(),
+                    repositories: Vec::new(),
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.cause(), RunnerRegistrationFailureCause::Database);
+        let mut runtime_tasks = JoinSet::new();
+        runtime_tasks.spawn(async move {
+            RuntimeTaskExit::Runner(Err(RunnerProtocolRuntimeError::Lifecycle(failure)))
+        });
+        let (runner_shutdown, _shutdown_receiver) = tokio::sync::watch::channel(false);
+        let error = super::await_runner_reconciliation(
+            pending(),
+            &mut runtime_tasks,
+            &runner_shutdown,
+            pending(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                super::recovery_incarnation_outcome(Err(error), true),
+                GuardedIncarnationOutcome::Reacquire
+            ),
+            "listener database failure must retry guarded recovery"
         );
     }
 
