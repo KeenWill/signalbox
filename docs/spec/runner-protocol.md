@@ -122,14 +122,14 @@ and avoids repeating the operator's configuration value.
 The runner accepts an ambient `workspace_provision` only after resolving its
 repository and optional credential profile against local configuration. Unknown
 profiles reject before the operation is journaled. Anonymous acquisition runs
-Git as a plain child process. Credentialed acquisition is unavailable.
+Git as a plain child process. Credentialed and repository-free private-root
+acquisition are unavailable.
 
 Repository workspaces live at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
-`.git` directory and no shared object store or credential-bearing remote URL.
-Repository-free private roots use the sibling `work` path. A sibling staging
-placement holds a versioned `0600` manifest outside the writable root;
-publication fsyncs the files and directories and atomically renames the
+`.git` directory and no shared object store or credential-bearing remote URL. A
+sibling staging placement holds a versioned `0600` manifest outside the writable
+root; publication fsyncs the files and directories and atomically renames the
 placement. The manifest advances from `staging` to `ready`, then to `active`
 upon an exact `workspace_recorded` acknowledgement. A repository records a
 commit, a branch and commit, or an `unborn_branch` with its name and no commit
@@ -150,14 +150,15 @@ the manifest identity and ready receipt. A changed repository mapping fails as
 `manifest_conflict`. Reconnect admits only the exact stored daemon authorization
 under the unchanged registration, and the runner resends its authenticated
 receipt until acknowledgement activates the manifest and clears the pending
-operation. The journal retains acknowledged ready facts and the execution
-directory identity until release is acknowledged. Startup authenticates these
-facts against the configuration and filesystem before reconnecting; a changed
-mapping or replaced directory fails as `manifest_conflict`. The daemon
-serializes provisioning and lease delivery on each connection until the
-corresponding durable outcome is acknowledged. Expected acquisition refusals are
-journaled as `operation_failed` and retained through heartbeat and reconnect
-until acknowledged; the runner keeps serving.
+operation. The separately published `active-workspaces.json` retains
+acknowledged ready facts and execution-directory identities until release is
+acknowledged; its aggregate size is independent of the operation-journal frame
+limit. Startup authenticates these facts against the configuration and
+filesystem before reconnecting; a changed mapping or replaced directory fails as
+`manifest_conflict`. The daemon serializes provisioning and lease delivery on
+each connection until the corresponding durable outcome is acknowledged.
+Expected acquisition refusals are journaled as `operation_failed` and retained
+through heartbeat and reconnect until acknowledged; the runner keeps serving.
 
 ## Boundary contracts
 

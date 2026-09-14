@@ -1,5 +1,6 @@
 //! Enrollment, liveness, and serial pure-tool execution runtime for `signalbox-runner`.
 
+mod active_workspaces;
 mod configuration;
 mod executor;
 mod journal;

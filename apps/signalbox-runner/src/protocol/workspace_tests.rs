@@ -14,9 +14,10 @@ fn positive() -> PositiveU64 {
     PositiveU64::try_new(1).expect("initial revision")
 }
 fn configuration() -> crate::RunnerConfiguration {
-    crate::RunnerConfiguration::parse(include_str!(
-        "../../../../config/signalbox-runner.example.toml"
-    ))
+    crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", ""),
+    )
     .expect("checked example config; no credential bytes read")
 }
 fn connection(
@@ -72,121 +73,51 @@ fn provision(receipt: &EnrollmentReceipt) -> WorkspaceProvision {
             placement_revision: positive(),
             runner_id: receipt.runner_id(),
             registration_revision: receipt.registration_revision(),
-            repository: None,
+            repository: Some(
+                signalbox_runner_wire::RepositoryKey::try_new("signalbox".to_owned())
+                    .expect("advertised repository"),
+            ),
             sandbox_profile: SandboxProfile::Ambient,
             credential_profile: None,
         },
-        recovery: None,
+        recovery: Some(signalbox_runner_wire::Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        }),
     }
 }
 
-#[tokio::test]
-async fn private_workspace_reconnect_replays_receipt_and_activates_preserved_files() {
-    let directory = tempfile::tempdir().expect("temporary parent");
-    let mut state = enrolled(&directory);
-    let receipt = state.state().receipt().expect("receipt").clone();
-    let operation = provision(&receipt);
-    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
-    let mut runner = connection(stream, receipt.clone());
-    let mut hub = BufReader::new(hub);
-    let receive_ready = async {
-        send_message(&mut hub, Message::WorkspaceProvision(operation.clone()))
-            .await
-            .expect("send provision");
-        let Message::WorkspaceReady(ready) = receive_message(&mut hub).await.expect("ready frame")
-        else {
-            panic!("ready receipt")
-        };
-        ready
-    };
-    let produce = async {
-        runner
-            .serve_one(&mut state)
-            .await
-            .expect("accept operation");
-        runner.serve_one(&mut state).await.expect("publish ready");
-    };
-    let (ready, ()) = tokio::join!(receive_ready, produce);
-    std::fs::write(
-        Path::new(&ready.working_directory).join("session-data"),
-        b"retained",
-    )
-    .expect("session data");
-    drop(runner);
-    drop(hub);
-    drop(state);
-    let mut state = RunnerStateRoot::open(&directory.path().join("state")).expect("restart");
-    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
-    let mut hub = BufReader::new(hub);
-    let resumed_runner = async {
-        let config = configuration();
-        let mut runner = RunnerConnection::establish(stream, &mut state, config.advertisement())
-            .await
-            .expect("resume retained provision")
-            .with_configuration(config);
-        runner
-            .serve_one(&mut state)
-            .await
-            .expect("authenticate and replay ready");
-        runner
-            .serve_one(&mut state)
-            .await
-            .expect("activate and clear journal");
-    };
-    let resumed_hub = async {
-        let Message::Resume(resume) = receive_message(&mut hub).await.expect("resume frame") else {
-            panic!("resume")
-        };
-        assert!(resume.inventory.workspace_operation.is_some());
-        send_message(
-            &mut hub,
-            Message::Resumed(Box::new(Resumed {
-                registration_revision: receipt.registration_revision(),
-                connection_epoch: positive(),
-                directives: ReconnectDirectives {
-                    workspace_operation: Some(Directive {
-                        correlation: OperationCorrelation::Provision(operation.correlation.clone()),
-                        action: DirectiveAction::Await,
-                    }),
-                    ..Default::default()
-                },
-            })),
-        )
-        .await
-        .expect("await exact receipt");
-        assert_eq!(
-            receive_message(&mut hub).await.expect("replayed frame"),
-            Message::WorkspaceReady(ready.clone())
-        );
-        send_message(
-            &mut hub,
-            Message::WorkspaceRecorded(WorkspaceRecorded {
-                correlation: ready.correlation.clone(),
-                manifest_id: ready.ready.manifest.manifest_id,
-                manifest_digest: ready.ready.manifest_digest.clone(),
-            }),
-        )
-        .await
-        .expect("ack receipt");
-    };
-    tokio::join!(resumed_runner, resumed_hub);
-    assert!(state.reconnect_inventory().workspace_operation.is_none());
-    assert_eq!(
-        std::fs::read(Path::new(&ready.working_directory).join("session-data"))
-            .expect("preserved file"),
-        b"retained"
+async fn prepared_repository(
+    state: &RunnerStateRoot,
+    operation: WorkspaceProvision,
+) -> signalbox_runner_wire::WorkspaceReady {
+    let correlation = operation.correlation;
+    let request = crate::workspace::RepositoryWorkspaceRequest::new(
+        correlation.session_id,
+        correlation.placement_revision,
+        correlation.runner_id,
+        correlation
+            .repository
+            .clone()
+            .expect("repository acquisition fixture"),
+        signalbox_runner_wire::clone_url_digest("https://github.com/KeenWill/signalbox.git"),
+        None,
+        correlation.sandbox_profile,
     );
-    let document: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            Path::new(&ready.working_directory)
-                .parent()
-                .expect("placement")
-                .join("workspace-manifest.json"),
-        )
-        .expect("manifest"),
-    )
-    .expect("JSON manifest");
-    assert_eq!(document["manifest"]["lifecycle"], "active");
+    let recovery = operation.recovery.expect("repository recovery");
+    let prepared = state
+        .workspace_store()
+        .expect("workspace store")
+        .prepare_repository_workspace(&request, |_| async { Ok::<_, std::io::Error>(recovery) })
+        .await
+        .expect("published repository fixture");
+    signalbox_runner_wire::WorkspaceReady {
+        correlation,
+        working_directory: prepared.execution_directory.as_str().to_owned(),
+        ready: signalbox_runner_wire::ReadyManifest {
+            manifest: prepared.manifest,
+            manifest_digest: prepared.manifest_digest,
+        },
+    }
 }
 
 #[tokio::test]
@@ -378,20 +309,14 @@ async fn failed_anonymous_clone(missing_revision: bool) {
     let mut next = request;
     next.correlation.authorization_id = identity();
     next.correlation.session_id = identity();
-    next.correlation.repository = None;
-    next.recovery = None;
     runner
         .serve_message(&mut state, Message::WorkspaceProvision(next))
         .await
         .expect("next operation is accepted after refusal");
-    runner
-        .serve_one(&mut state)
-        .await
-        .expect("next private root ready");
-    assert!(matches!(
-        receive_message(&mut hub).await.expect("next receipt"),
-        Message::WorkspaceReady(_)
-    ));
+    assert!(
+        state.retained_provision().is_some(),
+        "a subsequent repository operation is admitted"
+    );
     // A provision-success receipt cannot be retired with an unrelated failure acknowledgement.
     assert!(
         runner
@@ -413,12 +338,7 @@ async fn release_journal_survives_disconnect_and_clears_only_on_exact_acknowledg
     let mut state = enrolled(&directory);
     let receipt = state.state().receipt().expect("receipt").clone();
     let operation = provision(&receipt);
-    let checked = crate::workspace::provision::CheckedProvision::check(&configuration(), operation)
-        .expect("private provision");
-    let ready = checked
-        .prepare(state.workspace_store().expect("store"))
-        .await
-        .expect("ready");
+    let ready = prepared_repository(&state, operation).await;
     let release = ReleaseCorrelation {
         session_id: ready.correlation.session_id,
         placement_revision: ready.correlation.placement_revision,
@@ -560,14 +480,18 @@ async fn rejected_replacement_after_workspace_ready_is_deleted_and_release_is_se
     let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt.clone());
     let mut hub = BufReader::new(hub);
-    runner
-        .serve_message(&mut state, Message::WorkspaceProvision(operation))
-        .await
-        .expect("accepted provisioning");
+    state
+        .record_provision(operation.clone())
+        .expect("accepted repository operation");
+    let ready = prepared_repository(&state, operation).await;
+    state
+        .record_workspace_ready(ready)
+        .expect("retained repository receipt");
+    runner.ensure_workspace(&state).expect("retained workspace");
     runner
         .serve_one(&mut state)
         .await
-        .expect("finished provisioning");
+        .expect("replayed repository receipt");
     let Message::WorkspaceReady(ready) = receive_message(&mut hub).await.expect("ready frame")
     else {
         panic!("ready receipt")
@@ -631,10 +555,10 @@ async fn rejected_replacement_after_workspace_ready_is_deleted_and_release_is_se
         .await
         .expect("duplicate acknowledgement");
     assert!(state.reconnect_inventory().workspace_operation.is_none());
-    runner
-        .serve_message(&mut state, Message::WorkspaceProvision(provision(&receipt)))
-        .await
-        .expect("runner still serves provisioning");
+    assert!(
+        runner.workspace.is_none(),
+        "settled release leaves the runner available"
+    );
 }
 
 #[tokio::test]
@@ -644,14 +568,7 @@ async fn reconnect_resumes_accepted_cleanup_and_discards_durably_recorded_comple
         let directory = tempfile::tempdir().expect("temporary parent");
         let mut state = enrolled(&directory);
         let receipt = state.state().receipt().expect("receipt").clone();
-        let ready = crate::workspace::provision::CheckedProvision::check(
-            &configuration(),
-            provision(&receipt),
-        )
-        .expect("private provision")
-        .prepare(state.workspace_store().expect("store"))
-        .await
-        .expect("ready");
+        let ready = prepared_repository(&state, provision(&receipt)).await;
         let correlation = ReleaseCorrelation {
             session_id: ready.correlation.session_id,
             placement_revision: ready.correlation.placement_revision,
