@@ -1931,6 +1931,9 @@ async fn run_hub_incarnation(
             runtime_tasks.shutdown().await;
             let mut outcome =
                 completed_runtime_outcome(combine_runtime_stop_cause(cause, completion), drain);
+            if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
+                outcome = ShutdownOutcome::GuardLost;
+            }
             if outcome == ShutdownOutcome::GuardLost {
                 let _ = database.close().await;
             } else if should_close_pool(&Ok(outcome))
