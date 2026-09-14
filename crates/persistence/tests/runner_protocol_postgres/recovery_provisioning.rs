@@ -872,9 +872,11 @@ async fn rejected_staging_releases_ready_workspace(
             signalbox_persistence::runner_protocol::status::read_runner_status(&pool, 100, None)
                 .await?;
         assert!(
-            page.leaks.iter().any(
-                |(runner, leak)| *runner == ready.runner && leak.locator == ready.relative_path
-            )
+            page.leaks
+                .iter()
+                .any(|(runner, leak)| *runner == ready.runner
+                    && leak.locator == ready.relative_path
+                    && leak.entry_digest.as_str() == ready_digest().as_str())
         );
         return Ok(());
     }
@@ -934,7 +936,8 @@ async fn rejected_staging_releases_ready_workspace(
             page.leaks
                 .iter()
                 .any(|(runner, leak)| *runner == ready.runner
-                    && leak.kind == RunnerWorkspaceLeakKind::CleanupFailed)
+                    && leak.kind == RunnerWorkspaceLeakKind::CleanupFailed
+                    && leak.entry_digest.as_str() == ready_digest().as_str())
         );
         return Ok(());
     }

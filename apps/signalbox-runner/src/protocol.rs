@@ -510,6 +510,7 @@ pub struct RunnerConnection<S> {
     startup_report: leaks::StartupReport,
     leak_sent: bool,
     last_leak_recorded: Option<signalbox_runner_wire::WorkspaceLeakRecorded>,
+    deferred_provision: Option<signalbox_runner_wire::WorkspaceProvision>,
     deferred_dispatch: Option<signalbox_runner_wire::Dispatch>,
     deferred_release: Option<signalbox_runner_wire::WorkspaceRelease>,
     offer_claimed: bool,
@@ -721,6 +722,7 @@ where
             startup_report: leaks::StartupReport::default(),
             leak_sent: false,
             last_leak_recorded: None,
+            deferred_provision: None,
             deferred_dispatch: None,
             deferred_release: None,
             offer_claimed: false,
@@ -981,6 +983,17 @@ where
                     return Err(lease_mismatch());
                 }
                 self.check_workspace(provision.clone())?;
+                if !self.startup_report.complete() {
+                    if self
+                        .deferred_provision
+                        .as_ref()
+                        .is_some_and(|prior| prior != &provision)
+                    {
+                        return Err(RunnerStateError::InvalidTransition.into());
+                    }
+                    self.deferred_provision = Some(provision);
+                    return Ok(None);
+                }
                 state.record_provision(provision)?;
                 self.ensure_workspace(state)?;
                 self.send_retained_workspace(state).await?;

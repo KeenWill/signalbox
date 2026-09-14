@@ -168,9 +168,11 @@ pub(super) async fn retain_release_leak(
     kind: &str,
 ) -> Result<(), RunnerProtocolStoreError> {
     sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
-        SELECT runner_id, relative_path,
-            encode(sha256(convert_to(jsonb_build_object('manifest_id',manifest_id,'session_id',session_id,'placement_revision',placement_revision)::text,'UTF8')),'hex'),
-            $2,session_id,placement_revision FROM runner_workspace_release WHERE manifest_id = $1
+        SELECT release.runner_id, release.relative_path,
+            COALESCE(ready.manifest_digest, encode(sha256(convert_to(jsonb_build_object('manifest_id',release.manifest_id,'session_id',release.session_id,'placement_revision',release.placement_revision)::text,'UTF8')),'hex')),
+            $2,release.session_id,release.placement_revision FROM runner_workspace_release release
+        LEFT JOIN runner_replacement_workspace_ready ready USING (authorization_id)
+        WHERE release.manifest_id = $1
         ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind")
         .bind(manifest).bind(kind).execute(connection).await?;
     Ok(())

@@ -154,6 +154,7 @@ fn fixture(
         startup_report: leaks::StartupReport::Disabled,
         leak_sent: false,
         last_leak_recorded: None,
+        deferred_provision: None,
         deferred_dispatch: None,
         deferred_release: None,
         offer_claimed: false,

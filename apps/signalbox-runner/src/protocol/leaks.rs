@@ -75,7 +75,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         if self.startup_report.complete()
             && state.reconnect_inventory().workspace_operation.is_none()
         {
-            if let Some(dispatch) = self.deferred_dispatch.take() {
+            if let Some(provision) = self.deferred_provision.take() {
+                self.serve_message(state, Message::WorkspaceProvision(provision))
+                    .await?;
+            } else if let Some(dispatch) = self.deferred_dispatch.take() {
                 self.serve_message(state, Message::Dispatch(dispatch))
                     .await?;
             } else if !self.offer_claimed
