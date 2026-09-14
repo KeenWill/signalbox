@@ -490,7 +490,8 @@ recovery-exhausted reason. A fresh generation and startup reconstitution precede
 resumed admission. The runtime guard watcher completes a successful guard check
 before repository-watch recovery can start workers. Final runtime admission
 requires another successful check, with its watcher retained through shutdown.
-Shutdown signals remain effective during recovery.
+Shutdown signals remain effective during recovery, including runner startup
+reconciliation; the recovery listener drains under the runtime shutdown window.
 
 On SIGINT or SIGTERM the listener stops accepting requests, follow streams
 close, the dispatcher stops starting transactions, the scheduler stops admitting

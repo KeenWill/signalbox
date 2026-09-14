@@ -1326,6 +1326,35 @@ async fn shutdown_requested(signals: &mut std::io::Result<TerminationSignals>) -
     }
 }
 
+async fn await_runner_reconciliation(
+    reconciliation: impl Future<Output = Result<(), HubRuntimeError>>,
+    runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
+    runner_shutdown: &watch::Sender<bool>,
+    shutdown: impl Future<Output = bool>,
+) -> Result<Option<RuntimeStopCause>, HubRuntimeError> {
+    select! {
+        biased;
+        listener_failed = shutdown => {
+            let _ = runner_shutdown.send(true);
+            Ok(Some(if listener_failed {
+                RuntimeStopCause::SignalListenerFailed
+            } else {
+                RuntimeStopCause::Requested
+            }))
+        }
+        result = reconciliation => result.map(|()| None),
+        stopped = runtime_tasks.join_next() => {
+            if let Some(Ok(RuntimeTaskExit::Runner(Err(error)))) = stopped {
+                report_runner_runtime_failure(&error);
+            }
+            Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("runner_recovery_listener_stopped"),
+            ))
+        }
+    }
+}
+
 async fn initialize_prometheus(
     configuration: &TelemetryConfiguration,
 ) -> Option<(TelemetryMetrics, PrometheusServer)> {
@@ -1862,29 +1891,59 @@ async fn run_hub_incarnation(
             () = runner_pool.close_event() => Ok(()),
         })
     });
-    let runner_reconciliation = async {
-        tokio::select! {
-            result = runner_service.reconcile_startup(prior_connections) => {
-                result.map(|_| ()).map_err(|_| {
+    let mut termination_signals = TerminationSignals::new();
+    let runner_reconciliation = await_runner_reconciliation(
+        async {
+            runner_service
+                .reconcile_startup(prior_connections)
+                .await
+                .map(|_| ())
+                .map_err(|_| {
                     erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
                     )
                 })
-            }
-            stopped = runtime_tasks.join_next() => {
-                if let Some(Ok(RuntimeTaskExit::Runner(Err(error)))) = stopped {
-                    report_runner_runtime_failure(&error);
-                }
-                Err(erase_startup_cause(
-                    RuntimePhase::StartupScan,
-                    SanitizedStartupCause::Static("runner_recovery_listener_stopped"),
-                ))
-            }
-        }
-    };
+        },
+        &mut runtime_tasks,
+        &runner_shutdown,
+        shutdown_requested(&mut termination_signals),
+    );
     match await_while_guarded(&mut database, runner_reconciliation).await {
-        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Ok(None)) => {}
+        GuardedAwait::Completed(Ok(Some(cause))) => {
+            let drain = drain_runtime_tasks(
+                &mut runtime_tasks,
+                std::future::pending(),
+                async {
+                    if shutdown_requested(&mut termination_signals).await {
+                        tracing::error!("termination signal listener failed during shutdown");
+                    }
+                },
+                shutdown_grace_window,
+            );
+            let (drain, completion) = match await_while_guarded(&mut database, drain).await {
+                GuardedAwait::Completed(result) => result,
+                GuardedAwait::GuardLost => {
+                    (RuntimeDrainOutcome::GuardLost, RuntimeTaskCompletion::Clean)
+                }
+            };
+            runtime_tasks.shutdown().await;
+            let mut outcome =
+                completed_runtime_outcome(combine_runtime_stop_cause(cause, completion), drain);
+            if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
+                outcome = ShutdownOutcome::GuardLost;
+            }
+            if outcome == ShutdownOutcome::GuardLost {
+                let _ = database.close().await;
+            } else if should_close_pool(&Ok(outcome))
+                && let Err(error) = database.close().await
+            {
+                report_database_close_failure(&error);
+                outcome = database_close_failure_outcome(outcome);
+            }
+            return Ok(outcome);
+        }
         GuardedAwait::Completed(Err(error)) => {
             return startup_failure_after_close(error, database.close().await);
         }
@@ -2657,7 +2716,6 @@ async fn run_hub_incarnation(
                 runtime.with_repository_watch(workflow_repository_watch),
             )
         });
-    let mut termination_signals = TerminationSignals::new();
     let (guard_ready, guarded_startup) = oneshot::channel();
     let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
     let mut repository_watch_worker = None;
@@ -5709,6 +5767,48 @@ mod tests {
             ),
             RuntimeStopCause::ExecutionFailed
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn termination_stops_startup_while_runner_reconciliation_waits_for_reconnect() {
+        for (listener_failed, expected) in [
+            (false, RuntimeStopCause::Requested),
+            (true, RuntimeStopCause::SignalListenerFailed),
+        ] {
+            let (runner_shutdown, mut stopped) = tokio::sync::watch::channel(false);
+            let mut runtime_tasks = JoinSet::new();
+            runtime_tasks.spawn(async move {
+                stopped.wait_for(|shutdown| *shutdown).await.unwrap();
+                RuntimeTaskExit::Runner(Ok(()))
+            });
+            let (signal, received) = oneshot::channel();
+            let outcome = {
+                let waiting = super::await_runner_reconciliation(
+                    pending(),
+                    &mut runtime_tasks,
+                    &runner_shutdown,
+                    async { received.await.unwrap() },
+                );
+                tokio::pin!(waiting);
+                assert!(timeout(Duration::from_secs(1), &mut waiting).await.is_err());
+                signal.send(listener_failed).unwrap();
+                timeout(Duration::from_secs(1), waiting)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            };
+            assert_eq!(outcome, Some(expected));
+            assert!(matches!(
+                timeout(Duration::from_secs(1), runtime_tasks.join_next())
+                    .await
+                    .unwrap(),
+                Some(Ok(RuntimeTaskExit::Runner(Ok(()))))
+            ));
+            assert!(
+                runtime_tasks.is_empty(),
+                "the early runner task settled its shutdown"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
