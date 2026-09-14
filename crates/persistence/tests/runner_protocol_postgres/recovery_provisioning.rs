@@ -817,6 +817,15 @@ async fn rejected_staging_releases_ready_workspace(
         );
         return Ok(());
     }
+    store
+        .validate_replacement_workspace_release(
+            candidate.identities().enrollment(),
+            session,
+            ready.placement_revision,
+            ready.runner,
+            ready.manifest_id,
+        )
+        .await?;
     if successor_epoch {
         store
             .transition_connection(

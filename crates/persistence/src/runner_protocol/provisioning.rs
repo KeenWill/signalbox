@@ -6,6 +6,37 @@ use signalbox_domain::{
 };
 
 impl RunnerProtocolStore {
+    /// Checks retained staging-release authority before a reconnect changes epochs.
+    pub async fn validate_replacement_workspace_release(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        session: SessionId,
+        revision: RunnerGeneration,
+        runner: RunnerId,
+        manifest: WorkspaceManifestId,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS (
+            SELECT 1 FROM runner_replacement_provisioning_authorization operation
+            JOIN replace_lost_runner_result result USING (command_id)
+            JOIN runner_replacement_workspace_ready ready USING (authorization_id)
+            JOIN runner_replacement_workspace_release cleanup USING (authorization_id)
+            JOIN runner_enrollment enrollment ON enrollment.enrollment_id = operation.registration_enrollment_id
+            WHERE enrollment.enrollment_id = $1 AND enrollment.state_kind <> 'revoked'
+                AND operation.session_id = $2 AND operation.placement_revision = $3
+                AND operation.runner_id = $4 AND enrollment.runner_id = $4
+                AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
+                AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption consumption
+                    WHERE consumption.authorization_id = operation.authorization_id))")
+            .bind(enrollment.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
+            .bind(runner.into_uuid()).bind(manifest.into_uuid()).fetch_one(&self.pool).await?;
+        if !valid {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        Ok(())
+    }
+
     /// Reauthorizes an exact journaled staging release on its owner's current connection.
     pub async fn reauthorize_replacement_workspace_release(
         &self,
