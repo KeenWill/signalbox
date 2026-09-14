@@ -46,6 +46,7 @@ fn connection(
         deferred_dispatch: None,
         deferred_release: None,
         deferred_provision: None,
+        deferred_promotion: None,
         offer_claimed: false,
         receipt,
         advertisement: config.advertisement().clone(),
@@ -1650,4 +1651,90 @@ async fn restart_authenticates_pending_ready_before_and_after_activation() {
             .expect("exact published ready facts authenticate");
         assert_eq!(state.retained_provision(), Some((&request, Some(&ready))));
     }
+}
+
+#[tokio::test]
+async fn promotion_waits_for_the_startup_scan_and_report_acknowledgement() {
+    use signalbox_runner_wire::WorkspaceLeakRecorded;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let root = directory.path().join("state");
+    let mut state = RunnerStateRoot::open(&root).expect("private root");
+    let receipt = EnrollmentReceipt::new(
+        state.state().request_id(),
+        identity(),
+        identity(),
+        identity(),
+        positive(),
+        advertisement_digest(configuration().advertisement()).expect("digest"),
+        EnrollmentAuthority::ReplacementPending,
+    );
+    state
+        .record_receipt(receipt.clone())
+        .expect("pending receipt");
+    let enrollment_before =
+        std::fs::read(root.join("enrollment-state.json")).expect("enrollment document");
+    let store = state.workspace_store().expect("workspace store");
+    let runner_id = receipt.runner_id();
+    let (proceed, paused) = tokio::sync::oneshot::channel();
+    let scan = tokio::spawn(async move {
+        paused.await.expect("scan released");
+        store.scan_startup_leaks(runner_id).await
+    });
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut hub = BufReader::new(hub);
+    let mut runner = connection(stream, receipt.clone()).with_configuration(configuration());
+    runner.startup_report = leaks::StartupReport::Scanning(scan);
+    let promoted = signalbox_runner_wire::Enrolled {
+        request_id: receipt.request_id(),
+        enrollment_id: receipt.enrollment_id(),
+        runner_id: receipt.runner_id(),
+        authentication_id: receipt.authentication_id(),
+        registration_revision: receipt.registration_revision(),
+        advertisement_digest: receipt.advertisement_digest().clone(),
+        connection_epoch: positive(),
+    };
+    runner
+        .serve_message(&mut state, Message::Enrolled(promoted))
+        .await
+        .expect("promotion deferred");
+    assert_eq!(state.state().receipt(), Some(&receipt));
+    assert_eq!(runner.receipt, receipt);
+    assert_eq!(
+        std::fs::read(root.join("enrollment-state.json")).expect("enrollment document"),
+        enrollment_before
+    );
+    proceed.send(()).expect("finish scan");
+    runner.serve_one(&mut state).await.expect("scan completes");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("publish startup page");
+    let Message::WorkspaceLeakPage(report) = receive_message(&mut hub).await.expect("startup page")
+    else {
+        panic!("startup report");
+    };
+    assert!(
+        report.page.facts.is_empty(),
+        "runner state publications produce no diagnostic"
+    );
+    assert_eq!(state.state().receipt(), Some(&receipt));
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceLeakRecorded(WorkspaceLeakRecorded {
+                correlation: report.page.correlation,
+                page_digest: report.page.page_digest,
+            }),
+        )
+        .await
+        .expect("report acknowledged");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("apply deferred promotion");
+    assert_eq!(runner.receipt.authority(), EnrollmentAuthority::Active);
+    assert_eq!(state.state().receipt(), Some(&runner.receipt));
+    drop(state);
+    let reopened = RunnerStateRoot::open(&root).expect("restart after promotion");
+    assert_eq!(reopened.state().receipt(), Some(&runner.receipt));
 }

@@ -224,9 +224,10 @@ and active-workspace documents and the managed `sessions/` and `trash/` trees. A
 complete report removes report-derived diagnostics absent from its retained
 facts; independent loss and release outcomes remain retained. Scanning waits for
 canceled staging cleanup to finish; successfully removed unpublished workspaces
-produce no leak fact. Provisioning waits until every startup page is
-acknowledged. The daemon reconciles exact retained ready facts, including the
-reconstructed ready manifest of a current initial placement and the retained
+produce no leak fact. Promotion receipt persistence and provisioning wait until
+every startup page is acknowledged, keeping enrollment document publication
+outside the scan. The daemon reconciles exact retained ready facts, including
+the reconstructed ready manifest of a current initial placement and the retained
 source of an abandoned initial placement. An abandoned workspace whose owner was
 lost keeps its retired-present diagnostic. A live page's transaction validates
 the physical connection epoch before storage or equal replay. Authenticated
