@@ -1037,3 +1037,101 @@ async fn check_workspace_tool_exclusion(release: bool) {
         assert!(runner.workspace.is_none(), "{authority:?}");
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+enum PendingReadyDamage {
+    MissingPlacement,
+    CorruptManifest,
+    SymlinkedExecutionDirectory,
+}
+
+async fn pending_ready_fixture(
+    activated: bool,
+) -> (
+    TempDir,
+    WorkspaceProvision,
+    signalbox_runner_wire::WorkspaceReady,
+) {
+    let directory = tempfile::tempdir().expect("pending ready parent");
+    let mut state = enrolled(&directory);
+    let request = provision(state.state().receipt().expect("enrollment"));
+    state
+        .record_provision(request.clone(), configured_clone_url_digest())
+        .expect("accepted provision");
+    let ready = prepared_repository(&state, request.clone()).await;
+    state
+        .record_workspace_ready(ready.clone())
+        .expect("retained ready receipt");
+    if activated {
+        state
+            .workspace_store()
+            .expect("workspace store")
+            .activate(
+                &crate::workspace::provision::prepared_receipt(&ready).expect("prepared receipt"),
+            )
+            .expect("activation before acknowledgement is journaled");
+    }
+    drop(state);
+    (directory, request, ready)
+}
+
+#[tokio::test]
+async fn restart_rejects_damaged_pending_ready_placements_without_replacing_the_receipt() {
+    for damage in [
+        PendingReadyDamage::MissingPlacement,
+        PendingReadyDamage::CorruptManifest,
+        PendingReadyDamage::SymlinkedExecutionDirectory,
+    ] {
+        let (directory, request, ready) = pending_ready_fixture(false).await;
+        let execution = Path::new(&ready.working_directory);
+        let placement = execution.parent().expect("placement directory");
+        match damage {
+            PendingReadyDamage::MissingPlacement => {
+                std::fs::remove_dir_all(placement).expect("remove ready placement")
+            }
+            PendingReadyDamage::CorruptManifest => {
+                std::fs::write(placement.join("workspace-manifest.json"), b"not JSON")
+                    .expect("corrupt retained manifest")
+            }
+            PendingReadyDamage::SymlinkedExecutionDirectory => {
+                std::fs::remove_dir_all(execution).expect("remove execution directory");
+                let unrelated = directory.path().join("unrelated");
+                std::fs::create_dir(&unrelated).expect("unrelated directory");
+                std::os::unix::fs::symlink(unrelated, execution)
+                    .expect("replace execution directory with symlink");
+            }
+        }
+        let root = directory.path().join("state");
+        let state = RunnerStateRoot::open(&root).expect("journal remains readable");
+        let before = state.reconnect_inventory();
+        assert!(
+            matches!(
+                state.authenticate_active_workspaces(&configuration()),
+                Err(crate::WorkspaceProvisionError::ManifestConflict)
+            ),
+            "{damage:?}"
+        );
+        assert_eq!(state.reconnect_inventory(), before);
+        drop(state);
+        let state = RunnerStateRoot::open(&root).expect("conflict preserves the journal");
+        assert_eq!(
+            state.retained_provision(),
+            Some((&request, Some(&ready))),
+            "{damage:?}"
+        );
+        assert!(state.retained_provision_failure().is_none());
+    }
+}
+
+#[tokio::test]
+async fn restart_authenticates_pending_ready_before_and_after_activation() {
+    for activated in [false, true] {
+        let (directory, request, ready) = pending_ready_fixture(activated).await;
+        let state =
+            RunnerStateRoot::open(&directory.path().join("state")).expect("pending ready restart");
+        state
+            .authenticate_active_workspaces(&configuration())
+            .expect("exact published ready facts authenticate");
+        assert_eq!(state.retained_provision(), Some((&request, Some(&ready))));
+    }
+}

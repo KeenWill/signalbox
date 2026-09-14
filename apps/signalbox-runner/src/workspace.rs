@@ -224,6 +224,21 @@ impl RunnerWorkspaceStore {
         &self,
         ready: &signalbox_runner_wire::WorkspaceReady,
     ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
+        self.authenticate_published(ready, false)
+    }
+
+    pub(crate) fn authenticate_pending_ready(
+        &self,
+        ready: &signalbox_runner_wire::WorkspaceReady,
+    ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
+        self.authenticate_published(ready, true)
+    }
+
+    fn authenticate_published(
+        &self,
+        ready: &signalbox_runner_wire::WorkspaceReady,
+        allow_ready: bool,
+    ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
         validate_root_directory(&self.canonical_root, &self.root)
             .map_err(RunnerWorkspaceError::Io)?;
         let expected = &ready.ready.manifest;
@@ -234,7 +249,9 @@ impl RunnerWorkspaceStore {
         let placement = open_directory(&session, &expected.placement_revision.get().to_string())
             .map_err(RunnerWorkspaceError::Io)?;
         let mut manifest = read_manifest(&placement)?;
-        if manifest.lifecycle != ManifestLifecycle::Active {
+        if manifest.lifecycle != ManifestLifecycle::Active
+            && !(allow_ready && manifest.lifecycle == ManifestLifecycle::Ready)
+        {
             return Err(RunnerWorkspaceError::ManifestConflict);
         }
         manifest.lifecycle = ManifestLifecycle::Ready;
