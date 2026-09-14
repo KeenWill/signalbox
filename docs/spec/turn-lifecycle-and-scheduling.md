@@ -287,12 +287,13 @@ the fence migration has run, runs the remaining migrations, and binds the runner
 socket in recovery-only mode. Authenticated resume reconciles retained leases
 and results before the generic scan; ordinary enrollment is retryably refused.
 Recovery waits for outstanding execution authority and in-progress resume to
-settle, rechecks retained replacement commands, and marks only unreplaced
-prior-process connection epochs lost. With no retained execution it completes
-immediately. The generic scan excludes unsettled runner-owned attempts. Recovery
-admission precedes blob namespace checks and recovery frames access no blob
-state. After the generic scan, startup initializes configured blob stores, binds
-the process socket, and enables ordinary enrollment and scheduling. A blob-store
+settle, rechecks durable execution even without a connection notification,
+rechecks retained replacement commands, and marks only unreplaced prior-process
+connection epochs lost. With no retained execution it completes immediately. The
+generic scan excludes unsettled runner-owned attempts. Recovery admission
+precedes blob namespace checks and recovery frames access no blob state. After
+the generic scan, startup initializes configured blob stores, binds the process
+socket, and enables ordinary enrollment and scheduling. A blob-store
 initialization failure makes that store unavailable and does not fail the phase.
 Any other phase failure is a failed startup with a classified, key-bearing log
 line and a failure exit code.
@@ -490,7 +491,8 @@ recovery-exhausted reason. A fresh generation and startup reconstitution precede
 resumed admission. The runtime guard watcher completes a successful guard check
 before repository-watch recovery can start workers. Final runtime admission
 requires another successful check, with its watcher retained through shutdown.
-Shutdown signals remain effective during recovery.
+Shutdown signals remain effective during recovery, including runner startup
+reconciliation; the recovery listener drains under the runtime shutdown window.
 
 On SIGINT or SIGTERM the listener stops accepting requests, follow streams
 close, the dispatcher stops starting transactions, the scheduler stops admitting

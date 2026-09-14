@@ -1045,7 +1045,7 @@ where
                 if self.pending_offer.is_some() || self.execution.is_some() {
                     return Err(lease_mismatch());
                 }
-                self.check_workspace(provision.clone())?;
+                let checked = self.check_workspace(provision.clone())?;
                 if !self.startup_report.complete() {
                     if self
                         .deferred_provision
@@ -1057,7 +1057,7 @@ where
                     self.deferred_provision = Some(provision);
                     return Ok(None);
                 }
-                state.record_provision(provision)?;
+                state.record_provision(provision, checked.canonical_clone_url_digest().clone())?;
                 self.ensure_workspace(state)?;
                 self.send_retained_workspace(state).await?;
                 Ok(None)
