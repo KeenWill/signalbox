@@ -897,6 +897,16 @@ async fn rejected_staging_releases_ready_workspace(
             .await
             .is_err()
     );
+    if !cleanup_failed {
+        assert_cleanable_report_has_no_leak(
+            &store,
+            &pool,
+            candidate.identities().enrollment(),
+            &ready,
+            false,
+        )
+        .await?;
+    }
     let detail = serde_json::json!({"code":"rename-denied", "message":"cannot rename /private/work", "payload":{"path":"/private/work"}});
     if cleanup_failed {
         for _ in 0..2 {
@@ -975,6 +985,14 @@ async fn rejected_staging_releases_ready_workspace(
             .await?
             .is_empty()
     );
+    assert_cleanable_report_has_no_leak(
+        &store,
+        &pool,
+        candidate.identities().enrollment(),
+        &ready,
+        true,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1039,6 +1057,30 @@ async fn startup_report_matches_the_retained_release_leak(
     assert_eq!(
         rows, 1,
         "startup reconciles the existing release leak instead of duplicating it"
+    );
+    let trash = [LeakFact {
+        kind: LeakFactKind::RetiredPresent,
+        locator: format!("trash/{}", ready.manifest_id.into_uuid()),
+        // Arbitrary observed metadata digest after the ready manifest was deleted.
+        entry_digest: Digest::try_new("e".repeat(64))?,
+        session: None,
+        placement_revision: None,
+    }];
+    let report = leak_report_digest(&trash)?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            &super::status::report_page(&report, 1, None, true, &trash),
+        )
+        .await?;
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(ready.runner.into_uuid())
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        rows, 1,
+        "manifest-free trash reconciles the retained release diagnostic"
     );
     Ok(())
 }
@@ -1118,5 +1160,54 @@ async fn lost_live_lease_retains_manifest(claimed: bool) -> Result<(), Box<dyn E
     assert_eq!(leak.entry_digest.as_str(), digest.as_str());
     assert_eq!(leak.session, Some(workspace.session));
     assert_eq!(leak.placement_revision, Some(workspace.placement_revision));
+    Ok(())
+}
+
+async fn assert_cleanable_report_has_no_leak(
+    store: &RunnerProtocolStore,
+    pool: &PgPool,
+    enrollment: signalbox_domain::RunnerEnrollmentId,
+    ready: &ProvisionedWorkspace,
+    completed: bool,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, Digest, LeakFact, LeakFactKind, PositiveU64, leak_report_digest,
+    };
+    let mut facts = vec![LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: ready.relative_path.as_str().to_owned(),
+        entry_digest: Digest::try_new(ready_digest().as_str().to_owned())?,
+        session: Some(CanonicalUuid::from_uuid(ready.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(ready.placement_revision.get())?),
+    }];
+    if completed {
+        // A later scan observes an unrelated entry, producing a fresh report identity.
+        facts.push(LeakFact {
+            kind: LeakFactKind::RetiredPresent,
+            locator: "trash/unrelated".to_owned(),
+            entry_digest: Digest::try_new("e".repeat(64))?,
+            session: None,
+            placement_revision: None,
+        });
+    }
+    facts.sort();
+    let report = leak_report_digest(&facts)?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            &super::status::report_page(&report, 1, None, true, &facts),
+        )
+        .await?;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+    )
+    .bind(ready.runner.into_uuid())
+    .bind(ready.relative_path.as_str())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        rows, 0,
+        "pending and completed releases are reconciled by startup reporting"
+    );
     Ok(())
 }

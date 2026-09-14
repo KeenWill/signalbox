@@ -550,6 +550,26 @@ fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
         fact.placement_revision,
         Some(prepared.manifest.placement_revision)
     );
+    fs::remove_file(
+        trash
+            .join(prepared.manifest.manifest_id.to_string())
+            .join(MANIFEST_FILE),
+    )
+    .expect("simulate manifest deletion before the final directory removal fails");
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("manifest-free trash inventory");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].locator,
+        format!("trash/{}", prepared.manifest.manifest_id)
+    );
+    assert_eq!(
+        facts[0].kind,
+        signalbox_runner_wire::LeakFactKind::RetiredPresent
+    );
+    assert_eq!(facts[0].session, None);
+    assert_eq!(facts[0].placement_revision, None);
 }
 
 #[test]

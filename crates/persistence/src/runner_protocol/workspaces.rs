@@ -434,6 +434,25 @@ async fn reconcile_leak(
     fact: &RunnerWorkspaceLeak,
 ) -> Result<Option<RunnerWorkspaceLeakKind>, RunnerProtocolStoreError> {
     use RunnerWorkspaceLeakKind as Kind;
+    if fact.kind == Kind::RetiredPresent
+        && fact.session.is_none()
+        && fact.placement_revision.is_none()
+        && let Some(name) = fact.locator.as_str().strip_prefix("trash/")
+        && let Ok(manifest) = Uuid::parse_str(name)
+        && manifest.to_string() == name
+    {
+        let retained: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+            SELECT 1 FROM runner_workspace_release WHERE manifest_id = $1 AND runner_id = $2)",
+        )
+        .bind(manifest)
+        .bind(runner.into_uuid())
+        .fetch_one(&mut *connection)
+        .await?;
+        if retained {
+            return Ok(None);
+        }
+    }
     if fact.kind != Kind::Unreconciled {
         return Ok(Some(fact.kind));
     }
@@ -441,6 +460,7 @@ async fn reconcile_leak(
         return Ok(Some(Kind::Unreconciled));
     };
     let rows = sqlx::query("SELECT ready.manifest_id,ready.manifest_digest,operation.command_id,outcome.outcome,
+        EXISTS (SELECT 1 FROM runner_workspace_release cleanup WHERE cleanup.manifest_id = ready.manifest_id) AS released,
         EXISTS (SELECT 1 FROM runner_current_session_placement head JOIN runner_session_placement_record placement USING (session_id,event_ordinal)
             WHERE placement.workspace_manifest_id = ready.manifest_id AND placement.state_kind <> 'runner_abandoned') AS current,
         EXISTS (SELECT 1 FROM runner_replacement_stage stage WHERE stage.command_id = operation.command_id
@@ -457,6 +477,15 @@ async fn reconcile_leak(
             if row.decode_column::<Option<String>>("outcome")?.as_deref() == Some("cleanup_failed")
             {
                 return Ok(Some(Kind::CleanupFailed));
+            }
+            if row.decode_column::<bool>("released")? {
+                return Ok(
+                    match row.decode_column::<Option<String>>("outcome")?.as_deref() {
+                        None | Some("completed") => None,
+                        Some("unowned") => Some(Kind::RetiredPresent),
+                        _ => return Err(mismatch()),
+                    },
+                );
             }
             if row.decode_column::<bool>("current")? || row.decode_column::<bool>("staged")? {
                 return Ok(None);
