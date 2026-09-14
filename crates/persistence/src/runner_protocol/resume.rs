@@ -7,6 +7,12 @@ use signalbox_domain::ToolAttemptObservation;
 /// Durable execution evidence supplied by the reconnecting runner.
 #[derive(Clone, Debug)]
 pub enum RunnerLeaseResumeEvidence {
+    /// An offered operation was refused before the runner claimed execution authority.
+    Refusal {
+        correlation: RunnerLeaseCorrelation,
+        category: RunnerLeaseFailureKind,
+        detail: serde_json::Value,
+    },
     /// The runner has not crossed its execution-start boundary.
     AwaitingDispatch(RunnerLeaseCorrelation),
     /// Execution may have started, without a retained terminal result.
@@ -25,7 +31,8 @@ impl RunnerLeaseResumeEvidence {
         match self {
             Self::AwaitingDispatch(correlation)
             | Self::ExecutionPossible(correlation)
-            | Self::Result { correlation, .. } => correlation,
+            | Self::Result { correlation, .. }
+            | Self::Refusal { correlation, .. } => correlation,
         }
     }
 }
@@ -172,7 +179,18 @@ impl RunnerProtocolStore {
                 }
                 RunnerLeaseResumeOutcome::Recorded
             }
-            RunnerLeaseState::Claimed => {
+            RunnerLeaseState::Refused => {
+                let RunnerLeaseResumeEvidence::Refusal {
+                    category, detail, ..
+                } = evidence
+                else {
+                    return Err(invalid());
+                };
+                self.record_tool_lease_failure_in(&mut transaction, correlation, category, &detail)
+                    .await?;
+                RunnerLeaseResumeOutcome::Recorded
+            }
+            RunnerLeaseState::Claimed | RunnerLeaseState::Offered => {
                 let connection = connection.ok_or_else(invalid)?;
                 let intact: bool = sqlx::query_scalar("SELECT generation.offer_loss_epoch IS NOT DISTINCT FROM loss.loss_epoch
                     FROM runner_lease_generation AS generation
@@ -188,14 +206,34 @@ impl RunnerProtocolStore {
                 {
                     RunnerLeaseResumeOutcome::LoseConnection(connection)
                 } else {
-                    match evidence {
-                        RunnerLeaseResumeEvidence::AwaitingDispatch(_) => {
-                            RunnerLeaseResumeOutcome::AwaitingDispatch
+                    match (lease.state(), evidence) {
+                        (
+                            RunnerLeaseState::Offered,
+                            RunnerLeaseResumeEvidence::Refusal {
+                                category, detail, ..
+                            },
+                        ) => {
+                            self.record_tool_lease_failure_in(
+                                &mut transaction,
+                                correlation,
+                                category,
+                                &detail,
+                            )
+                            .await?;
+                            RunnerLeaseResumeOutcome::Recorded
                         }
-                        RunnerLeaseResumeEvidence::ExecutionPossible(_) => {
-                            RunnerLeaseResumeOutcome::LoseConnection(connection)
-                        }
-                        RunnerLeaseResumeEvidence::Result { observation, .. } => {
+                        (
+                            RunnerLeaseState::Claimed,
+                            RunnerLeaseResumeEvidence::AwaitingDispatch(_),
+                        ) => RunnerLeaseResumeOutcome::AwaitingDispatch,
+                        (
+                            RunnerLeaseState::Claimed,
+                            RunnerLeaseResumeEvidence::ExecutionPossible(_),
+                        ) => RunnerLeaseResumeOutcome::LoseConnection(connection),
+                        (
+                            RunnerLeaseState::Claimed,
+                            RunnerLeaseResumeEvidence::Result { observation, .. },
+                        ) => {
                             self.record_tool_lease_result_in(
                                 &mut transaction,
                                 correlation,
@@ -204,10 +242,10 @@ impl RunnerProtocolStore {
                             .await?;
                             RunnerLeaseResumeOutcome::Recorded
                         }
+                        _ => return Err(invalid()),
                     }
                 }
             }
-            RunnerLeaseState::Offered => return Err(invalid()),
         };
         commit_mutation(transaction).await?;
         if omitted {

@@ -17,6 +17,13 @@ pub enum RunnerStatusCursor {
     Placement { session_id: CanonicalUuid },
     /// Immutable replacement-provisioning refusal.
     OperationFailure { authorization_id: CanonicalUuid },
+    /// Immutable failed workspace release.
+    ReleaseFailure { manifest_id: CanonicalUuid },
+    /// Immutable refused lease generation.
+    LeaseFailure {
+        lease_id: CanonicalUuid,
+        lease_generation: PositiveCanonicalU64,
+    },
     /// Retained workspace leak identity.
     WorkspaceLeak {
         runner_id: CanonicalUuid,
@@ -72,6 +79,36 @@ pub struct RunnerProvisionFailureCorrelation {
     pub credential_profile: Option<RunnerCredentialProfileName>,
 }
 
+/// Complete failed workspace release correlation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerReleaseFailureCorrelation {
+    pub session_id: CanonicalUuid,
+    pub placement_revision: PositiveCanonicalU64,
+    pub runner_id: CanonicalUuid,
+    pub manifest_id: CanonicalUuid,
+}
+
+/// Complete refused lease authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerLeaseFailureCorrelation {
+    pub registration_revision: PositiveCanonicalU64,
+    pub lease_id: CanonicalUuid,
+    pub lease_generation: PositiveCanonicalU64,
+    pub runner_id: CanonicalUuid,
+    pub placement_revision: PositiveCanonicalU64,
+    pub working_directory: crate::RunnerWorkingDirectory,
+    pub sandbox_profile: RunnerSandboxProfile,
+    pub tool_name: String,
+    pub session_id: CanonicalUuid,
+    pub turn_id: CanonicalUuid,
+    pub tool_request_id: CanonicalUuid,
+    pub tool_attempt_id: CanonicalUuid,
+    pub issuing_turn_attempt_id: CanonicalUuid,
+    pub tool_dispatch_generation: PositiveCanonicalU64,
+}
+
 /// Closed daemon-actionable categories carried by the runner wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +136,16 @@ pub struct RunnerFailureDetail {
 pub enum RunnerOperationFailure {
     Provision {
         correlation: RunnerProvisionFailureCorrelation,
+        category: RunnerFailureCategory,
+        detail: RunnerFailureDetail,
+    },
+    Release {
+        correlation: RunnerReleaseFailureCorrelation,
+        category: RunnerFailureCategory,
+        detail: RunnerFailureDetail,
+    },
+    LeaseOffer {
+        correlation: RunnerLeaseFailureCorrelation,
         category: RunnerFailureCategory,
         detail: RunnerFailureDetail,
     },
@@ -167,6 +214,25 @@ impl RunnerOperationFailure {
                             | C::RepositoryUnavailable
                             | C::SandboxUnavailable
                             | C::WorkspaceConflict
+                    ),
+            ),
+            Self::Release {
+                category, detail, ..
+            } => (detail, *category == C::WorkspaceCleanupFailed),
+            Self::LeaseOffer {
+                correlation,
+                category,
+                detail,
+            } => (
+                detail,
+                signalbox_domain::ToolName::try_new(correlation.tool_name.clone()).is_ok()
+                    && matches!(
+                        category,
+                        C::CredentialUnavailable
+                            | C::RepositoryUnavailable
+                            | C::SandboxUnavailable
+                            | C::WorkspaceConflict
+                            | C::LeaseAdmissionRefused
                     ),
             ),
         };

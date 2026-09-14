@@ -650,3 +650,253 @@ async fn shutdown_loses_offered_and_claimed_leases_but_preserves_completed_resul
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lease_refusal_settles_authority_with_immutable_verbatim_evidence()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::{
+        RunnerLeaseFailureKind, RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, enrollment, registration, pin, epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let correlation = pin.lease.correlation();
+    let detail = serde_json::json!({"code":"workspace_open_failed","message":"cannot open /private/work","payload":{"path":"/private/work","nested":[{"credential":"/private/key"}],"attempts":1}});
+    let refused_without_evidence = pin
+        .lease
+        .refuse(correlation.clone())
+        .expect("offered authority");
+    assert!(
+        store.store_lease(&refused_without_evidence).await.is_err(),
+        "SQL forbids refusal without evidence and attempt settlement"
+    );
+    for other in mismatches(&correlation) {
+        assert!(
+            store
+                .record_tool_lease_failure(
+                    enrollment.enrollment(),
+                    epoch,
+                    other,
+                    RunnerLeaseFailureKind::LeaseAdmissionRefused,
+                    &detail
+                )
+                .await
+                .is_err()
+        );
+    }
+    let refused = store
+        .record_tool_lease_failure(
+            enrollment.enrollment(),
+            epoch,
+            correlation.clone(),
+            RunnerLeaseFailureKind::LeaseAdmissionRefused,
+            &detail,
+        )
+        .await
+        .expect("offered refusal commits");
+    assert_eq!(refused.state(), RunnerLeaseState::Refused);
+    let terminal: (String, String, String) = sqlx::query_as("SELECT state_kind,terminal_disposition_kind,error_kind FROM tool_attempt WHERE attempt_id = $1")
+        .bind(correlation.dispatch.attempt().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        terminal,
+        (
+            "terminal".to_owned(),
+            "known_failed".to_owned(),
+            "execution_failed".to_owned()
+        )
+    );
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT detail FROM runner_lease_failure WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, detail);
+    assert!(
+        store
+            .claim_tool_lease(enrollment.enrollment(), epoch, correlation.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .record_tool_lease_failure(
+                enrollment.enrollment(),
+                epoch,
+                correlation.clone(),
+                RunnerLeaseFailureKind::LeaseAdmissionRefused,
+                &detail
+            )
+            .await
+            .expect("exact refusal replays")
+            .state(),
+        RunnerLeaseState::Refused
+    );
+    let unequal = serde_json::json!({"code":"workspace_open_failed","message":"different detail","payload":{}});
+    assert!(
+        store
+            .record_tool_lease_failure(
+                enrollment.enrollment(),
+                epoch,
+                correlation.clone(),
+                RunnerLeaseFailureKind::LeaseAdmissionRefused,
+                &unequal
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE runner_lease_failure SET detail = $2 WHERE lease_id = $1")
+            .bind(correlation.lease.into_uuid())
+            .bind(&unequal)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    use signalbox_persistence::runner_protocol::status::{RunnerStatusFailure, read_runner_status};
+    let mut after = None;
+    let mut projected = Vec::new();
+    loop {
+        let page = read_runner_status(&pool, 1, after).await?;
+        assert!(page.runners.len() + page.failures.len() + page.leaks.len() <= 1);
+        projected.extend(page.failures);
+        match page.next_after {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        projected,
+        [RunnerStatusFailure::LeaseOffer {
+            correlation: correlation.clone(),
+            category: RunnerLeaseFailureKind::LeaseAdmissionRefused,
+            detail: detail.clone()
+        }]
+    );
+    let (request, identities) = resume_receipt(&pool, &enrollment).await?;
+    assert!(matches!(
+        store
+            .reconcile_tool_resume(
+                request,
+                identities,
+                registration.revision(),
+                &advertisement(),
+                Some(RunnerLeaseResumeEvidence::Refusal {
+                    correlation,
+                    category: RunnerLeaseFailureKind::LeaseAdmissionRefused,
+                    detail,
+                })
+            )
+            .await
+            .expect("refusal resume reconciles"),
+        RunnerLeaseResumeOutcome::Recorded
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lease_refusal_cannot_settle_claimed_execution() -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::RunnerLeaseFailureKind;
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, enrollment, _, pin, epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let correlation = pin.lease.correlation();
+    store
+        .claim_tool_lease(enrollment.enrollment(), epoch, correlation.clone())
+        .await?;
+    let detail =
+        serde_json::json!({"code":"admission_refused","message":"cannot admit","payload":{}});
+    assert!(
+        store
+            .record_tool_lease_failure(
+                enrollment.enrollment(),
+                epoch,
+                correlation.clone(),
+                RunnerLeaseFailureKind::LeaseAdmissionRefused,
+                &detail
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .load_lease(correlation.lease, correlation.generation)
+            .await?
+            .expect("retained lease")
+            .state(),
+        RunnerLeaseState::Claimed
+    );
+    let mut invalid = pool.begin().await?;
+    sqlx::query("INSERT INTO runner_lease_failure (lease_id,generation,category,detail) VALUES ($1,$2,'lease_admission_refused',$3)")
+        .bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get())).bind(&detail).execute(&mut *invalid).await?;
+    assert!(
+        invalid.commit().await.is_err(),
+        "SQL does not permit refusal evidence for a claimed lease"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_lease_failure")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn resume_commits_unacknowledged_lease_refusal_before_reopening_connection()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::{
+        RunnerLeaseFailureKind, RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, enrollment, registration, pin, epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let correlation = pin.lease.correlation();
+    let detail =
+        serde_json::json!({"code":"admission_unavailable","message":"cannot admit","payload":{}});
+    let (request, identities) = resume_receipt(&pool, &enrollment).await?;
+    assert!(matches!(
+        store
+            .reconcile_tool_resume(
+                request,
+                identities,
+                registration.revision(),
+                &advertisement(),
+                Some(RunnerLeaseResumeEvidence::Refusal {
+                    correlation: correlation.clone(),
+                    category: RunnerLeaseFailureKind::LeaseAdmissionRefused,
+                    detail: detail.clone(),
+                })
+            )
+            .await?,
+        RunnerLeaseResumeOutcome::Recorded
+    ));
+    assert_eq!(
+        store
+            .load_connection(enrollment.enrollment())
+            .await?
+            .expect("connection")
+            .epoch(),
+        epoch
+    );
+    assert_eq!(
+        store
+            .load_lease(correlation.lease, correlation.generation)
+            .await?
+            .expect("retained refusal")
+            .state(),
+        RunnerLeaseState::Refused
+    );
+    let retained: serde_json::Value =
+        sqlx::query_scalar("SELECT detail FROM runner_lease_failure WHERE lease_id = $1")
+            .bind(correlation.lease.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(retained, detail);
+    Ok(())
+}

@@ -35,6 +35,7 @@ fn connection(
         workspace: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
+        last_offer_refusal: None,
         last_release_recorded: None,
         startup_report: leaks::StartupReport::Disabled,
         leak_sent: false,

@@ -192,6 +192,39 @@ impl PostgresRunnerRegistrationService {
                 correlation: failure.correlation,
             });
         }
+        if let OperationCorrelation::LeaseOffer(correlation) = &failure.correlation {
+            let category = lease_failure_kind(failure.category).ok_or_else(rejected)?;
+            let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
+            let stored_error = |error| {
+                store_failure(
+                    RunnerInboundFrameKind::OperationFailed,
+                    AvailableCorrelation::OperationFailure(failure.correlation.clone()),
+                    error,
+                )
+            };
+            let epoch = self
+                .store
+                .load_connection(enrollment)
+                .await
+                .map_err(stored_error)?
+                .ok_or_else(rejected)?
+                .epoch();
+            self.store
+                .record_tool_lease_failure(
+                    enrollment,
+                    epoch,
+                    crate::runner_dispatch_wire::domain_correlation(correlation.clone())
+                        .map_err(|_| rejected())?,
+                    category,
+                    &serde_json::to_value(&failure.detail).map_err(|_| rejected())?,
+                )
+                .await
+                .map_err(stored_error)?;
+            self.dispatch.changed();
+            return Ok(signalbox_runner_wire::OperationFailureRecorded {
+                correlation: failure.correlation,
+            });
+        }
         let OperationCorrelation::Provision(correlation) = &failure.correlation else {
             return Err(rejected());
         };
@@ -426,5 +459,20 @@ pub(super) fn provision_message(
                 revision: revision.as_str().to_owned(),
             },
         }),
+    })
+}
+
+pub(super) fn lease_failure_kind(
+    category: signalbox_runner_wire::FailureCategory,
+) -> Option<signalbox_persistence::runner_protocol::RunnerLeaseFailureKind> {
+    use signalbox_persistence::runner_protocol::RunnerLeaseFailureKind as Stored;
+    use signalbox_runner_wire::FailureCategory as Wire;
+    Some(match category {
+        Wire::CredentialUnavailable => Stored::CredentialUnavailable,
+        Wire::RepositoryUnavailable => Stored::RepositoryUnavailable,
+        Wire::SandboxUnavailable => Stored::SandboxUnavailable,
+        Wire::WorkspaceConflict => Stored::WorkspaceConflict,
+        Wire::LeaseAdmissionRefused => Stored::LeaseAdmissionRefused,
+        Wire::WorkspaceCleanupFailed => return None,
     })
 }

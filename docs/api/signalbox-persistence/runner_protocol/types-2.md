@@ -62,6 +62,19 @@ impl convert::From<runner_protocol::RunnerEnrollmentRequestFailure>
 }
 ```
 
+## RunnerLeaseFailureKind
+
+```rust
+pub enum RunnerLeaseFailureKind {
+    CredentialUnavailable,
+    RepositoryUnavailable,
+    SandboxUnavailable,
+    WorkspaceConflict,
+    LeaseAdmissionRefused,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## RunnerRecoveryOutcome
 
 ```rust
@@ -107,6 +120,11 @@ impl convert::From<error::Error> for runner_protocol::RunnerRecoveryError {
 
 ```rust
 pub enum RunnerLeaseResumeEvidence {
+    Refusal {
+        correlation: signalbox_domain::RunnerLeaseCorrelation,
+        category: runner_protocol::RunnerLeaseFailureKind,
+        detail: value::Value,
+    },
     AwaitingDispatch(signalbox_domain::RunnerLeaseCorrelation),
     ExecutionPossible(signalbox_domain::RunnerLeaseCorrelation),
     Result {
@@ -137,6 +155,11 @@ pub enum RunnerStatusAfter {
     Enrollment(uuid::Uuid),
     Placement(uuid::Uuid),
     OperationFailure(uuid::Uuid),
+    ReleaseFailure(uuid::Uuid),
+    LeaseFailure {
+        lease: uuid::Uuid,
+        generation: signalbox_domain::RunnerGeneration,
+    },
     WorkspaceLeak {
         runner: uuid::Uuid,
         locator: string::String,
@@ -167,10 +190,21 @@ pub enum RunnerStatusFact {
 ## RunnerStatusFailure
 
 ```rust
-pub struct RunnerStatusFailure {
-    pub authorization: signalbox_domain::RunnerReplacementProvisioning,
-    pub category: signalbox_domain::RunnerProvisioningFailureKind,
-    pub detail: value::Value,
+pub enum RunnerStatusFailure {
+    Provision {
+        authorization: signalbox_domain::RunnerReplacementProvisioning,
+        category: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: value::Value,
+    },
+    Release {
+        correlation: runner_protocol::workspaces::RunnerWorkspaceRelease,
+        detail: value::Value,
+    },
+    LeaseOffer {
+        correlation: signalbox_domain::RunnerLeaseCorrelation,
+        category: runner_protocol::RunnerLeaseFailureKind,
+        detail: value::Value,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

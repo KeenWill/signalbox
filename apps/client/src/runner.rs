@@ -204,10 +204,24 @@ impl RunnerStatusPage {
                 }
             }
             ServerMessage::RunnerOperationFailure { failure } => {
-                let RunnerOperationFailure::Provision { correlation, .. } = failure;
                 self.failure_count += 1;
-                RunnerStatusCursor::OperationFailure {
-                    authorization_id: correlation.authorization_id,
+                match failure {
+                    RunnerOperationFailure::Provision { correlation, .. } => {
+                        RunnerStatusCursor::OperationFailure {
+                            authorization_id: correlation.authorization_id,
+                        }
+                    }
+                    RunnerOperationFailure::Release { correlation, .. } => {
+                        RunnerStatusCursor::ReleaseFailure {
+                            manifest_id: correlation.manifest_id,
+                        }
+                    }
+                    RunnerOperationFailure::LeaseOffer { correlation, .. } => {
+                        RunnerStatusCursor::LeaseFailure {
+                            lease_id: correlation.lease_id,
+                            lease_generation: correlation.lease_generation,
+                        }
+                    }
                 }
             }
             ServerMessage::RunnerWorkspaceLeak { leak } => {
@@ -253,19 +267,26 @@ impl RunnerStatusPage {
 
 fn cursor_key(
     cursor: &signalbox_process_protocol::RunnerStatusCursor,
-) -> (u8, uuid::Uuid, &str, &str) {
+) -> (u8, uuid::Uuid, u64, &str, &str) {
     use signalbox_process_protocol::RunnerStatusCursor;
     match cursor {
-        RunnerStatusCursor::Enrollment { runner_id } => (0, runner_id.into_uuid(), "", ""),
-        RunnerStatusCursor::Placement { session_id } => (1, session_id.into_uuid(), "", ""),
+        RunnerStatusCursor::Enrollment { runner_id } => (0, runner_id.into_uuid(), 0, "", ""),
+        RunnerStatusCursor::Placement { session_id } => (1, session_id.into_uuid(), 0, "", ""),
         RunnerStatusCursor::OperationFailure { authorization_id } => {
-            (2, authorization_id.into_uuid(), "", "")
+            (2, authorization_id.into_uuid(), 0, "", "")
         }
+        RunnerStatusCursor::ReleaseFailure { manifest_id } => {
+            (3, manifest_id.into_uuid(), 0, "", "")
+        }
+        RunnerStatusCursor::LeaseFailure {
+            lease_id,
+            lease_generation,
+        } => (4, lease_id.into_uuid(), lease_generation.value(), "", ""),
         RunnerStatusCursor::WorkspaceLeak {
             runner_id,
             locator,
             entry_digest,
-        } => (3, runner_id.into_uuid(), locator, entry_digest.as_str()),
+        } => (5, runner_id.into_uuid(), 0, locator, entry_digest.as_str()),
     }
 }
 
@@ -275,6 +296,38 @@ mod status_tests {
     use signalbox_process_protocol::{
         RunnerStatusCursor, RunnerWorkspaceLeak, RunnerWorkspaceLeakKind,
     };
+
+    #[test]
+    fn runner_status_accepts_refused_lease_generations_in_numeric_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let id = |value| uuid::Uuid::from_u128(value).to_string();
+        let mut page = RunnerStatusPage::new(
+            2,
+            Some(RunnerStatusCursor::ReleaseFailure {
+                manifest_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(1)),
+            }),
+        );
+        for generation in [9, 10] {
+            let failure = serde_json::from_value(serde_json::json!({
+                "operation_kind":"lease_offer", "category":"lease_admission_refused",
+                "correlation": {"registration_revision":"1","lease_id":id(1),"lease_generation":generation.to_string(),
+                    "runner_id":id(2),"placement_revision":"1","working_directory":"/workspace","sandbox_profile":"ambient","tool_name":"echo",
+                    "session_id":id(3),"turn_id":id(4),"tool_request_id":id(5),"tool_attempt_id":id(6),"issuing_turn_attempt_id":id(7),"tool_dispatch_generation":"1"},
+                "detail":{"code":"admission_unavailable","message":"[redacted]","payload":{}}
+            }))?;
+            assert!(!page.accept(&ServerMessage::RunnerOperationFailure { failure })?);
+        }
+        assert!(page.accept(&ServerMessage::RunnerStatusEnd {
+            runner_count: CanonicalU64::new(0),
+            failure_count: CanonicalU64::new(2),
+            leak_count: CanonicalU64::new(0),
+            next_after: Some(RunnerStatusCursor::LeaseFailure {
+                lease_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(1)),
+                lease_generation: signalbox_process_protocol::PositiveCanonicalU64::try_new(10)?,
+            }),
+        })?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn runner_status_renders_only_a_complete_validated_inventory()

@@ -615,6 +615,16 @@ impl runner_protocol::RunnerProtocolStore {
     ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
 }
 impl runner_protocol::RunnerProtocolStore {
+    pub async fn record_tool_lease_failure(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        correlation: signalbox_domain::RunnerLeaseCorrelation,
+        category: runner_protocol::RunnerLeaseFailureKind,
+        detail: &value::Value,
+    ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
+}
+impl runner_protocol::RunnerProtocolStore {
     pub async fn record_replacement_provisioning_failure(
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,

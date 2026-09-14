@@ -507,6 +507,7 @@ pub struct RunnerConnection<S> {
     workspace: Option<workspaces::WorkspaceExecution>,
     last_workspace_recorded: Option<signalbox_runner_wire::WorkspaceRecorded>,
     last_provision_failure: Option<signalbox_runner_wire::OperationCorrelation>,
+    last_offer_refusal: Option<signalbox_runner_wire::OperationCorrelation>,
     last_release_recorded: Option<(signalbox_runner_wire::ReleaseCorrelation, bool)>,
     startup_report: leaks::StartupReport,
     leak_sent: bool,
@@ -677,6 +678,24 @@ where
                         }
                     }
                 }
+                if let Some(directive) = &resumed.directives.operation_failure
+                    && matches!(
+                        directive.correlation,
+                        signalbox_runner_wire::OperationCorrelation::LeaseOffer(_)
+                    )
+                {
+                    match directive.action {
+                        DirectiveAction::Resend => {}
+                        DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale => {
+                            state.acknowledge_offer_refusal(&directive.correlation)?
+                        }
+                        _ => {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::ResumeDirectives,
+                            ));
+                        }
+                    }
+                }
                 workspaces::apply_workspace_directives(state, &resumed.directives)?;
                 if let Some(directive) = &resumed.directives.leak_page {
                     match directive.action {
@@ -719,6 +738,7 @@ where
             workspace: None,
             last_workspace_recorded: None,
             last_provision_failure: None,
+            last_offer_refusal: None,
             last_release_recorded: None,
             startup_report: leaks::StartupReport::default(),
             leak_sent: false,
@@ -858,12 +878,53 @@ where
         }
     }
 
+    async fn refuse_offer(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        offer: &LeaseOffer,
+        category: signalbox_runner_wire::FailureCategory,
+        code: &str,
+    ) -> Result<(), RunnerConnectionError> {
+        let detail = signalbox_runner_wire::FailureDetail::try_new(
+            signalbox_runner_wire::DetailName::try_new(code.to_owned())
+                .map_err(|_| lease_mismatch())?,
+            "The runner cannot admit the offered operation".to_owned(),
+            serde_json::json!({"working_directory":offer.correlation.working_directory.as_str()}),
+        )
+        .map_err(|_| lease_mismatch())?;
+        state.record_offer_refusal(signalbox_runner_wire::OperationFailure {
+            correlation: signalbox_runner_wire::OperationCorrelation::LeaseOffer(
+                offer.correlation.clone(),
+            ),
+            category,
+            detail,
+        })?;
+        self.send_offer_refusal(state).await
+    }
+
+    async fn send_offer_refusal(
+        &mut self,
+        state: &RunnerStateRoot,
+    ) -> Result<(), RunnerConnectionError> {
+        if let Some(failure) = state.retained_offer_refusal() {
+            send_message(
+                &mut self.io,
+                Message::OperationFailed(signalbox_runner_wire::OperationFailed {
+                    failure: failure.clone(),
+                }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     fn has_unsettled_lease(&self, state: &RunnerStateRoot) -> bool {
         let inventory = state.reconnect_inventory();
         self.pending_offer.is_some()
             || self.execution.is_some()
             || inventory.lease.is_some()
             || inventory.result.is_some()
+            || inventory.operation_failure.is_some()
             || inventory.workspace_operation.is_some()
             || inventory.leak_page.is_some()
             || !self.startup_report.complete()
@@ -944,6 +1005,7 @@ where
                 let acknowledgement = self.heartbeat_acknowledgement(challenge, state)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
                 self.send_retained_result(state).await?;
+                self.send_offer_refusal(state).await?;
                 self.send_retained_workspace(state).await?;
                 self.send_leak_page(state).await?;
                 Ok(None)
@@ -1043,6 +1105,18 @@ where
             Message::OperationFailureRecorded(recorded) => {
                 if matches!(
                     recorded.correlation,
+                    signalbox_runner_wire::OperationCorrelation::LeaseOffer(_)
+                ) {
+                    if self.last_offer_refusal.as_ref() == Some(&recorded.correlation) {
+                        return Ok(None);
+                    }
+                    state.acknowledge_offer_refusal(&recorded.correlation)?;
+                    self.last_offer_refusal = Some(recorded.correlation);
+                    return Ok(None);
+                }
+
+                if matches!(
+                    recorded.correlation,
                     signalbox_runner_wire::OperationCorrelation::Provision(_)
                 ) {
                     if self.last_provision_failure.as_ref() == Some(&recorded.correlation) {
@@ -1068,23 +1142,51 @@ where
                 )?;
                 if self.pending_offer.is_some()
                     || state.reconnect_inventory().lease.is_some()
-                    || offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
+                    || state.reconnect_inventory().operation_failure.is_some()
+                {
+                    return Err(lease_mismatch());
+                }
+                use signalbox_runner_wire::FailureCategory as Failure;
+                let refusal = if offer.correlation.sandbox_profile != SandboxProfile::Ambient
+                    || !self
+                        .advertisement
+                        .sandbox_profiles
+                        .contains(&SandboxProfile::Ambient)
+                {
+                    Some(Failure::SandboxUnavailable)
+                } else if offer.credential_profile.as_ref().is_some_and(|profile| {
+                    !self.advertisement.credential_profiles.contains(profile)
+                }) {
+                    Some(Failure::CredentialUnavailable)
+                } else if offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
                     || self
                         .advertisement
                         .tools
                         .binary_search(&offer.correlation.tool_name)
                         .is_err()
                     || offer.effect_class != EffectClass::Pure
-                    || offer.correlation.sandbox_profile != SandboxProfile::Ambient
-                    || !self
-                        .advertisement
-                        .sandbox_profiles
-                        .contains(&SandboxProfile::Ambient)
-                    || offer.credential_profile.as_ref().is_some_and(|profile| {
-                        !self.advertisement.credential_profiles.contains(profile)
-                    })
                 {
-                    return Err(lease_mismatch());
+                    Some(Failure::LeaseAdmissionRefused)
+                } else {
+                    None
+                };
+                if let Some(category) = refusal {
+                    self.refuse_offer(state, &offer, category, "admission_unavailable")
+                        .await?;
+                    return Ok(None);
+                }
+                if !tokio::fs::metadata(offer.correlation.working_directory.as_str())
+                    .await
+                    .is_ok_and(|metadata| metadata.is_dir())
+                {
+                    self.refuse_offer(
+                        state,
+                        &offer,
+                        Failure::LeaseAdmissionRefused,
+                        "working_directory_unavailable",
+                    )
+                    .await?;
+                    return Ok(None);
                 }
                 let arguments = signalbox_domain::NormalizedToolArguments::try_from_provider_text(
                     offer.normalized_arguments.to_string(),

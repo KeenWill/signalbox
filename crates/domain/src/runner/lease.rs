@@ -125,6 +125,8 @@ pub enum RunnerLeaseState {
     Claimed,
     /// The claimed lease completed successfully.
     Completed,
+    /// The offered lease was refused before execution authority was issued.
+    Refused,
     /// The lease was lost with proof that execution authority was never issued.
     LostUnclaimed,
     /// The offered lease was lost without proof that execution was impossible.
@@ -260,6 +262,21 @@ impl RunnerLease {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         self.state = RunnerLeaseState::Claimed;
+        Ok(self)
+    }
+
+    /// Refuses an offered lease under its exact fence before execution authority is issued.
+    pub fn refuse(
+        mut self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> Result<Self, RunnerDomainError> {
+        if self.state != RunnerLeaseState::Offered {
+            return Err(RunnerDomainError::InvalidState);
+        }
+        if self.correlation() != correlation {
+            return Err(RunnerDomainError::CorrelationMismatch);
+        }
+        self.state = RunnerLeaseState::Refused;
         Ok(self)
     }
 

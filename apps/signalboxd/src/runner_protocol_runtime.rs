@@ -544,6 +544,7 @@ impl PostgresRunnerRegistrationService {
                         phase: signalbox_runner_wire::ReleasePhase::ReleaseAccepted,
                     }),
                 ) => failed == correlation,
+                (signalbox_runner_wire::OperationCorrelation::LeaseOffer(_), None) => true,
                 _ => false,
             };
             if !paired || request.inventory.lease.is_some() || request.inventory.result.is_some() {
@@ -551,7 +552,24 @@ impl PostgresRunnerRegistrationService {
             }
         }
         let evidence = match (&request.inventory.lease, &request.inventory.result) {
-            (None, None) => None,
+            (None, None) => match &request.inventory.operation_failure {
+                Some(failure) => match &failure.correlation {
+                    signalbox_runner_wire::OperationCorrelation::LeaseOffer(correlation) => {
+                        Some(RunnerLeaseResumeEvidence::Refusal {
+                            correlation: crate::runner_dispatch_wire::domain_correlation(
+                                correlation.clone(),
+                            )
+                            .map_err(|_| invalid_inventory())?,
+                            category: recovery::lease_failure_kind(failure.category)
+                                .ok_or_else(invalid_inventory)?,
+                            detail: serde_json::to_value(&failure.detail)
+                                .map_err(|_| invalid_inventory())?,
+                        })
+                    }
+                    _ => None,
+                },
+                None => None,
+            },
             (Some(lease), result) => {
                 let domain =
                     crate::runner_dispatch_wire::domain_correlation(lease.correlation.clone())
@@ -745,11 +763,21 @@ impl PostgresRunnerRegistrationService {
         };
         let mut directives = ReconnectDirectives {
             workspace_operation: workspace_directive.clone(),
-            operation_failure: request
-                .inventory
-                .operation_failure
-                .as_ref()
-                .and_then(|_| workspace_directive.clone()),
+            operation_failure: match &request.inventory.operation_failure {
+                Some(failure)
+                    if matches!(
+                        failure.correlation,
+                        signalbox_runner_wire::OperationCorrelation::LeaseOffer(_)
+                    ) =>
+                {
+                    Some(Directive {
+                        correlation: failure.correlation.clone(),
+                        action: action.ok_or_else(invalid_inventory)?,
+                    })
+                }
+                Some(_) => workspace_directive.clone(),
+                None => None,
+            },
             leak_page: leak_directive,
             lease: request
                 .inventory
@@ -2168,7 +2196,15 @@ where
                     Message::OperationFailed(failure) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::OperationFailed, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.provisioning_failed(context.enrollment, failure).await {
-                            Ok(recorded) => { workspaces::settle_workspace(&mut pending_workspace, recorded.correlation.clone()); write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?; },
+                            Ok(recorded) => {
+                                if let signalbox_runner_wire::OperationCorrelation::LeaseOffer(correlation) = &recorded.correlation
+                                    && busy_lease.as_ref() == Some(correlation)
+                                {
+                                    busy_lease = None;
+                                }
+                                workspaces::settle_workspace(&mut pending_workspace, recorded.correlation.clone());
+                                write_message(&mut writer, Message::OperationFailureRecorded(recorded)).await?;
+                            },
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
                     }
@@ -3027,6 +3063,8 @@ mod tests {
         changes: watch::Sender<()>,
         promoted: std::sync::atomic::AtomicBool,
         workspace_recorded: bool,
+        failure_commit: Option<Arc<tokio::sync::Notify>>,
+        failure_recorded: std::sync::atomic::AtomicBool,
         connection: Option<signalbox_persistence::runner_protocol::RunnerConnectionSnapshot>,
     }
 
@@ -3041,10 +3079,19 @@ mod tests {
             _enrollment: CanonicalUuid,
             _epoch: PositiveU64,
         ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::LeaseOffer>> {
-            Box::pin(std::future::ready(Ok(self
-                .queued_work
-                .as_ref()
-                .map(|work| work.offer.clone()))))
+            Box::pin(std::future::ready(Ok(self.queued_work.as_ref().map(
+                |work| {
+                    let mut offer = work.offer.clone();
+                    if work
+                        .failure_recorded
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        offer.correlation.lease_id = identity(9);
+                        offer.correlation.session_id = identity(10);
+                    }
+                    offer
+                },
+            ))))
         }
 
         fn promotion_receipt(
@@ -3082,6 +3129,21 @@ mod tests {
             failure: signalbox_runner_wire::OperationFailed,
         ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
             Box::pin(async move {
+                if let Some(work) = &self.queued_work
+                    && let Some(commit) = &work.failure_commit
+                    && failure.failure.correlation
+                        == signalbox_runner_wire::OperationCorrelation::LeaseOffer(
+                            work.offer.correlation.clone(),
+                        )
+                {
+                    commit.notified().await;
+                    work.failure_recorded
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(signalbox_runner_wire::OperationFailureRecorded {
+                        correlation: failure.failure.correlation,
+                    });
+                }
+
                 Err(RunnerRegistrationFailure::new(
                     RunnerInboundFrameKind::OperationFailed,
                     AvailableCorrelation::OperationFailure(failure.failure.correlation),
@@ -3635,6 +3697,156 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn operation_failure_acknowledgement_waits_for_durable_service_completion() {
+        use signalbox_runner_wire::{
+            DetailName, EffectClass, FailureCategory, FailureDetail, LeaseOffer,
+            OperationCorrelation, OperationFailed, OperationFailure, ProvisionCorrelation,
+            ResultBounds, SandboxProfile, WorkspaceProvision,
+        };
+        let (_container, _url, store) = postgres_store().await;
+        let durable = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let RunnerEnrollmentResponse::Active(response) = durable
+            .enroll(Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("connected fixture")
+        else {
+            panic!("active fixture");
+        };
+        let connection = store
+            .load_connection(RunnerEnrollmentId::from_uuid(
+                response.enrollment_id.into_uuid(),
+            ))
+            .await
+            .expect("connection query")
+            .expect("connected");
+        let mut correlation = canonical_lease_correlation();
+        correlation.runner_id = response.runner_id;
+        let commit = Arc::new(tokio::sync::Notify::new());
+        let (changes, _) = watch::channel(());
+        let work = Arc::new(QueuedRunnerWork {
+            provision: WorkspaceProvision {
+                correlation: ProvisionCorrelation {
+                    authorization_id: identity(5),
+                    session_id: identity(6),
+                    runner_id: response.runner_id,
+                    placement_revision: correlation.placement_revision,
+                    registration_revision: response.registration_revision,
+                    repository: None,
+                    sandbox_profile: SandboxProfile::Ambient,
+                    credential_profile: None,
+                },
+                recovery: None,
+            },
+            changes,
+            promoted: std::sync::atomic::AtomicBool::new(true),
+            workspace_recorded: true,
+            failure_commit: Some(Arc::clone(&commit)),
+            failure_recorded: std::sync::atomic::AtomicBool::new(false),
+            connection: Some(connection),
+            offer: LeaseOffer {
+                correlation: correlation.clone(),
+                effect_class: EffectClass::Pure,
+                credential_profile: None,
+                grant_revision: None,
+                normalized_arguments: serde_json::json!({"text":"echo"}),
+                result_bounds: ResultBounds::version_one(),
+            },
+        });
+        let service = EnrollmentService {
+            response,
+            queued_work: Some(Arc::clone(&work)),
+        };
+        let (server, client) = UnixStream::pair().expect("local wire");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve_connection(server, service, shutdown));
+        let (reader, mut writer) = client.into_split();
+        let mut reader = BufReader::new(reader);
+        write_message(
+            &mut writer,
+            Message::Enroll(Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement,
+            }),
+        )
+        .await
+        .expect("enroll");
+        loop {
+            match read_frame(&mut reader)
+                .await
+                .expect("enrollment and offer")
+                .message
+            {
+                Message::Heartbeat(_) => {
+                    work.changes.send_replace(());
+                }
+                Message::LeaseOffer(_) => break,
+                Message::ReplacementPending(_) | Message::Enrolled(_) => {}
+                message => panic!("unexpected enrollment frame: {message:?}"),
+            }
+        }
+        let failed = OperationFailure {
+            correlation: OperationCorrelation::LeaseOffer(correlation),
+            category: FailureCategory::LeaseAdmissionRefused,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("admission_unavailable".to_owned()).expect("code"),
+                "cannot admit".to_owned(),
+                serde_json::json!({}),
+            )
+            .expect("detail"),
+        };
+        write_message(
+            &mut writer,
+            Message::OperationFailed(OperationFailed {
+                failure: failed.clone(),
+            }),
+        )
+        .await
+        .expect("refusal");
+        assert!(
+            timeout(Duration::from_millis(50), read_frame(&mut reader))
+                .await
+                .is_err(),
+            "no acknowledgement before durable service completion"
+        );
+        commit.notify_one();
+        assert_eq!(
+            read_frame(&mut reader)
+                .await
+                .expect("committed acknowledgement")
+                .message,
+            Message::OperationFailureRecorded(signalbox_runner_wire::OperationFailureRecorded {
+                correlation: failed.correlation
+            })
+        );
+        work.changes.send_replace(());
+        let Message::LeaseOffer(next_offer) =
+            timeout(Duration::from_secs(1), read_frame(&mut reader))
+                .await
+                .expect("refusal releases the delivery slot")
+                .expect("next offer")
+                .message
+        else {
+            panic!("the next session receives its offer");
+        };
+        assert_eq!(next_offer.correlation.lease_id, identity(9));
+        assert_eq!(next_offer.correlation.session_id, identity(10));
+        drop(writer);
+        drop(reader);
+        server
+            .await
+            .expect("server task")
+            .expect("connection closes");
+    }
+
+    #[tokio::test]
     async fn provisioning_holds_a_later_lease_offer_for_another_session() {
         use signalbox_runner_wire::{
             EffectClass, LeaseOffer, ProvisionCorrelation, ResultBounds, SandboxProfile,
@@ -3665,6 +3877,8 @@ mod tests {
             changes,
             promoted: std::sync::atomic::AtomicBool::new(false),
             workspace_recorded: false,
+            failure_commit: None,
+            failure_recorded: std::sync::atomic::AtomicBool::new(false),
             connection: None,
             offer: LeaseOffer {
                 correlation,
@@ -3773,6 +3987,8 @@ mod tests {
             changes,
             promoted: std::sync::atomic::AtomicBool::new(false),
             workspace_recorded: true,
+            failure_commit: None,
+            failure_recorded: std::sync::atomic::AtomicBool::new(false),
             connection: Some(connection),
             offer: LeaseOffer {
                 correlation,
@@ -3895,6 +4111,8 @@ mod tests {
             changes,
             promoted: std::sync::atomic::AtomicBool::new(false),
             workspace_recorded: false,
+            failure_commit: None,
+            failure_recorded: std::sync::atomic::AtomicBool::new(false),
             connection: Some(connection),
             offer: LeaseOffer {
                 correlation,

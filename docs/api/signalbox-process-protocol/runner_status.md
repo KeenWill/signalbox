@@ -15,6 +15,13 @@ pub enum RunnerStatusCursor {
     OperationFailure {
         authorization_id: CanonicalUuid,
     },
+    ReleaseFailure {
+        manifest_id: CanonicalUuid,
+    },
+    LeaseFailure {
+        lease_id: CanonicalUuid,
+        lease_generation: PositiveCanonicalU64,
+    },
     WorkspaceLeak {
         runner_id: CanonicalUuid,
         locator: string::String,
@@ -69,6 +76,40 @@ pub struct RunnerProvisionFailureCorrelation {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
+## RunnerReleaseFailureCorrelation
+
+```rust
+pub struct RunnerReleaseFailureCorrelation {
+    pub session_id: CanonicalUuid,
+    pub placement_revision: PositiveCanonicalU64,
+    pub runner_id: CanonicalUuid,
+    pub manifest_id: CanonicalUuid,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## RunnerLeaseFailureCorrelation
+
+```rust
+pub struct RunnerLeaseFailureCorrelation {
+    pub registration_revision: PositiveCanonicalU64,
+    pub lease_id: CanonicalUuid,
+    pub lease_generation: PositiveCanonicalU64,
+    pub runner_id: CanonicalUuid,
+    pub placement_revision: PositiveCanonicalU64,
+    pub working_directory: RunnerWorkingDirectory,
+    pub sandbox_profile: RunnerSandboxProfile,
+    pub tool_name: string::String,
+    pub session_id: CanonicalUuid,
+    pub turn_id: CanonicalUuid,
+    pub tool_request_id: CanonicalUuid,
+    pub tool_attempt_id: CanonicalUuid,
+    pub issuing_turn_attempt_id: CanonicalUuid,
+    pub tool_dispatch_generation: PositiveCanonicalU64,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## RunnerFailureCategory
 
 ```rust
@@ -100,6 +141,16 @@ pub struct RunnerFailureDetail {
 pub enum RunnerOperationFailure {
     Provision {
         correlation: RunnerProvisionFailureCorrelation,
+        category: RunnerFailureCategory,
+        detail: RunnerFailureDetail,
+    },
+    Release {
+        correlation: RunnerReleaseFailureCorrelation,
+        category: RunnerFailureCategory,
+        detail: RunnerFailureDetail,
+    },
+    LeaseOffer {
+        correlation: RunnerLeaseFailureCorrelation,
         category: RunnerFailureCategory,
         detail: RunnerFailureDetail,
     },

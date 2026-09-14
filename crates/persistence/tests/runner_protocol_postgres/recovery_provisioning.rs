@@ -1376,6 +1376,28 @@ async fn startup_report_preserves_retired_initial_workspace_release_outcomes()
             }
             ReleaseState::Pending => {}
         }
+        if let ReleaseState::CleanupFailed(detail) = &outcome {
+            use signalbox_persistence::runner_protocol::status::{
+                RunnerStatusFailure, read_runner_status,
+            };
+            let mut after = None;
+            let mut failures = Vec::new();
+            loop {
+                let page = read_runner_status(&pool, 1, after).await?;
+                failures.extend(page.failures);
+                match page.next_after {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(
+                failures,
+                [RunnerStatusFailure::Release {
+                    correlation: release.clone(),
+                    detail: detail.clone()
+                }]
+            );
+        }
         let facts = [LeakFact {
             kind: LeakFactKind::Unreconciled,
             locator: workspace.relative_path.as_str().to_owned(),

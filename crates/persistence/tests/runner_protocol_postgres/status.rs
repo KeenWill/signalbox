@@ -134,8 +134,16 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
         matches!(runners.last(), Some(RunnerStatusFact::Placement { session: observed, runner }) if *observed == session && runner.state() == ProcessRunnerProjectionState::RunnerLost)
     );
     for (failure, authorization) in failures.iter().zip(&authorizations) {
-        assert_eq!(&failure.authorization, authorization);
-        assert_eq!(failure.detail, detail);
+        let signalbox_persistence::runner_protocol::status::RunnerStatusFailure::Provision {
+            authorization: retained,
+            detail: retained_detail,
+            ..
+        } = failure
+        else {
+            panic!("provisioning failure");
+        };
+        assert_eq!(retained, authorization);
+        assert_eq!(*retained_detail, detail);
     }
     let mixed = read_runner_status(&pool, 4, None).await?;
     assert_eq!(mixed.runners, runners);

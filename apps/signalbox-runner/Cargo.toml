@@ -24,6 +24,7 @@ signalbox-domain = { path = "../../crates/domain" }
 signalbox-tools-basic = { path = "../../crates/tools-basic" }
 signalbox-runner-wire = { path = "../../crates/runner-wire" }
 tokio = { version = "1.53.0", default-features = false, features = [
+    "fs",
     "io-util",
     "macros",
     "net",

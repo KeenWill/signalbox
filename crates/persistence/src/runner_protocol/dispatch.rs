@@ -428,7 +428,7 @@ async fn connected_registration(
     Ok(Some((enrollment, registration)))
 }
 
-async fn validate_connection(
+pub(super) async fn validate_connection(
     transaction: &mut Transaction<'_, Postgres>,
     enrollment: RunnerEnrollmentId,
     epoch: RunnerConnectionEpoch,
@@ -466,11 +466,13 @@ async fn validate_connection(
         WHERE generation.lease_id = $1 AND generation.generation = $2")
         .bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get())).fetch_optional(&mut **transaction).await?.ok_or_else(invalid)?;
     if row.decode_column::<Uuid>("registration_enrollment_id")? != enrollment.into_uuid()
-        || !(row.decode_column::<String>("state_kind")? == "completed"
-            || (row.decode_column::<bool>("loss_intact")?
-                && (row.decode_column::<String>("state_kind")? == "claimed"
-                    || row.decode_column::<Option<Decimal>>("offer_connection_epoch")?
-                        == Some(Decimal::from(epoch.get())))))
+        || !(matches!(
+            row.decode_column::<String>("state_kind")?.as_str(),
+            "completed" | "refused"
+        ) || (row.decode_column::<bool>("loss_intact")?
+            && (row.decode_column::<String>("state_kind")? == "claimed"
+                || row.decode_column::<Option<Decimal>>("offer_connection_epoch")?
+                    == Some(Decimal::from(epoch.get())))))
     {
         return Err(invalid());
     }

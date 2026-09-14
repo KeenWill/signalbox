@@ -155,6 +155,22 @@ acknowledged. Expected acquisition refusals are journaled as `operation_failed`
 and retained through heartbeat and reconnect until acknowledged; the runner
 keeps serving.
 
+## Operation failures
+
+The runner journals admitted-operation refusals until their exact
+`operation_failure_recorded` acknowledgement. The daemon stores the bounded
+code, message, and structured payload verbatim with the terminal provisioning,
+release, or offered-lease outcome before acknowledging. Equal retransmission
+replays that outcome; unequal detail or correlation is rejected.
+
+A refused offer never authorizes execution. Its lease becomes `refused` and its
+physical attempt becomes a known execution failure; dispatch waiters wake and
+the runner continues serving after acknowledgement. Refusal cannot settle a
+claimed lease. Authenticated reconnect reconciles retained refusal before
+opening a new epoch. Startup and shutdown retain unacknowledged failures.
+Operation decisions use the closed category; runner status applies the
+[redacting diagnostic projection](process-protocol.md) to retained detail.
+
 ## Workspace release and leak reporting
 
 The daemon issues cleanup for a retired manifest only to its connected owner,
@@ -447,8 +463,6 @@ same current-epoch fence as release dispatch.
 
 ## Planned
 
-- General operation-failure evidence over the wire:
-  [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:
