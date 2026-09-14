@@ -2175,7 +2175,27 @@ where
                     Message::WorkspaceReady(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.workspace_ready(context.enrollment, receipt).await {
-                            Ok(Some(recorded)) => { workspaces::settle_workspace(&mut pending_workspace, signalbox_runner_wire::OperationCorrelation::Provision(recorded.correlation.clone())); write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?; },
+                            Ok(Some(recorded)) => {
+                                let correlation = signalbox_runner_wire::OperationCorrelation::Provision(recorded.correlation.clone());
+                                let completed_provision = pending_workspace.as_ref() == Some(&correlation);
+                                write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?;
+                                if completed_provision
+                                    && !sent_promotion
+                                    && let Some(receipt) = service
+                                        .promotion_receipt(context.enrollment)
+                                        .await
+                                        .map_err(RunnerProtocolRuntimeError::Lifecycle)?
+                                {
+                                    if receipt.connection_epoch != context.epoch {
+                                        return Ok(());
+                                    }
+                                    write_message(&mut writer, Message::Enrolled(receipt)).await?;
+                                    sent_promotion = true;
+                                }
+                                if completed_provision {
+                                    workspaces::settle_workspace(&mut pending_workspace, correlation);
+                                }
+                            },
                             Ok(None) => {},
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
