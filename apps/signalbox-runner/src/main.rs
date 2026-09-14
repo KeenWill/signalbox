@@ -56,6 +56,11 @@ async fn run(
         RunnerConfiguration::read(path.as_path()).map_err(RunnerDaemonError::Configuration)?;
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
+    state
+        .authenticate_active_workspaces(&configuration)
+        .map_err(|error| {
+            RunnerDaemonError::Connection(signalbox_runner::RunnerConnectionError::Workspace(error))
+        })?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(RunnerDaemonError::Signal)?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())

@@ -416,6 +416,138 @@ fn release_correlation(prepared: &PreparedWorkspace) -> signalbox_runner_wire::R
     }
 }
 
+fn anonymous_repository_configuration() -> crate::RunnerConfiguration {
+    crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", ""),
+    )
+    .expect("anonymous repository configuration")
+}
+
+async fn acknowledged_repository() -> (TempDir, RunnerStateRoot, PreparedWorkspace) {
+    let (parent, mut state) = enrolled_workspace_root();
+    let mut request = repository_request();
+    request.credential_profile = None;
+    request.sandbox_profile = SandboxProfile::Ambient;
+    let recovery = Recovery::UnbornBranch {
+        name: "main".to_owned(),
+    };
+    let operation = signalbox_runner_wire::WorkspaceProvision {
+        correlation: signalbox_runner_wire::ProvisionCorrelation {
+            authorization_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+            session_id: request.session,
+            placement_revision: request.placement_revision,
+            runner_id: request.runner,
+            registration_revision: PositiveU64::try_new(1).expect("first registration"),
+            repository: Some(request.repository.clone()),
+            sandbox_profile: request.sandbox_profile,
+            credential_profile: None,
+        },
+        recovery: Some(recovery.clone()),
+    };
+    state
+        .record_provision(operation.clone())
+        .expect("durable request");
+    let prepared = publish_repository_request(&state, &request, recovery).await;
+    state
+        .record_workspace_ready(signalbox_runner_wire::WorkspaceReady {
+            correlation: operation.correlation.clone(),
+            working_directory: prepared.execution_directory.as_str().to_owned(),
+            ready: signalbox_runner_wire::ReadyManifest {
+                manifest: prepared.manifest.clone(),
+                manifest_digest: prepared.manifest_digest.clone(),
+            },
+        })
+        .expect("durable ready receipt");
+    state
+        .workspace_store()
+        .expect("workspace store")
+        .activate(&prepared)
+        .expect("activate acknowledged workspace");
+    state
+        .acknowledge_workspace(&signalbox_runner_wire::WorkspaceRecorded {
+            correlation: operation.correlation,
+            manifest_id: prepared.manifest.manifest_id,
+            manifest_digest: prepared.manifest_digest.clone(),
+        })
+        .expect("retain acknowledged identity");
+    (parent, state, prepared)
+}
+
+#[tokio::test]
+async fn acknowledged_workspace_restart_authenticates_repository_mapping() {
+    let (parent, state, prepared) = acknowledged_repository().await;
+    drop(state);
+    let reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
+    assert!(reopened.retained_provision().is_none());
+    reopened
+        .authenticate_active_workspaces(&anonymous_repository_configuration())
+        .expect("unchanged active repository authenticates after acknowledgement");
+    assert_eq!(
+        fs::read(Path::new(prepared.execution_directory.as_str()).join("prepared"))
+            .expect("preserved repository content"),
+        PREPARED_REPOSITORY_BYTES
+    );
+    let changed = crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", "")
+            .replace(CLONE_URL, "https://github.com/KeenWill/different.git"),
+    )
+    .expect("changed repository configuration");
+    assert!(matches!(
+        reopened.authenticate_active_workspaces(&changed),
+        Err(crate::WorkspaceProvisionError::ManifestConflict)
+    ));
+}
+
+#[tokio::test]
+async fn acknowledged_workspace_restart_rejects_replaced_execution_directory() {
+    let (parent, state, prepared) = acknowledged_repository().await;
+    drop(state);
+    let directory = Path::new(prepared.execution_directory.as_str());
+    fs::rename(directory, directory.with_file_name("original-repository"))
+        .expect("retain original directory while replacing its name");
+    fs::create_dir(directory).expect("replacement directory");
+    fs::set_permissions(directory, fs::Permissions::from_mode(DIRECTORY_MODE))
+        .expect("replacement has valid permissions");
+    let reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
+    assert!(matches!(
+        reopened.authenticate_active_workspaces(&anonymous_repository_configuration()),
+        Err(crate::WorkspaceProvisionError::ManifestConflict)
+    ));
+}
+
+#[tokio::test]
+async fn released_acknowledged_workspace_does_not_block_restart() {
+    let (parent, mut state, prepared) = acknowledged_repository().await;
+    let correlation = release_correlation(&prepared);
+    state
+        .record_release(correlation.clone())
+        .expect("accept release");
+    state
+        .workspace_store()
+        .expect("workspace store")
+        .release(&state.accepted_release().expect("release authority"))
+        .expect("remove active workspace");
+    drop(state);
+    let mut reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
+    reopened
+        .authenticate_active_workspaces(&anonymous_repository_configuration())
+        .expect("retained release owns the removed workspace");
+    reopened
+        .complete_release(&correlation)
+        .expect("complete release");
+    reopened
+        .acknowledge_release(&correlation, false)
+        .expect("acknowledge release");
+    drop(reopened);
+    let reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
+    assert!(reopened.retained_release().is_none());
+    reopened
+        .authenticate_active_workspaces(&anonymous_repository_configuration())
+        .expect("completed release forgets the removed active identity");
+}
+
 #[test]
 fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
     let (parent, mut state) = enrolled_workspace_root();
