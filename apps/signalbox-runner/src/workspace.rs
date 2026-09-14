@@ -487,13 +487,23 @@ struct StagingCleanup<'a> {
 impl Drop for StagingCleanup<'_> {
     fn drop(&mut self) {
         if !self.published {
-            let result = self
-                .directory
-                .try_clone()
-                .map_err(RunnerWorkspaceError::Io)
-                .and_then(|directory| release::finish_deletion(self.parent, self.name, directory));
-            if let Err(error) = result {
-                eprintln!("unpublished workspace staging cleanup failed: {error}");
+            let cleanup = self.parent.try_clone().and_then(|parent| {
+                self.directory
+                    .try_clone()
+                    .map(|directory| (parent, directory))
+            });
+            match cleanup {
+                Ok((parent, directory)) => {
+                    let name = self.name.to_owned();
+                    std::mem::drop(tokio::task::spawn_blocking(move || {
+                        if let Err(error) = release::finish_deletion(&parent, &name, directory) {
+                            eprintln!("unpublished workspace staging cleanup failed: {error}");
+                        }
+                    }));
+                }
+                Err(error) => {
+                    eprintln!("unpublished workspace staging cleanup failed: {error}");
+                }
             }
         }
     }

@@ -626,6 +626,9 @@ async fn failed_repository_preparation_removes_its_unpublished_staging_tree() {
         .path()
         .join("runner-state/sessions")
         .join(request.session().to_string());
+    while fs::read_dir(&session).expect("session directory").count() != 0 {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(fs::read_dir(session).expect("session directory").count(), 0);
 }
 
@@ -654,5 +657,8 @@ async fn aborted_repository_preparation_removes_its_unpublished_staging_tree() {
     entered.await.expect("staging exists");
     worker.abort();
     assert!(worker.await.expect_err("worker aborted").is_cancelled());
+    while fs::read_dir(&session).expect("session directory").count() != 0 {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(fs::read_dir(session).expect("session directory").count(), 0);
 }

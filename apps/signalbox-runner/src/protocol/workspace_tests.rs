@@ -291,6 +291,13 @@ async fn failed_anonymous_clone(missing_revision: bool) {
         .path()
         .join("state/sessions")
         .join(request.correlation.session_id.to_string());
+    while std::fs::read_dir(&session)
+        .expect("failed clone session")
+        .count()
+        != 0
+    {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(
         std::fs::read_dir(session)
             .expect("failed clone session")
