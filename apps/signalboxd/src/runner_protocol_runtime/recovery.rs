@@ -291,16 +291,30 @@ impl PostgresRunnerRegistrationService {
             }
         };
         let detail = serde_json::to_value(&failure.detail).map_err(|_| rejected())?;
-        self.store
-            .record_replacement_provisioning_failure(&authorization, kind, &detail)
-            .await
-            .map_err(|error| {
-                store_failure(
-                    RunnerInboundFrameKind::OperationFailed,
-                    AvailableCorrelation::OperationFailure(failure.correlation.clone()),
-                    error,
-                )
-            })?;
+        match epoch {
+            Some(epoch) => {
+                self.store
+                    .record_replacement_provisioning_failure(
+                        &authorization,
+                        RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(rejected)?,
+                        kind,
+                        &detail,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .reconcile_replacement_provisioning_failure(&authorization, kind, &detail)
+                    .await
+            }
+        }
+        .map_err(|error| {
+            store_failure(
+                RunnerInboundFrameKind::OperationFailed,
+                AvailableCorrelation::OperationFailure(failure.correlation.clone()),
+                error,
+            )
+        })?;
         Ok(signalbox_runner_wire::OperationFailureRecorded {
             correlation: failure.correlation,
         })

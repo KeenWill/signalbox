@@ -915,3 +915,22 @@ fn startup_inventory_reports_unexpected_root_entries_without_following_links() {
     assert!(root.join("orphan-directory").is_dir());
     assert!(root.join("orphan-link").is_symlink());
 }
+
+#[test]
+fn reconnect_inventory_reenumerates_root_after_prior_scan() {
+    let (parent, state) = enrolled_workspace_root();
+    let runner = state.state().receipt().expect("enrollment").runner_id();
+    let store = state.workspace_store().expect("workspace store");
+    assert!(store.startup_leaks(runner).expect("first scan").is_empty());
+    let root = parent.path().join("runner-state");
+    fs::write(root.join("later-orphan"), b"retained").expect("new root entry");
+    for _ in 0..2 {
+        let facts = state
+            .workspace_store()
+            .expect("reconnected store")
+            .startup_leaks(runner)
+            .expect("later scan");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].locator, "later-orphan");
+    }
+}
