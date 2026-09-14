@@ -143,6 +143,7 @@ impl RunnerWorkspaceStore {
             }
         }
         facts.sort();
+        facts.dedup();
         Ok(facts)
     }
 }
