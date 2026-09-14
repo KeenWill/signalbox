@@ -8,6 +8,19 @@ use signalbox_runner_wire::{
 };
 
 impl RunnerWorkspaceStore {
+    pub(crate) async fn scan_startup_leaks(
+        self,
+        runner: CanonicalUuid,
+    ) -> Result<Vec<LeakFact>, RunnerWorkspaceError> {
+        let staging_guard = self.staging_cleanup.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let _staging_guard = staging_guard;
+            self.startup_leaks(runner)
+        })
+        .await
+        .map_err(|error| RunnerWorkspaceError::Io(io::Error::other(error)))?
+    }
+
     pub(crate) fn startup_leaks(
         &self,
         runner: CanonicalUuid,

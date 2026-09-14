@@ -814,3 +814,65 @@ async fn aborted_repository_preparation_removes_its_unpublished_staging_tree() {
     }
     assert_eq!(fs::read_dir(session).expect("session directory").count(), 0);
 }
+#[test]
+fn reconnect_scan_waits_for_canceled_staging_cleanup() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("one runtime worker and one blocking worker");
+    runtime.block_on(async {
+        let (_parent, state) = fixture_root();
+        let preparation_store = state.workspace_store().expect("preparation store");
+        let scan_store = state
+            .workspace_store()
+            .expect("reconnect store shares cleanup lifetime");
+        let request = repository_request();
+        let runner = request.runner();
+        let (entered, preparing) = tokio::sync::oneshot::channel();
+        let preparation = tokio::spawn(async move {
+            preparation_store
+                .prepare_repository_workspace(&request, |target| async move {
+                    fs::write(
+                        target.path().join("partial-clone"),
+                        PREPARED_REPOSITORY_BYTES,
+                    )?;
+                    entered.send(()).expect("staging observer");
+                    std::future::pending::<Result<Recovery, io::Error>>().await
+                })
+                .await
+        });
+        preparing
+            .await
+            .expect("staging exists before transport loss");
+        let (unblock, held) = std::sync::mpsc::channel();
+        let (entered, occupied) = tokio::sync::oneshot::channel();
+        let blocking = tokio::task::spawn_blocking(move || {
+            entered.send(()).expect("blocking-pool observer");
+            held.recv().expect("blocking-pool release");
+        });
+        occupied.await.expect("hold filesystem workers");
+        preparation.abort();
+        let mut scan = Box::pin(scan_store.scan_startup_leaks(runner));
+        // Poll reconnect before cancellation drops the staging guard. An uncoordinated
+        // scan would queue ahead of deletion on the occupied blocking pool.
+        std::future::poll_fn(|context| {
+            assert!(scan.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            preparation
+                .await
+                .expect_err("transport canceled preparation")
+                .is_cancelled()
+        );
+        unblock.send(()).expect("permit cleanup and scanning");
+        blocking.await.expect("blocking worker released");
+        let facts = scan.await.expect("reconnect scan completes after cleanup");
+        assert!(
+            facts.is_empty(),
+            "successful unpublished cleanup must not produce a permanent leak fact: {facts:?}"
+        );
+    });
+}

@@ -1211,3 +1211,70 @@ async fn assert_cleanable_report_has_no_leak(
     );
     Ok(())
 }
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_report_reconciles_current_initial_workspace() -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, Digest, LeakFact, LeakFactKind, ManifestLifecycle, PositiveU64,
+        WorkspaceManifest, leak_report_digest, workspace_manifest_digest,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let workspace = private_workspace(
+        SessionId::from_uuid(uuid(SESSION)),
+        enrollment().runner(),
+        RunnerGeneration::try_from_u64(1).expect("first placement"),
+    );
+    let (store, enrolled, _, _, _) = stored_active_pin_fixture_with_workspace(
+        &pool,
+        ActivePinEffectCase::EffectFree,
+        Some(workspace.clone()),
+    )
+    .await?;
+    let ready_digest = workspace_manifest_digest(&WorkspaceManifest::from_domain(
+        ManifestLifecycle::Ready,
+        &workspace,
+    )?)?;
+    let mut fact = LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: workspace.relative_path.as_str().to_owned(),
+        entry_digest: ready_digest,
+        session: Some(CanonicalUuid::from_uuid(workspace.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(workspace.placement_revision.get())?),
+    };
+    let report = leak_report_digest(std::slice::from_ref(&fact))?;
+    store
+        .record_workspace_leak_page(
+            enrolled.enrollment(),
+            &super::status::report_page(&report, 1, None, true, std::slice::from_ref(&fact)),
+        )
+        .await?;
+    let leaks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(workspace.runner.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        leaks, 0,
+        "the current initial workspace is authoritative without a replacement receipt"
+    );
+
+    fact.entry_digest = Digest::try_new("e".repeat(64))?;
+    let report = leak_report_digest(std::slice::from_ref(&fact))?;
+    store
+        .record_workspace_leak_page(
+            enrolled.enrollment(),
+            &super::status::report_page(&report, 1, None, true, std::slice::from_ref(&fact)),
+        )
+        .await?;
+    let kinds: Vec<String> =
+        sqlx::query_scalar("SELECT kind FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(workspace.runner.into_uuid())
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        kinds,
+        ["manifest_conflict"],
+        "matching placement identity does not authenticate a changed digest"
+    );
+    Ok(())
+}

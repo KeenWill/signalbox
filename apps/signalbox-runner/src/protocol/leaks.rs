@@ -55,9 +55,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         {
             let store = state.workspace_store()?;
             let runner = self.receipt.runner_id();
-            self.startup_report = StartupReport::Scanning(tokio::task::spawn_blocking(move || {
-                store.startup_leaks(runner)
-            }));
+            self.startup_report =
+                StartupReport::Scanning(tokio::spawn(store.scan_startup_leaks(runner)));
         }
         if let StartupReport::Reporting(pages) = &mut self.startup_report
             && state.retained_leak_page().is_none()

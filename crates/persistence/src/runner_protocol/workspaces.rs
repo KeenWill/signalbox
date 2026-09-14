@@ -468,9 +468,25 @@ async fn reconcile_leak(
         FROM runner_replacement_workspace_ready ready JOIN runner_replacement_provisioning_authorization operation USING (authorization_id)
         LEFT JOIN runner_workspace_release_outcome outcome USING (manifest_id)
         WHERE operation.runner_id = $1 AND operation.session_id = $2 AND operation.placement_revision = $3 AND ready.relative_path = $4")
-        .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get())).bind(fact.locator.as_str()).fetch_all(connection).await?;
+        .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get())).bind(fact.locator.as_str()).fetch_all(&mut *connection).await?;
     if rows.is_empty() {
-        return Ok(Some(Kind::UnknownManifest));
+        let initial = sqlx::query("SELECT placement.* FROM runner_current_session_placement head
+            JOIN runner_session_placement_record placement USING (session_id,event_ordinal)
+            WHERE placement.pinned_runner_id = $1 AND placement.session_id = $2
+                AND placement.workspace_placement_revision = $3 AND placement.workspace_relative_path = $4
+                AND placement.workspace_manifest_id IS NOT NULL AND placement.state_kind <> 'runner_abandoned'
+                AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_ready ready WHERE ready.manifest_id = placement.workspace_manifest_id)")
+            .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
+            .bind(fact.locator.as_str()).fetch_optional(connection).await?;
+        return match initial {
+            Some(placement)
+                if placement_manifest_digest(&placement)? == fact.entry_digest.as_str() =>
+            {
+                Ok(None)
+            }
+            Some(_) => Ok(Some(Kind::ManifestConflict)),
+            None => Ok(Some(Kind::UnknownManifest)),
+        };
     }
     for row in rows {
         if row.decode_column::<String>("manifest_digest")? == fact.entry_digest.as_str() {

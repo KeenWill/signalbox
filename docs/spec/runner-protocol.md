@@ -180,11 +180,13 @@ release and its existing diagnostic.
 
 Before accepting new provisioning or executing tools, startup reports ready and
 active manifests and unknown entries in bounded, digest-correlated pages.
-Provisioning waits until every startup page is acknowledged. The daemon
-reconciles exact retained ready facts and stores unresolved diagnostics before
-acknowledging each page. The final page verifies strict ordering and the
-complete digest over all retained facts. Reports remain visible without a
-resumable session and authorize no deletion.
+Scanning waits for canceled staging cleanup to finish; successfully removed
+unpublished workspaces produce no leak fact. Provisioning waits until every
+startup page is acknowledged. The daemon reconciles exact retained ready facts,
+including the reconstructed ready manifest of a current initial placement, and
+stores unresolved diagnostics before acknowledging each page. The final page
+verifies strict ordering and the complete digest over all retained facts.
+Reports remain visible without a resumable session and authorize no deletion.
 
 ## Boundary contracts
 

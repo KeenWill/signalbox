@@ -316,6 +316,7 @@ pub struct RunnerStateRoot {
     canonical_root: std::path::PathBuf,
     state: RunnerState,
     journal: Journal,
+    staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerStateRoot {
@@ -456,6 +457,7 @@ impl RunnerStateRoot {
             canonical_root,
             state,
             journal,
+            staging_cleanup: std::sync::Arc::default(),
         })
     }
 
@@ -478,6 +480,7 @@ impl RunnerStateRoot {
         Ok(crate::workspace::RunnerWorkspaceStore::from_root(
             directory,
             self.canonical_root.clone(),
+            self.staging_cleanup.clone(),
         ))
     }
 
