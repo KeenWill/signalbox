@@ -1181,10 +1181,11 @@ async fn assert_cleanable_report_has_no_leak(
         placement_revision: Some(PositiveU64::try_new(ready.placement_revision.get())?),
     }];
     if completed {
-        // A later scan observes an unrelated entry, producing a fresh report identity.
+        // Successful cleanup removed the original trash directory, so a later entry
+        // using that manifest name is new evidence rather than retained cleanup.
         facts.push(LeakFact {
             kind: LeakFactKind::RetiredPresent,
-            locator: "trash/unrelated".to_owned(),
+            locator: format!("trash/{}", ready.manifest_id.into_uuid()),
             entry_digest: Digest::try_new("e".repeat(64))?,
             session: None,
             placement_revision: None,
@@ -1209,6 +1210,19 @@ async fn assert_cleanable_report_has_no_leak(
         rows, 0,
         "pending and completed releases are reconciled by startup reporting"
     );
+    if completed {
+        let trash_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+        )
+        .bind(ready.runner.into_uuid())
+        .bind(format!("trash/{}", ready.manifest_id.into_uuid()))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            trash_rows, 1,
+            "trash recreated after completed cleanup remains visible"
+        );
+    }
     Ok(())
 }
 #[tokio::test]

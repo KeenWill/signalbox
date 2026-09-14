@@ -443,7 +443,10 @@ async fn reconcile_leak(
     {
         let retained: bool = sqlx::query_scalar(
             "SELECT EXISTS (
-            SELECT 1 FROM runner_workspace_release WHERE manifest_id = $1 AND runner_id = $2)",
+            SELECT 1 FROM runner_workspace_release release
+            LEFT JOIN runner_workspace_release_outcome outcome USING (manifest_id)
+            WHERE release.manifest_id = $1 AND release.runner_id = $2
+                AND outcome.outcome IS DISTINCT FROM 'completed')",
         )
         .bind(manifest)
         .bind(runner.into_uuid())
