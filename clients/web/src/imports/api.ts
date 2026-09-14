@@ -363,7 +363,7 @@ export class HttpImportApi implements ImportApi {
         exactSourceSessionDigest,
       )
     }
-    const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
+    const response = await fetch(`/api/imports${queryString(request)}`, { signal })
     return correlateListPage(
       request,
       await decodeResponse(response, decodeWebImportListPage, LIST_RESPONSE_BYTES),

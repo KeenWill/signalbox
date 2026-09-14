@@ -668,6 +668,10 @@ pub(crate) const DELEGATION_LOAD_RELATION: &str =
 pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
+pub(crate) const FINISH_GENERATED_SESSION_TITLE: &str =
+    "SELECT session_id, initial_for_turn IS NOT NULL AS initial, state_kind, title
+                FROM session_title_model_call WHERE model_call_id = $1 FOR UPDATE";
+
 pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str = "SELECT session_row.ancestry_kind,
             event.version, event.prior_version, event.event_kind,
             event.placement_path, event.root_global_read_intent,

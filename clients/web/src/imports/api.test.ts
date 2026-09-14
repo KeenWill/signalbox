@@ -39,6 +39,44 @@ const summary = (id: string) => ({
 afterEach(() => vi.unstubAllGlobals())
 
 describe('HttpImportApi correlation', () => {
+  it('requests the exact import catalog path without query parameters', async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            next_cursor: null,
+            search_correlation: null,
+            exact_source_session_id_sha256: null,
+          }),
+        ),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    await new HttpImportApi(() => Promise.resolve()).list({})
+
+    expect(fetch).toHaveBeenCalledWith('/api/imports', expect.any(Object))
+  })
+
+  it('requests the exact import catalog path with query parameters', async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            next_cursor: null,
+            search_correlation: null,
+            exact_source_session_id_sha256: null,
+          }),
+        ),
+    )
+    vi.stubGlobal('fetch', fetch)
+
+    await new HttpImportApi(() => Promise.resolve()).list({ limit: 1 })
+
+    expect(fetch).toHaveBeenCalledWith('/api/imports?limit=1', expect.any(Object))
+  })
+
   it('does not issue production import I/O when bootstrap validation fails', async () => {
     const fetch = vi.fn()
     vi.stubGlobal('fetch', fetch)
