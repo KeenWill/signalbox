@@ -198,6 +198,39 @@ loop verifies the lost lease and its issuing turn attempt's durable yield. An
 unavailable reread retains that verification without invoking the executor
 again.
 
+A user-requested runner replacement can take over an unresolved offered request
+before continuation when its lease has durable no-execution proof, or when its
+lost execution is pure or idempotent. The takeover transaction locks the
+session, batch, retained attempt, and staged replacement, checks that every
+preceding request is resolved and this request alone is recovery-pending,
+installs the successor placement, and consumes the stage. It projects no result
+and prepares no model call. The turn remains parked while the successor's retry
+is offered and claimed.
+
+With no-execution proof, the retry retains the same physical attempt. Otherwise
+it creates a fresh physical attempt and terminalizes the retained attempt in the
+same transaction that offers the retry: a pure attempt becomes crash-lost and an
+idempotent attempt retains its physical ambiguity. Neither old attempt produces
+an extra result. Retry authority validates both placements and permits different
+runner identities; the next runner lease generation is independent of the tool
+dispatch generation. Exhausting either generation fails closed.
+
+A completed or refused retry resumes the same turn through a fresh prepared turn
+attempt. An ambiguous retry enters tool recovery with its already yielded
+issuing attempt retained. Another connection loss keeps the request parked;
+another explicit replacement is required. A successor lost before receiving an
+offer retains the original loss correlation. Later requests execute in proposal
+order only after the retained request resolves. Once the complete batch
+resolves, continuation projects its results in order, appends each pending
+relocation once, and prepares the next model call. This is the user-replacement
+retry path, not a general automatic retry policy.
+
+A stop and retry dispatch use the same turn dispatch gate. A stop that wins
+before dispatch suppresses the retry and projects `ToolClosed`, preserving any
+physical ambiguity. If dispatch wins, the stop waits for its result or loss
+classification. Terminalization projects the complete batch, then its pending
+relocation, before the terminal marker.
+
 Because the attempt schema requires a closed effect class, preparation records
 `EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight
 transaction closes that attempt before authorization, and the sentinel is not a
@@ -671,8 +704,6 @@ computes this allowance from the durable turn request count.
 
 ## Planned
 
-- Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
-
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
   result entry; see [tool-loop design](../design/tool-loop.md).
@@ -682,8 +713,8 @@ computes this allowance from the durable turn request count.
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
 
-- Runner-locus execution rules: the lost-lease retry exception and the runner
-  approval ladder; see [runner protocol design](../design/runner-protocol.md).
+- Runner-locus execution rules: the runner approval ladder; see
+  [runner protocol design](../design/runner-protocol.md).
 
 A completed image read retains a typed media reference beside its bounded text
 summary. Its storage record carries independent presented and source validation

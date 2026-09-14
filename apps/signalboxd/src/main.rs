@@ -34,9 +34,9 @@ use std::{
 
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
-    SchedulerPassOccupancyBound, StaleActiveTurnBound, TurnLivenessScanInterval,
+    InProcessEligibilityWorkSource, ModelCallCredentialReference, OperatorFailureClass,
+    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, SchedulerPassOccupancyBound,
+    StaleActiveTurnBound, TurnLivenessScanInterval,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -2526,7 +2526,7 @@ async fn run_hub_incarnation(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
-    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let tool_dispatch_gate = runner_dispatch.tool_dispatch_gate();
     let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
         scheduler_pool.clone(),
         model_configuration.clone(),

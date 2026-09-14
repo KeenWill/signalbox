@@ -228,6 +228,7 @@ impl PreparedDelegatedTurnActivation {
             owning_turn,
             current_attempt,
             &attempt_end,
+            true,
         )?;
         self.turn.phase = ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
@@ -296,6 +297,7 @@ impl PreparedDelegatedTurnActivation {
             owning_turn,
             current_attempt,
             &attempt_end,
+            false,
         )?;
         self.turn.phase = ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
@@ -322,11 +324,17 @@ fn reconstitute_recovery_attempt(
     turn: TurnId,
     current_attempt: TurnAttemptId,
     attempt_end: &crate::TerminalAttemptEndReconstitutionInput,
+    runner_yield_allowed: bool,
 ) -> Option<EndedTurnAttempt> {
     let running_attempt = CurrentTurnAttempt::prepared(current_attempt)
         .begin_running()
         .ok()?;
     let attempt = match attempt_end.end() {
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+        } if runner_yield_allowed => running_attempt
+            .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+            .ok()?,
         AttemptEnd::WithoutStop {
             disposition:
                 disposition @ (UnstoppedAttemptDisposition::Ambiguous

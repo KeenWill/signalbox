@@ -664,7 +664,27 @@ pub(crate) async fn persist_tool_reconciliation_required(
     crate::tool_loop::persist_result_entry_slice(connection, reconciliation.tool_result_entries())
         .await
         .map_err(map_tool_evidence_error)?;
-    insert_snapshot(connection, reconciliation.terminal_snapshot()).await?;
+    let snapshot = reconciliation.terminal_snapshot();
+    let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_placement_boundary WHERE session_id = $1 AND context_frontier_id = $2)")
+        .bind(reconciliation.session().into_uuid()).bind(snapshot.frontier().snapshot().into_uuid())
+        .fetch_one(&mut *connection).await?;
+    if retained {
+        let stored = super::load_call_snapshot(
+            connection,
+            reconciliation.session(),
+            snapshot.frontier().snapshot(),
+        )
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "terminal takeover snapshot",
+        ))?;
+        if stored != *snapshot {
+            return Err(ModelCallCorruption::Inconsistent("terminal takeover snapshot").into());
+        }
+    } else {
+        insert_snapshot(connection, snapshot).await?;
+    }
     persist_reclassified_pending_steering(
         connection,
         reconciliation.session(),

@@ -68,11 +68,12 @@ it was validated against, and creates a `CredentialProfileGrant` when a profile
 was selected. Pinning records the tool names the validated registration admits
 and their runner-only subset. A `RunnerLease` is the domain record of one tool
 attempt offered to that runner; its offer, claim, and completion drive the local
-wire exchange. Loss and retry transitions are domain code. A placement changes
-only by explicit transition: replacing a lost runner and replacing the pinned
-credential profile each advance its revision. When a pinned runner is lost, the
-placement enters a lost state that only two user commands leave: replace, which
-installs a successor placement, and abandon, which retires the placement.
+wire exchange. Checked replacement takeover offers a retained request on the
+successor through the same serial lease service. A placement changes only by
+explicit transition: replacing a lost runner and replacing the pinned credential
+profile each advance its revision. When a pinned runner is lost, the placement
+enters a lost state that only two user commands leave: replace, which installs a
+successor placement, and abandon, which retires the placement.
 
 ## Design decisions
 
@@ -391,11 +392,16 @@ consumed revision remains terminal. The domain replaces an active grant on a
 pinned runner with an active successor or terminally revokes it.
 
 Reconnect of the lost identity cannot consume either replacement transition or
-clear a lost state. Safe retry authority exists only for a pinned lost runner,
-is consumed only as part of its user replacement, and never causes automatic
-dispatch. Abandonment has no cancellation proof and cannot end a turn; an active
-turn first finishes its stop, approval-decision, or reconciliation flow. An idle
-or queued-only session that abandons its runner fabricates no turn or frontier,
+clear a lost state. Safe retry authority is consumed through an explicit user
+replacement. Its pre-continuation takeover retains the request until the serial
+lease service offers and settles its retry, as [tool-loop](tool-loop.md)
+defines. The lease lineage increments `RunnerGeneration`; a fresh physical
+attempt has its own `ToolDispatchGeneration`. The immutable takeover
+authenticates the source loss and successor placement without requiring their
+runner identities to match. A terminal receipt wakes the scheduler after commit.
+Abandonment has no cancellation proof and cannot end a turn; an active turn
+first finishes its stop, approval-decision, or reconciliation flow. An idle or
+queued-only session that abandons its runner fabricates no turn or frontier,
 creates no successor turn, afterwards exposes only daemon-executable tools, and
 never rewrites an issued side effect as known. Replace and abandon follow the
 command claim protocol that [identity and commands](identity-and-commands.md)

@@ -1925,6 +1925,23 @@ pub(crate) async fn prepare_runner_recovery_tool_round(
     fixture_catalog: RunnerCatalog,
     fixture_effect_kind: &'static str,
 ) -> Result<RunnerRecoveryToolRoundFacts, Box<dyn Error>> {
+    prepare_runner_recovery_tool_round_in_sandbox(
+        pool,
+        authorize,
+        fixture_catalog,
+        fixture_effect_kind,
+        RunnerSandboxProfile::WorkspaceRestricted,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_runner_recovery_tool_round_in_sandbox(
+    pool: &PgPool,
+    authorize: fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+    fixture_catalog: RunnerCatalog,
+    fixture_effect_kind: &'static str,
+    sandbox: RunnerSandboxProfile,
+) -> Result<RunnerRecoveryToolRoundFacts, Box<dyn Error>> {
     let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
     insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, fixture_effect_kind)
@@ -1948,7 +1965,7 @@ pub(crate) async fn prepare_runner_recovery_tool_round(
             ),
             credential_profile: None,
             workspace: WorkspaceRequirement::None,
-            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            sandbox,
             permission_overrides: no_permission_overrides(),
         },
     );

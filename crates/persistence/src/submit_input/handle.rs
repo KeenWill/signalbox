@@ -1,8 +1,8 @@
 use super::attachment::{
-    load_runner_recovery_yielded_attempt, persist_runner_recovery_interrupt_effect,
-    prepare_attachment_authority_rejection, prospective_attachment_frontier_exceeds_bound,
-    session_has_attachment_parts, supersede_automatic_reconciliation,
-    terminalize_retryable_runner_recovery_attempt,
+    load_runner_recovery_yielded_attempt, load_runner_takeover_effect,
+    persist_runner_recovery_interrupt_effect, prepare_attachment_authority_rejection,
+    prospective_attachment_frontier_exceeds_bound, session_has_attachment_parts,
+    supersede_automatic_reconciliation, terminalize_retryable_runner_recovery_attempt,
 };
 use super::decode::map_tool_loop_error;
 use super::prepare::{existing_outcome, prepare_against_locked_state, require_recorded};
@@ -361,6 +361,13 @@ where
                 .map(signalbox_domain::ToolRequest::id)
                 .collect::<Vec<_>>();
             let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
+            let result_frontier = crate::tool_loop::terminal_result_frontier(
+                connection,
+                interrupt.session(),
+                result_frontier,
+            )
+            .await
+            .map_err(map_tool_loop_error)?;
             let mut has_child_wait = false;
             let mut child_outcomes = std::collections::BTreeMap::new();
             for request in batch.requests() {
@@ -415,6 +422,10 @@ where
                     .map_err(map_tool_loop_error)?,
                     None => projection,
                 };
+            let projection =
+                crate::tool_loop::append_terminal_takeover_boundaries(connection, projection)
+                    .await
+                    .map_err(map_tool_loop_error)?;
             // The scheduling projection is built from `queued_input_origin`, so
             // it carries an active turn only for an accepted-input origin. A
             // delegation-origin active turn is absent from it and must be
@@ -541,6 +552,13 @@ where
                     .map(signalbox_domain::ToolRequest::id)
                     .collect::<Vec<_>>();
                 let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
+                let result_frontier = crate::tool_loop::terminal_result_frontier(
+                    connection,
+                    interrupt.session(),
+                    result_frontier,
+                )
+                .await
+                .map_err(map_tool_loop_error)?;
                 let result_projection = batch
                     .prepare_reconciliation_projection(result_entries, result_frontier)
                     .map_err(|_| {
@@ -548,12 +566,19 @@ where
                             "tool recovery batch cannot materialize terminal results",
                         )
                     })?;
+                let result_projection = crate::tool_loop::append_terminal_takeover_boundaries(
+                    connection,
+                    result_projection,
+                )
+                .await
+                .map_err(map_tool_loop_error)?;
+
                 let reconciliation = match delegated_tool_recovery {
                     Some(recovery) => {
                         let identities =
                             attach_recovery_interrupt_reclassification_candidates_for_activated(
                                 signalbox_domain::AmbiguousModelCallTurnIdentities::new(
-                                    result_frontier,
+                                    result_projection.snapshot().frontier().snapshot(),
                                 ),
                                 &recovery.active,
                                 &mut next_reclassified_turn,
@@ -575,7 +600,7 @@ where
                         )?;
                         let identities = attach_recovery_interrupt_reclassification_candidates(
                             signalbox_domain::AmbiguousModelCallTurnIdentities::new(
-                                result_frontier,
+                                result_projection.snapshot().frontier().snapshot(),
                             ),
                             &active_turn,
                             &mut next_reclassified_turn,
@@ -664,6 +689,13 @@ where
                         recovery_attempt,
                     )
                     .await?;
+                    let takeover_effect = load_runner_takeover_effect(
+                        connection,
+                        interrupt.session(),
+                        interrupt.proof().predecessor(),
+                        recovery_attempt,
+                    )
+                    .await?;
                     let batch = if preserves_ambiguity {
                         load_recovery_batch_by_attempt(
                             connection,
@@ -693,14 +725,37 @@ where
                         .map(signalbox_domain::ToolRequest::id)
                         .collect::<Vec<_>>();
                     let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-                    if !preserves_ambiguity {
-                        let result_projection = batch
-                            .prepare_cancellation_projection(result_entries, result_frontier)
-                            .map_err(|_| {
-                                SubmitInputCorruption::Inconsistent(
-                                    "runner retryable recovery batch cannot close",
-                                )
-                            })?;
+                    let result_frontier = crate::tool_loop::terminal_result_frontier(
+                        connection,
+                        interrupt.session(),
+                        result_frontier,
+                    )
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                    if !preserves_ambiguity || takeover_effect.is_some() {
+                        let result_projection = match takeover_effect {
+                            Some(effect) => batch.prepare_runner_retry_cancellation_projection(
+                                recovery_attempt,
+                                effect,
+                                result_entries,
+                                result_frontier,
+                            ),
+                            None => batch
+                                .prepare_cancellation_projection(result_entries, result_frontier),
+                        }
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "runner retryable recovery batch cannot close",
+                            )
+                        })?;
+                        let result_projection =
+                            crate::tool_loop::append_terminal_takeover_boundaries(
+                                connection,
+                                result_projection,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
+
                         let identities = attach_interrupt_reclassification_candidates_for_active(
                             cancellation_identities,
                             &active_turn,
@@ -752,9 +807,17 @@ where
                                     "runner recovery batch cannot preserve ambiguity",
                                 )
                             })?;
+                        let result_projection =
+                            crate::tool_loop::append_terminal_takeover_boundaries(
+                                connection,
+                                result_projection,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
+
                         let identities = attach_recovery_interrupt_reclassification_candidates(
                             signalbox_domain::AmbiguousModelCallTurnIdentities::new(
-                                result_frontier,
+                                result_projection.snapshot().frontier().snapshot(),
                             ),
                             &active_turn,
                             &mut next_reclassified_turn,
@@ -794,6 +857,13 @@ where
                                 .collect::<Vec<_>>();
                             let (result_entries, result_frontier) =
                                 next_tool_cancellation(&request_ids);
+                            let result_frontier = crate::tool_loop::terminal_result_frontier(
+                                connection,
+                                interrupt.session(),
+                                result_frontier,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
                             Some(
                                 batch
                                     .prepare_cancellation_projection(
@@ -807,6 +877,16 @@ where
                                     })?,
                             )
                         }
+                        None => None,
+                    };
+                    let result_projection = match result_projection {
+                        Some(projection) => Some(
+                            crate::tool_loop::append_terminal_takeover_boundaries(
+                                connection, projection,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?,
+                        ),
                         None => None,
                     };
                     let identities = attach_interrupt_reclassification_candidates_for_active(
@@ -873,6 +953,13 @@ where
                         recovery_attempt,
                     )
                     .await?;
+                    let takeover_effect = load_runner_takeover_effect(
+                        connection,
+                        interrupt.session(),
+                        interrupt.proof().predecessor(),
+                        recovery_attempt,
+                    )
+                    .await?;
                     let batch = if preserves_ambiguity {
                         load_recovery_batch_by_attempt(
                             connection,
@@ -902,14 +989,37 @@ where
                         .map(signalbox_domain::ToolRequest::id)
                         .collect::<Vec<_>>();
                     let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-                    if !preserves_ambiguity {
-                        let result_projection = batch
-                            .prepare_cancellation_projection(result_entries, result_frontier)
-                            .map_err(|_| {
-                                SubmitInputCorruption::Inconsistent(
-                                    "delegated retryable runner batch cannot close",
-                                )
-                            })?;
+                    let result_frontier = crate::tool_loop::terminal_result_frontier(
+                        connection,
+                        interrupt.session(),
+                        result_frontier,
+                    )
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                    if !preserves_ambiguity || takeover_effect.is_some() {
+                        let result_projection = match takeover_effect {
+                            Some(effect) => batch.prepare_runner_retry_cancellation_projection(
+                                recovery_attempt,
+                                effect,
+                                result_entries,
+                                result_frontier,
+                            ),
+                            None => batch
+                                .prepare_cancellation_projection(result_entries, result_frontier),
+                        }
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "delegated retryable runner batch cannot close",
+                            )
+                        })?;
+                        let result_projection =
+                            crate::tool_loop::append_terminal_takeover_boundaries(
+                                connection,
+                                result_projection,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
+
                         let identities =
                             attach_interrupt_reclassification_candidates_for_activated(
                                 cancellation_identities,
@@ -963,10 +1073,18 @@ where
                                     "delegated runner recovery batch cannot preserve ambiguity",
                                 )
                             })?;
+                        let result_projection =
+                            crate::tool_loop::append_terminal_takeover_boundaries(
+                                connection,
+                                result_projection,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
+
                         let identities =
                             attach_recovery_interrupt_reclassification_candidates_for_activated(
                                 signalbox_domain::AmbiguousModelCallTurnIdentities::new(
-                                    result_frontier,
+                                    result_projection.snapshot().frontier().snapshot(),
                                 ),
                                 &active_turn,
                                 &mut next_reclassified_turn,
@@ -1006,6 +1124,13 @@ where
                                 .collect::<Vec<_>>();
                             let (result_entries, result_frontier) =
                                 next_tool_cancellation(&request_ids);
+                            let result_frontier = crate::tool_loop::terminal_result_frontier(
+                                connection,
+                                interrupt.session(),
+                                result_frontier,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?;
                             Some(
                                 batch
                                     .prepare_cancellation_projection(
@@ -1019,6 +1144,16 @@ where
                                     })?,
                             )
                         }
+                        None => None,
+                    };
+                    let result_projection = match result_projection {
+                        Some(projection) => Some(
+                            crate::tool_loop::append_terminal_takeover_boundaries(
+                                connection, projection,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?,
+                        ),
                         None => None,
                     };
                     let identities = attach_interrupt_reclassification_candidates_for_activated(

@@ -274,7 +274,7 @@ pub(super) async fn require_live_execution_with_targets(
         None => None,
     };
     let successor_snapshot = if call_snapshot.is_none() {
-        load_availability_predecessor_snapshot(
+        load_wait_predecessor_snapshot(
             connection,
             requested_session,
             current_attempt.id(),
@@ -1282,7 +1282,7 @@ pub(super) async fn load_tool_result_correlations(
         .collect())
 }
 
-/// Restores an availability predecessor frontier and its observation-boundary relocation.
+/// Restores the predecessor frontier and relocation retained by a resumed wait.
 ///
 /// A successor attempt owns no call yet, and its predecessor is terminal, so
 /// the live call set omits it and reconstitution would fall back to the turn's
@@ -1293,7 +1293,7 @@ pub(super) async fn load_tool_result_correlations(
 ///
 /// When neither the predecessor nor a relocation extends the starting frontier,
 /// the ordinary starting-snapshot path applies.
-async fn load_availability_predecessor_snapshot(
+async fn load_wait_predecessor_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
     attempt: TurnAttemptId,
@@ -1315,7 +1315,13 @@ async fn load_availability_predecessor_snapshot(
                  ORDER BY boundary.placement_revision DESC LIMIT 1
            ) AS relocation ON true
           WHERE successor.successor_turn_attempt_id = $1
-          UNION ALL SELECT waiting.frontier_id FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1",
+          UNION ALL SELECT waiting.frontier_id FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1
+          UNION ALL SELECT boundary.context_frontier_id
+            FROM turn_attempt AS resumed
+            JOIN runner_recovery_takeover AS takeover ON takeover.yielded_turn_attempt_id = resumed.continued_from_attempt_id
+              AND takeover.session_id = resumed.session_id AND takeover.turn_id = resumed.turn_id
+            JOIN runner_placement_boundary AS boundary ON boundary.command_id = takeover.command_id
+            WHERE resumed.turn_attempt_id = $1 AND takeover.producing_model_call_id IS NULL",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)

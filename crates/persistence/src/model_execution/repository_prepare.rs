@@ -1005,10 +1005,10 @@ impl PostgresModelCallRepository {
                             })?
                             .1
                     } else {
-                        None
+                        Vec::new()
                     };
                     let boundary = relocation
-                        .as_ref()
+                        .last()
                         .map_or(round.yielded_snapshot(), |boundary| boundary.frontier());
                     persist_observed_tool_round(&mut transaction, round, boundary).await?;
                 } else {

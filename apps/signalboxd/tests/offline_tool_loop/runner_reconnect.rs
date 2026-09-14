@@ -422,3 +422,203 @@ async fn check_reconnect(
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn replacement_retries_a_parked_echo_and_wakes_continuation() -> Result<(), Box<dyn Error>> {
+    let database = migrated_postgres().await?;
+    tokio::time::timeout(Duration::from_secs(120), check_replacement_retry(database)).await?
+}
+
+async fn check_replacement_retry(database: (TestDatabase, PgPool)) -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{EligibilityWorkSource as _, InProcessEligibilityWorkSource};
+    let directory = tempfile::tempdir()?;
+    let fixture = ToolLoopFixture::with_creation_placement(
+        DangerousToolAutoApproval::Disabled,
+        None,
+        database,
+        Some(super::runner_execution::placement(
+            directory.path().to_owned(),
+        )),
+    )
+    .await?;
+    let service =
+        PostgresRunnerRegistrationService::local(fixture.pool.clone()).expect("compiled catalog");
+    let RunnerEnrollmentResponse::Active(first) = service
+        .enroll(Enroll {
+            request_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+            digest_version: DIGEST_VERSION,
+            advertisement: advertisement(),
+        })
+        .await?
+    else {
+        panic!("initial enrollment is active");
+    };
+    let dispatch = service.dispatch_service();
+    let (catalog, executor) = offline_daemon_tools(
+        OfflineWebTransport::unused(),
+        UnusedSessionStatusWriter,
+        UnusedCodeHostTransport,
+        WebFetchEgressPolicy::deny_all(),
+    )?
+    .into_parts();
+    let arguments = serde_json::json!({"text":"replacement echo"}).to_string();
+    let runtime = Arc::new(ScriptedModel::<ModelCallId>::following([
+        tool_use_script(&[("echo", arguments.as_str())]),
+        completion_script("replacement observed"),
+    ]));
+    let provider = RuntimeModelCallProvider::new(
+        RecordingScriptedModel {
+            inner: Arc::clone(&runtime),
+            shutdown_after_execute: None,
+        },
+        fixture.runtime_models.clone(),
+        None,
+    );
+    let execution = PostgresProviderModelExecution::new(
+        PostgresModelCallRepository::new(
+            fixture.pool.clone(),
+            fixture.targets.clone(),
+            fixture.credential_reference.clone(),
+        )
+        .with_runner_recovery(service.recovery_store()),
+        InProcessAttemptDispatchGate::default(),
+        provider,
+        None,
+    )
+    .with_tool_loop(
+        dispatch.tool_dispatch_gate(),
+        catalog,
+        executor.with_runner_dispatch(dispatch.clone()),
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        fixture.pool.clone(),
+        None,
+        Vec::new(),
+    ))
+    .with_runner_dispatch(dispatch.clone());
+    let lose = async {
+        let offer = loop {
+            if let Some(offer) = service
+                .pending_tool_offer(first.enrollment_id, first.connection_epoch)
+                .await?
+            {
+                break offer;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        service
+            .claim_tool_offer(
+                first.enrollment_id,
+                first.connection_epoch,
+                LeaseClaim {
+                    correlation: offer.correlation.clone(),
+                },
+            )
+            .await?;
+        service
+            .transition_connection(
+                first.enrollment_id,
+                first.connection_epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        Ok::<_, Box<dyn Error>>(offer.correlation)
+    };
+    let (executed, lost) =
+        tokio::join!(execution.execute(Box::new(fixture.activated.clone())), lose);
+    executed?;
+    let lost = lost?;
+    let (nudge, mut work) = InProcessEligibilityWorkSource::with_options(
+        signalbox_persistence::scheduler::PostgresEligibilitySweep::new(fixture.pool.clone()),
+        None,
+        None,
+    );
+    let service = service.with_eligibility_nudge(nudge);
+    let successor = service
+        .enroll(Enroll {
+            request_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+            digest_version: DIGEST_VERSION,
+            advertisement: advertisement(),
+        })
+        .await?;
+    let (enrollment, epoch) = match successor {
+        RunnerEnrollmentResponse::Active(receipt) => {
+            (receipt.enrollment_id, receipt.connection_epoch)
+        }
+        RunnerEnrollmentResponse::Pending(receipt) => {
+            (receipt.enrollment_id, receipt.connection_epoch)
+        }
+    };
+    let replaced = service
+        .recovery_store()
+        .replace_lost_runner(signalbox_domain::ReplaceLostRunner {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session: fixture.session,
+            revision: None,
+        })
+        .await?;
+    assert!(matches!(
+        replaced,
+        signalbox_persistence::runner_protocol::RunnerRecoveryOutcome::Recorded(
+            signalbox_domain::ReplaceLostRunnerResult::Replaced { .. }
+        )
+    ));
+    let retry = loop {
+        if let Some(offer) = service.pending_tool_offer(enrollment, epoch).await? {
+            break offer;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_ne!(retry.correlation.tool_attempt_id, lost.tool_attempt_id);
+    assert_eq!(retry.correlation.lease_id, lost.lease_id);
+    assert_eq!(
+        retry.correlation.lease_generation.get(),
+        lost.lease_generation.get() + 1
+    );
+    let gate = dispatch.tool_dispatch_gate();
+    let mut stopping = Box::pin(gate.acquire(fixture.activated.turn()));
+    assert!(
+        std::future::poll_fn(|context| std::task::Poll::Ready(std::future::Future::poll(
+            stopping.as_mut(),
+            context
+        )))
+        .await
+        .is_pending(),
+        "the actual retry worker holds the stop gate until terminal settlement"
+    );
+    service
+        .claim_tool_offer(
+            enrollment,
+            epoch,
+            LeaseClaim {
+                correlation: retry.correlation.clone(),
+            },
+        )
+        .await?;
+    service
+        .record_tool_result(
+            enrollment,
+            epoch,
+            ResultFrame {
+                correlation: retry.correlation,
+                result: TerminalResult::Success { text: arguments },
+            },
+        )
+        .await?;
+    assert_eq!(
+        work.next().await?,
+        fixture.session,
+        "result commit wakes continuation without a periodic scan"
+    );
+    drop(stopping.await);
+    execution.resume_active(fixture.session).await?;
+    assert_eq!(runtime.received_operations().len(), 2);
+    let relocations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_placement_boundary WHERE session_id = $1")
+            .bind(fixture.session.into_uuid())
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(relocations, 1);
+    Ok(())
+}

@@ -214,7 +214,7 @@ impl RunnerProtocolStore {
         transaction: &mut Transaction<'_, Postgres>,
         session: SessionId,
         boundary: Option<&signalbox_domain::ResolvedContextFrontierSnapshot>,
-    ) -> Result<(bool, Option<signalbox_domain::RunnerPlacementBoundary>), RunnerProtocolStoreError>
+    ) -> Result<(bool, Vec<signalbox_domain::RunnerPlacementBoundary>), RunnerProtocolStoreError>
     {
         let command: Option<Uuid> =
             sqlx::query_scalar(crate::lock_inventory::RUNNER_REPLACEMENT_STAGE)
@@ -222,7 +222,18 @@ impl RunnerProtocolStore {
                 .fetch_optional(&mut **transaction)
                 .await?;
         let Some(command) = command else {
-            return Ok((true, None));
+            let boundaries = match boundary {
+                Some(boundary) => {
+                    super::takeover::append_takeover_boundaries(
+                        transaction.as_mut(),
+                        session,
+                        boundary,
+                    )
+                    .await?
+                }
+                None => Vec::new(),
+            };
+            return Ok((true, boundaries));
         };
         let command = DurableCommandId::from_uuid(command);
         // Construct the installation future outside the shared boundary poll frame.
@@ -232,14 +243,14 @@ impl RunnerProtocolStore {
         })
         .await?
         else {
-            return Ok((false, None));
+            return Ok((false, Vec::new()));
         };
         insert_replacement_result(transaction, command, result).await?;
         sqlx::query("DELETE FROM runner_replacement_stage WHERE command_id = $1")
             .bind(command.into_uuid())
             .execute(&mut **transaction)
             .await?;
-        Ok((true, relocation))
+        Ok((true, relocation.into_iter().collect()))
     }
 
     /// Resumes every claimed, unterminated replacement before process clients are admitted.
@@ -284,9 +295,13 @@ impl RunnerProtocolStore {
             SessionRunnerPlacementState::RunnerLostBeforePin(lost) => (lost.runner(), true),
             _ => return Ok(rejected(RunnerRecoveryRejection::PlacementNotLost)),
         };
-        if has_runner_recovery_wait(transaction, session).await? {
-            return Ok(rejected(RunnerRecoveryRejection::ExistingControlRequired));
-        }
+        let takeover = match self.recovery_takeover_in(transaction, session).await {
+            Ok(takeover) => takeover,
+            Err(RunnerProtocolStoreError::Domain(_)) => {
+                return Ok(rejected(RunnerRecoveryRejection::ExistingControlRequired));
+            }
+            Err(error) => return Err(error),
+        };
         let predecessor: Uuid =
             sqlx::query_scalar("SELECT enrollment_id FROM runner_enrollment WHERE runner_id = $1")
                 .bind(lost_runner.into_uuid())
@@ -335,7 +350,7 @@ impl RunnerProtocolStore {
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
         let observing: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_call WHERE session_id = $1 AND state_kind IN ('in_flight', 'cancellation_requested'))")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
-        if observing || compacting || (active && boundary.is_none()) {
+        if observing || compacting || (active && boundary.is_none() && takeover.is_none()) {
             return Ok(None);
         }
         let mut request = stored.placement().request().clone();
@@ -385,6 +400,17 @@ impl RunnerProtocolStore {
                 DispatchedRunnerState::Replaced,
             )
             .await?;
+            if let Some(takeover) = takeover {
+                super::takeover::retain_takeover(
+                    transaction,
+                    command,
+                    session,
+                    decode_u64(row.decode_column("event_ordinal")?)?,
+                    ordinal,
+                    takeover,
+                )
+                .await?;
+            }
             return Ok(Some((
                 ReplaceLostRunnerResult::Replaced {
                     runner: enrollment.runner(),
@@ -494,9 +520,23 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(ordinal))
         .execute(&mut **transaction)
         .await?;
-        let boundary =
-            append_placement_boundary(transaction, command, ordinal, &replacement, boundary)
-                .await?;
+        let boundary = if let Some(takeover) = takeover {
+            super::takeover::retain_takeover(
+                transaction,
+                command,
+                session,
+                decode_u64(row.decode_column("event_ordinal")?)?,
+                ordinal,
+                takeover,
+            )
+            .await?;
+            None
+        } else {
+            Some(
+                append_placement_boundary(transaction, command, ordinal, &replacement, boundary)
+                    .await?,
+            )
+        };
         let directory = match replacement.placement.state() {
             SessionRunnerPlacementState::Pinned(pinned) => &pinned.working_directory,
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
@@ -529,7 +569,7 @@ impl RunnerProtocolStore {
                 runner: enrollment.runner(),
                 placement_revision: replacement.placement.revision(),
             },
-            Some(boundary),
+            boundary,
         )))
     }
 
@@ -647,8 +687,15 @@ impl RunnerProtocolStore {
             ),
             _ => return Ok(rejected(Rejection::PlacementNotLost)),
         };
-        if has_runner_recovery_wait(transaction, command.session).await? {
-            return Ok(rejected(Rejection::ExistingControlRequired));
+        match self
+            .recovery_takeover_in(transaction, command.session)
+            .await
+        {
+            Ok(_) => {}
+            Err(RunnerProtocolStoreError::Domain(_)) => {
+                return Ok(rejected(Rejection::ExistingControlRequired));
+            }
+            Err(error) => return Err(error),
         }
         let staging: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
@@ -1156,21 +1203,6 @@ async fn lock_recovery_identities(
     Ok(())
 }
 
-async fn has_runner_recovery_wait(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<bool, RunnerProtocolStoreError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM turn_lifecycle
-            WHERE session_id = $1 AND state_kind = 'active'
-                AND NOT delegation_runtime_terminal
-                AND active_phase_kind = 'awaiting_runner_recovery')",
-    )
-    .bind(session.into_uuid())
-    .fetch_one(connection)
-    .await?)
-}
-
 async fn append_placement_boundary(
     transaction: &mut Transaction<'_, Postgres>,
     command: DurableCommandId,
@@ -1237,7 +1269,7 @@ async fn append_placement_boundary(
     Ok(boundary)
 }
 
-fn map_frontier_error(
+pub(super) fn map_frontier_error(
     error: crate::model_execution::ModelCallRepositoryError,
 ) -> RunnerProtocolStoreError {
     use crate::model_execution::ModelCallRepositoryError;

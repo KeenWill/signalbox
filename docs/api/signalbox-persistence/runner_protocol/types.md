@@ -709,6 +709,24 @@ impl runner_protocol::RunnerProtocolStore {
     >;
 }
 impl runner_protocol::RunnerProtocolStore {
+    pub async fn pending_runner_recovery_source(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::RunnerLease>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn offer_runner_recovery_retry(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        turn: signalbox_domain::TurnId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::RunnerLease>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+}
+impl runner_protocol::RunnerProtocolStore {
     pub async fn workspace_releases(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,

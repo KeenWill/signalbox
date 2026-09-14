@@ -5,10 +5,9 @@ This design is not built; it extends
 
 ## Goal
 
-This design adds three capabilities. A turn parks durably while no credential in
-its pool is available and resumes when one is. A runner retry takes over the
-successor placement before continuation. Activation freezes the session's
-instruction eligibility for the turn.
+A turn parks durably while no credential in its pool is available and resumes
+when one is. Activation freezes the session's instruction eligibility for the
+turn.
 
 ## Design
 
@@ -46,23 +45,6 @@ stop-turn request against a parked wait consumes the wait, creates a fresh
 immediate-successor attempt carrying the applied-interrupt proof, ends that
 attempt cancelled, appends the cancellation entry after the wait's latest
 frontier, and terminalizes the turn cancelled.
-
-For an offered runner attempt, either pure or idempotent or backed by durable
-no-execution proof, that must be retried on the successor, every preceding
-request resolves before the tool-loop design's distinct pre-continuation
-takeover transaction installs the successor and consumes the staged replacement
-while that request remains recovery-pending. That transaction fences successor
-execution but defers the relocation entry until after all batch results, as the
-runner design requires. It projects no result and prepares no call; result
-projection and continuation remain deferred until the retry and later requests
-resolve and the whole batch is complete. If terminalization wins before retry
-dispatch, its transaction resolves the retained attempt and request with the
-terminal-turn outcome, projects `ToolClosed`, and suppresses the retry. If
-dispatch wins, terminalization waits for the retry attempt's completion or crash
-classification and closes the retained dependency before ending the turn. The
-terminal transaction also moves the turn out of the runner-recovery wait when it
-is still parked there: to running with a fresh attempt when the loss interrupted
-no tool attempt, and otherwise to the phase the retained tool attempt justifies.
 
 [Configuration and credentials](../spec/configuration-and-credentials.md)
 commits retained OAuth-marker resolution, scratch-home scavenging, prior-process

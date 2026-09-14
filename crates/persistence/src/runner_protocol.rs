@@ -48,6 +48,8 @@ mod resume;
 pub use resume::{RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome};
 mod provisioning;
 mod recovery;
+mod takeover;
+pub(crate) use takeover::append_takeover_boundaries;
 pub mod status;
 pub mod workspaces;
 pub(crate) use recovery::retire_replacement_for_terminal_batch;
@@ -2277,7 +2279,7 @@ impl RunnerProtocolStore {
                  ON current_placement.session_id = turn.session_id
                JOIN runner_session_placement_record AS placement
                  ON placement.session_id = current_placement.session_id
-                AND placement.event_ordinal = current_placement.event_ordinal
+                AND placement.event_ordinal = runner_recovery_loss_ordinal(turn.session_id, turn.turn_id, current_placement.event_ordinal)
                LEFT JOIN tool_attempt AS attempt
                  ON attempt.attempt_id = turn.runner_recovery_tool_attempt_id
               WHERE turn.session_id = $1
@@ -2544,6 +2546,18 @@ impl RunnerProtocolStore {
         loss: &RunnerLeaseLoss,
         replacement: &RunnerClaimedAttemptReplacement,
     ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.store_claimed_retry_attempt_authority_in(&mut transaction, loss, replacement)
+            .await?;
+        commit_mutation(transaction).await
+    }
+
+    async fn store_claimed_retry_attempt_authority_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        loss: &RunnerLeaseLoss,
+        replacement: &RunnerClaimedAttemptReplacement,
+    ) -> Result<(), RunnerProtocolStoreError> {
         let source = loss.lost().correlation();
         if loss.retry().is_none()
             || !matches!(
@@ -2557,14 +2571,12 @@ impl RunnerProtocolStore {
             ));
         }
         let replacement = replacement.replacement();
-        let mut transaction = self.pool.begin().await?;
         let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
             .bind(source.dispatch.session().into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?
             .is_some();
         if !scheduler_exists {
-            transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Corruption(
                 RunnerProtocolCorruption::CrossWiredReference,
             ));
@@ -2609,10 +2621,9 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(source.generation.get()))
         .bind(source.runner.into_uuid())
         .bind(source.tool.as_str())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         if !source_is_live {
-            transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
@@ -2634,7 +2645,7 @@ impl RunnerProtocolStore {
         .bind(replacement.issuing_attempt().into_uuid())
         .bind(replacement.request().into_uuid())
         .bind(Decimal::from(replacement.generation().as_u64()))
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if inserted.rows_affected() == 0 {
             let reserved = sqlx::query(
@@ -2646,7 +2657,7 @@ impl RunnerProtocolStore {
             )
             .bind(source.lease.into_uuid())
             .bind(Decimal::from(source.generation.get()))
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
             let exact = if let Some(row) = reserved {
                 row.decode_column::<Uuid>("replacement_attempt_id")?
@@ -2665,13 +2676,12 @@ impl RunnerProtocolStore {
                 false
             };
             if !exact {
-                transaction.rollback().await?;
                 return Err(RunnerProtocolStoreError::Domain(
                     RunnerDomainError::CorrelationMismatch,
                 ));
             }
         }
-        commit_mutation(transaction).await
+        Ok(())
     }
 
     /// Loads an exact claimed-retry reservation for crash-resumable replay.
@@ -2737,6 +2747,18 @@ impl RunnerProtocolStore {
         retired: &EndedToolAttempt,
         retry: &RunnerLease,
     ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.store_claimed_retry_replacement_in(&mut transaction, retired, retry)
+            .await?;
+        commit_mutation(transaction).await
+    }
+
+    async fn store_claimed_retry_replacement_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        retired: &EndedToolAttempt,
+        retry: &RunnerLease,
+    ) -> Result<(), RunnerProtocolStoreError> {
         if retry.state() != RunnerLeaseState::Offered
             || retry.generation() == RunnerGeneration::one()
         {
@@ -2784,14 +2806,12 @@ impl RunnerProtocolStore {
                 ));
             }
         };
-        let mut transaction = self.pool.begin().await?;
         let scheduler_exists = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
             .bind(retired.session().into_uuid())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?
             .is_some();
         if !scheduler_exists {
-            transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Corruption(
                 RunnerProtocolCorruption::CrossWiredReference,
             ));
@@ -2816,11 +2836,10 @@ impl RunnerProtocolStore {
         .bind(retired.session().into_uuid())
         .bind(retired.turn().into_uuid())
         .bind(retired.issuing_attempt().into_uuid())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if retired_rows != 1 {
-            transaction.rollback().await?;
             return Err(RunnerProtocolStoreError::Corruption(
                 RunnerProtocolCorruption::CrossWiredReference,
             ));
@@ -2830,7 +2849,7 @@ impl RunnerProtocolStore {
                 (attempt_id, request_id, session_id, turn_id,
                  issuing_turn_attempt_id, effect_class, dispatch_generation,
                  state_kind, context_result_byte_limit)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_flight',
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared',
                      (SELECT context_result_byte_limit FROM tool_attempt WHERE attempt_id = $8))",
         )
         .bind(dispatch.attempt().into_uuid())
@@ -2844,10 +2863,12 @@ impl RunnerProtocolStore {
         })
         .bind(Decimal::from(dispatch.generation().as_u64()))
         .bind(retired.attempt().into_uuid())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        append_lease_event_in(&mut transaction, retry).await?;
-        commit_mutation(transaction).await
+        sqlx::query("UPDATE tool_attempt SET state_kind = 'in_flight' WHERE attempt_id = $1 AND state_kind = 'prepared'")
+            .bind(dispatch.attempt().into_uuid()).execute(&mut **transaction).await?;
+        append_lease_event_in(transaction, retry).await?;
+        Ok(())
     }
 
     async fn store_lease_without_proof(
@@ -2963,11 +2984,20 @@ impl RunnerProtocolStore {
         generation: RunnerGeneration,
     ) -> Result<Option<RunnerLeaseLoss>, RunnerProtocolStoreError> {
         let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let Some(loaded) = self
-            .load_lease_in(&mut transaction, lease, generation)
-            .await?
-        else {
-            transaction.commit().await?;
+        let loss = self
+            .load_lease_loss_in(&mut transaction, lease, generation)
+            .await?;
+        transaction.commit().await?;
+        Ok(loss)
+    }
+
+    async fn load_lease_loss_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        lease: RunnerLeaseId,
+        generation: RunnerGeneration,
+    ) -> Result<Option<RunnerLeaseLoss>, RunnerProtocolStoreError> {
+        let Some(loaded) = self.load_lease_in(transaction, lease, generation).await? else {
             return Ok(None);
         };
         let row = sqlx::query(
@@ -3047,7 +3077,6 @@ impl RunnerProtocolStore {
         .bind(Decimal::from(generation.get()))
         .fetch_one(transaction.as_mut())
         .await?;
-        transaction.commit().await?;
         let retry_preparation = match retry_prepared {
             true => RunnerLeaseRetryPreparation::Prepared,
             false => RunnerLeaseRetryPreparation::Available,
@@ -3364,7 +3393,25 @@ async fn yield_turn_to_runner_recovery(
     .await?
     .rows_affected();
     if yielded != 1 {
-        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        let retained: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM runner_recovery_takeover AS takeover
+             JOIN runner_lease_generation AS retry ON retry.lease_id = takeover.source_lease_id
+               AND retry.predecessor_generation = takeover.source_generation
+               AND retry.placement_event_ordinal = takeover.successor_event_ordinal
+             JOIN turn_attempt AS yielded ON yielded.turn_attempt_id = takeover.yielded_turn_attempt_id
+             JOIN turn_lifecycle AS turn ON turn.session_id = takeover.session_id AND turn.turn_id = takeover.turn_id
+             WHERE retry.lease_id = $1 AND retry.generation = $2
+               AND yielded.turn_attempt_id = $3 AND yielded.state_kind = 'ended'
+               AND yielded.end_disposition = 'yielded_to_durable_wait'
+               AND turn.active_phase_kind = 'awaiting_runner_recovery'
+               AND turn.runner_recovery_tool_attempt_id = takeover.interrupted_tool_attempt_id
+               AND NOT EXISTS (SELECT 1 FROM turn_attempt WHERE continued_from_attempt_id = yielded.turn_attempt_id))",
+        ).bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get()))
+            .bind(correlation.dispatch.issuing_attempt().into_uuid())
+            .fetch_one(&mut **transaction).await?;
+        if !retained {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
     }
     let changed = sqlx::query(
         "UPDATE turn_lifecycle AS lifecycle
@@ -3376,8 +3423,8 @@ async fn yield_turn_to_runner_recovery(
            FROM tool_request AS request
           WHERE lifecycle.turn_id = $1 AND lifecycle.session_id = $2
             AND lifecycle.state_kind = 'active'
-            AND lifecycle.active_phase_kind = 'running'
-            AND lifecycle.current_attempt_id = $3
+            AND ((lifecycle.active_phase_kind = 'running' AND lifecycle.current_attempt_id = $3)
+                 OR (lifecycle.active_phase_kind = 'awaiting_runner_recovery' AND lifecycle.current_attempt_id IS NULL))
             AND lifecycle.active_tool_round_call_id =
                 request.producing_model_call_id
             AND request.request_id = $7 AND request.turn_id = $1

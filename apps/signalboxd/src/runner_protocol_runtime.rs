@@ -486,6 +486,16 @@ impl PostgresRunnerRegistrationService {
         )
     }
 
+    async fn nudge_runner_session(&self, session: signalbox_domain::SessionId) {
+        if self.ordinary_enrollment.load(Ordering::Acquire)
+            && let Some(nudge) = &self.eligibility_nudge
+            && nudge.nudge(session)
+                == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
+        {
+            nudge.nudge_waiting_for_capacity(session).await;
+        }
+    }
+
     async fn resume_durably(&self, request: Resume) -> Result<Resumed, RunnerRegistrationFailure> {
         let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
@@ -753,6 +763,31 @@ impl PostgresRunnerRegistrationService {
             }
         };
         self.dispatch.changed();
+        if matches!(resolution, RunnerLeaseResumeOutcome::Recorded) {
+            let lease = request
+                .inventory
+                .result
+                .as_ref()
+                .map(|result| &result.correlation)
+                .or_else(|| {
+                    request
+                        .inventory
+                        .operation_failure
+                        .as_ref()
+                        .and_then(|failure| match &failure.correlation {
+                            signalbox_runner_wire::OperationCorrelation::LeaseOffer(lease) => {
+                                Some(lease)
+                            }
+                            _ => None,
+                        })
+                });
+            if let Some(lease) = lease {
+                self.nudge_runner_session(signalbox_domain::SessionId::from_uuid(
+                    lease.session_id.into_uuid(),
+                ))
+                .await;
+            }
+        }
         let directive = |correlation| {
             action
                 .ok_or_else(invalid_inventory)
@@ -1211,6 +1246,12 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
                     RejectionCode::CorrelationMismatch,
                 )
             })?;
+            if self.ordinary_enrollment.load(Ordering::Acquire) {
+                self.dispatch.start_recovery_retry(
+                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                    epoch,
+                );
+            }
             let lease = self
                 .store
                 .pending_tool_lease(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()), epoch)
@@ -1307,6 +1348,8 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
                 .await
                 .map_err(|error| store_failure(kind, available.clone(), error))?;
             self.dispatch.changed();
+            self.nudge_runner_session(lease.correlation().dispatch.session())
+                .await;
             Ok(signalbox_runner_wire::ResultRecorded {
                 correlation: crate::runner_dispatch_wire::wire_correlation(&lease.correlation())
                     .map_err(|_| invalid())?,

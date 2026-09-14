@@ -185,8 +185,8 @@ impl ModelCallExecutionReconstitutionInput {
         self
     }
 
-    /// Supplies the all-resolved tool-result frontier that precedes a fresh
-    /// continuation call.
+    /// Supplies the resolved tool-result frontier or pre-call runner relocation
+    /// frontier that precedes a fresh call.
     ///
     /// The owning persistence aggregate remains responsible for proving the
     /// tool-batch/result correlation. This seam validates complete snapshot
@@ -1692,6 +1692,20 @@ fn reconstitute(
         input.availability_successor,
     ) {
         (None, None, None, false) => None,
+        (None, None, Some(_), false)
+            if input
+                .frontier_entries
+                .iter()
+                .skip(input.starting_snapshot.entry_count())
+                .all(|entry| {
+                    matches!(
+                        entry.payload(),
+                        SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                    )
+                }) =>
+        {
+            None
+        }
         (None, None, Some(_), _) | (None, Some(_), _, _) => {
             return Err(fail(
                 input,

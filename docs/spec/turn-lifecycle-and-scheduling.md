@@ -502,24 +502,30 @@ and drains under that window: after its in-flight operation reaches a durable
 boundary, it checkpoints the active turn and returns without issuing another,
 and a successor resumes from that boundary.
 
-A runner replacement issued during a model call or tool batch remains staged.
-Replacement admission or installation for a turn parked in
-`awaiting_runner_recovery` rejects with `ExistingControlRequired`. After every
-request resolves, continuation appends all results, installs the replacement and
-appends one relocation boundary, then prepares the next call. An earlier
-boundary commit is rejected. Candidate recovery waits retain no transaction or
-pooled connection. Interrupt or crash-loss batch terminalization retires the
-staged command before ending the turn. A model observation, including failure,
-refusal, cancellation or ambiguity, permits installation and retains the turn
-state that observation produced. A retry or credential-rotation successor waits
-for the staged replacement to settle and retains its relocation at the
-predecessor's observation frontier before preparing its next call. A tool-round
-observation installs a ready staged replacement at its yielded frontier before
-classifying the new requests for placement loss; that round retains the
-relocation in its boundary. A delegated logical terminal retains any issued
-provider call as an observation barrier; its late correlated observation retires
-the physical call without changing the logical terminal. Pre-pin installation
-appends no boundary.
+A runner replacement issued during a model call or tool batch remains staged. A
+turn parked in `awaiting_runner_recovery` admits the
+[checked retry takeover](tool-loop.md) for an unclaimed lease with durable
+no-execution proof or for lost pure or idempotent execution. Takeover installs
+the replacement and consumes its stage without projecting results or preparing a
+call. Other interrupted attempts still require the existing control flow. A
+replacement with no interrupted tool resumes the turn with a fresh prepared
+attempt. A retry stays parked until its terminal receipt; completion or refusal
+creates the fresh attempt, while ambiguity retains its yielded issuing attempt
+in tool recovery. A repeated retry loss retains the same yield and waits for
+another explicit replacement. After every request resolves, continuation appends
+all results and pending relocation boundaries, then prepares the next call.
+Candidate recovery waits retain no transaction or pooled connection. Interrupt
+or crash-loss batch terminalization retires the staged command before ending the
+turn. A model observation, including failure, refusal, cancellation or
+ambiguity, permits installation and retains the turn state that observation
+produced. A retry or credential-rotation successor waits for the staged
+replacement to settle and retains its relocation at the predecessor's
+observation frontier before preparing its next call. A tool-round observation
+installs a ready staged replacement at its yielded frontier before classifying
+the new requests for placement loss; that round retains the relocation in its
+boundary. A delegated logical terminal retains any issued provider call as an
+observation barrier; its late correlated observation retires the physical call
+without changing the logical terminal. Pre-pin installation appends no boundary.
 
 A queued turn cannot activate while its placement is lost. Replacement and
 abandonment outbox events wake queued work, retaining hints when the eligibility
@@ -531,8 +537,6 @@ no cancellation.
 
 ## Planned
 
-- Pre-continuation runner takeover and retry supersession; design in
-  [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).

@@ -4,7 +4,7 @@ use super::*;
 use signalbox_domain::{FailedModelCallTurnIdentities, ReplaceLostRunner, ReplaceLostRunnerResult};
 use signalbox_persistence::runner_protocol::RunnerRecoveryOutcome;
 
-async fn completed_pinned_batch(
+pub(super) async fn completed_pinned_batch(
     pool: &PgPool,
 ) -> Result<(UndispatchedBatch, RunnerGeneration), Box<dyn Error>> {
     let (store, predecessor, registration, pin, epoch) =

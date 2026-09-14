@@ -41,11 +41,35 @@ impl RunnerPlacementBoundary {
         {
             return Err(crate::RunnerDomainError::CorrelationMismatch);
         }
+        Self::prepare_revision(
+            session,
+            replacement.change.prior_revision,
+            replacement.placement.revision(),
+            entry,
+            frontier,
+            prior,
+        )
+    }
+
+    /// Appends the reference for an authenticated stored replacement revision.
+    pub fn prepare_revision(
+        session: SessionId,
+        prior_revision: RunnerGeneration,
+        replacement_revision: RunnerGeneration,
+        entry: crate::SemanticTranscriptEntryId,
+        frontier: crate::ContextFrontierId,
+        prior: Option<&crate::ResolvedContextFrontierSnapshot>,
+    ) -> Result<Self, crate::RunnerDomainError> {
+        if prior_revision.checked_next() != Some(replacement_revision)
+            || prior.is_some_and(|prior| prior.frontier().owning_session() != session)
+        {
+            return Err(crate::RunnerDomainError::CorrelationMismatch);
+        }
         let entry = crate::SemanticTranscriptEntry::from_validated_parts(
             entry,
             session,
             crate::SemanticTranscriptEntryPayload::RunnerPlacementChanged {
-                placement_revision: replacement.placement.revision(),
+                placement_revision: replacement_revision,
             },
         );
         let reference = entry.reference();

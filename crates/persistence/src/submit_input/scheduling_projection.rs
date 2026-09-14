@@ -903,6 +903,11 @@ async fn load_scheduling_projection_inner(
                         required_model_calls.insert(round_call);
                         required_frontiers.insert(wait.yielded_frontier().into_uuid());
                         match (end_variant.as_deref(), end_disposition.as_deref()) {
+                            (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_runner_yield(
+                                    lifecycle_turn, attempt_id, wait,
+                                )
+                            }
                             (Some("without_stop"), Some("ambiguous")) => {
                                 ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
                                     lifecycle_turn,

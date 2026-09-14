@@ -860,7 +860,7 @@ pub(super) async fn persist_runner_recovery_interrupt_effect(
              runner_id, placement_revision, yielded_turn_attempt_id,
              interrupted_tool_attempt_id, source_frontier_id)
          SELECT $1, lifecycle.session_id, lifecycle.turn_id,
-                head.event_ordinal, lifecycle.runner_recovery_runner_id,
+                placement.event_ordinal, lifecycle.runner_recovery_runner_id,
                 lifecycle.runner_recovery_placement_revision,
                 yielded_attempt.turn_attempt_id,
                 lifecycle.runner_recovery_tool_attempt_id, $4
@@ -869,7 +869,7 @@ pub(super) async fn persist_runner_recovery_interrupt_effect(
              ON head.session_id = lifecycle.session_id
            JOIN runner_session_placement_record AS placement
              ON placement.session_id = head.session_id
-            AND placement.event_ordinal = head.event_ordinal
+            AND placement.event_ordinal = runner_recovery_loss_ordinal(lifecycle.session_id, lifecycle.turn_id, head.event_ordinal)
            JOIN turn_attempt AS yielded_attempt
              ON yielded_attempt.turn_id = lifecycle.turn_id
             AND yielded_attempt.session_id = lifecycle.session_id
@@ -959,4 +959,29 @@ pub(super) async fn load_runner_recovery_yielded_attempt(
         "runner recovery yielded attempt",
     ))?;
     Ok(TurnAttemptId::from_uuid(attempt))
+}
+
+pub(super) async fn load_runner_takeover_effect(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+) -> Result<Option<signalbox_domain::RunnerToolEffectClass>, SubmitInputRepositoryError> {
+    let effect = sqlx::query_scalar::<_, String>(
+        "SELECT lease.effect_class FROM runner_recovery_takeover AS takeover
+         JOIN runner_lease_generation AS lease ON lease.lease_id = takeover.source_lease_id
+           AND lease.generation = takeover.source_generation
+         WHERE takeover.session_id = $1 AND takeover.turn_id = $2 AND takeover.interrupted_tool_attempt_id = $3
+           AND NOT EXISTS (SELECT 1 FROM runner_lease_generation AS retry
+               WHERE retry.lease_id = takeover.source_lease_id AND retry.generation > takeover.source_generation)",
+    ).bind(session.into_uuid()).bind(turn.into_uuid()).bind(attempt.into_uuid())
+        .fetch_optional(connection).await?;
+    effect
+        .map(|effect| match effect.as_str() {
+            "pure" => Ok(signalbox_domain::RunnerToolEffectClass::Pure),
+            "idempotent" => Ok(signalbox_domain::RunnerToolEffectClass::Idempotent),
+            "side_effecting" => Ok(signalbox_domain::RunnerToolEffectClass::SideEffecting),
+            _ => Err(SubmitInputCorruption::Inconsistent("runner takeover effect").into()),
+        })
+        .transpose()
 }

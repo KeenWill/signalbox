@@ -17,6 +17,25 @@ async fn close_lost_runner_requests_after_observation(
     producing_call: signalbox_domain::ModelCallId,
     observed_judge_request: Option<ToolRequestId>,
 ) -> Result<(), ToolLoopRepositoryError> {
+    let retry_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_lease_generation AS lease
+         JOIN runner_current_lease_event AS head USING (lease_id, generation)
+         JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+         JOIN runner_current_tool_attempt AS attempt ON attempt.attempt_id = lease.attempt_id
+         JOIN tool_request AS request ON request.request_id = attempt.request_id
+         WHERE request.producing_model_call_id = $1 AND attempt.session_id = $2
+           AND attempt.state_kind = 'in_flight'
+           AND (event.state_kind IN ('offered', 'lost_unclaimed')
+             OR (event.state_kind IN ('claimed', 'lost_claimed', 'lost_execution_possible')
+                 AND lease.effect_class IN ('pure', 'idempotent'))))",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session.into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    if retry_pending {
+        return Ok(());
+    }
     let requests: Vec<Uuid> = sqlx::query_scalar(crate::lock_inventory::LOST_RUNNER_TOOL_REQUESTS)
         .bind(session.into_uuid())
         .bind(producing_call.into_uuid())

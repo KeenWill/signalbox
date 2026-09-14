@@ -1177,6 +1177,14 @@ impl RunnerPlacementBoundary {
         frontier: ContextFrontierId,
         prior: option::Option<&ResolvedContextFrontierSnapshot>,
     ) -> result::Result<Self, RunnerDomainError>;
+    pub fn prepare_revision(
+        session: SessionId,
+        prior_revision: RunnerGeneration,
+        replacement_revision: RunnerGeneration,
+        entry: SemanticTranscriptEntryId,
+        frontier: ContextFrontierId,
+        prior: option::Option<&ResolvedContextFrontierSnapshot>,
+    ) -> result::Result<Self, RunnerDomainError>;
     pub fn entry(&self) -> &SemanticTranscriptEntry;
     pub fn frontier(&self) -> &ResolvedContextFrontierSnapshot;
 }

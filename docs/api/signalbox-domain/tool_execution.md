@@ -122,6 +122,13 @@ impl ToolBatch {
         entry_ids: vec::Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,
     ) -> result::Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_runner_retry_cancellation_projection(
+        &self,
+        attempt: ToolAttemptId,
+        effect: RunnerToolEffectClass,
+        entry_ids: vec::Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+    ) -> result::Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_delegation_cancellation_projection(
         &self,
         entry_ids: vec::Vec<SemanticTranscriptEntryId>,
@@ -367,6 +374,7 @@ impl ToolBatchReconstitutionInput {
         self,
         runner_authorized_attempts: vec::Vec<ToolAttemptId>,
     ) -> Self;
+    pub fn with_runner_recovery_predecessor(self, predecessor: TurnAttemptId) -> Self;
     pub fn reconstitute(self) -> result::Result<ToolBatch, ToolBatchReconstitutionError>;
 }
 ```

@@ -221,6 +221,10 @@ impl PostgresRunnerRegistrationService {
                 .await
                 .map_err(stored_error)?;
             self.dispatch.changed();
+            self.nudge_runner_session(signalbox_domain::SessionId::from_uuid(
+                correlation.session_id.into_uuid(),
+            ))
+            .await;
             return Ok(signalbox_runner_wire::OperationFailureRecorded {
                 correlation: failure.correlation,
             });

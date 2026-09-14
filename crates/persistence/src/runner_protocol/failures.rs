@@ -112,6 +112,7 @@ impl RunnerProtocolStore {
             .bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get()))
             .bind(category.as_str()).bind(detail).execute(&mut **transaction).await?;
         append_lease_event_in(transaction, &refused).await?;
+        takeover::finish_recovery_retry_in(transaction, &refused).await?;
         Ok(refused)
     }
 }

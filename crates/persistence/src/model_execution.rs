@@ -764,6 +764,19 @@ pub(crate) async fn retire_terminal_batch_replacement(
             }
             _ => ModelCallCorruption::Inconsistent("terminal batch runner replacement").into(),
         })?;
+    let pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_recovery_takeover AS takeover
+         JOIN runner_session_placement_record AS successor ON successor.session_id = takeover.session_id
+           AND successor.event_ordinal = takeover.successor_event_ordinal
+         WHERE takeover.session_id = $1 AND successor.event_kind = 'runner_replaced' AND NOT EXISTS (
+            SELECT 1 FROM runner_placement_boundary AS boundary WHERE boundary.command_id = takeover.command_id))",
+    ).bind(session.into_uuid()).fetch_one(&mut *connection).await?;
+    if pending {
+        return Err(ModelCallCorruption::Inconsistent(
+            "terminal takeover lacks its projected relocation",
+        )
+        .into());
+    }
     Ok(())
 }
 

@@ -1615,7 +1615,7 @@ impl PostgresToolLoopRepository {
                         waiting_for_replacement = true;
                         return Ok(PrepareToolContinuationOutcome::NoWork);
                     }
-                    if let Some(boundary) = boundary {
+                    for boundary in boundary {
                         projection = projection
                             .with_runner_placement_boundary(&boundary)
                             .map_err(|_| {
@@ -2023,6 +2023,25 @@ pub(crate) async fn load_active_batch_from_connection(
                 "current_attempt_id",
             )?),
         },
+        "awaiting_runner_recovery" => {
+            let issuing: Option<Uuid> = sqlx::query_scalar(
+                "SELECT source.issuing_turn_attempt_id FROM runner_recovery_takeover AS takeover
+                 JOIN tool_attempt AS source ON source.attempt_id = takeover.interrupted_tool_attempt_id
+                 JOIN runner_lease_generation AS retry ON retry.lease_id = takeover.source_lease_id
+                   AND retry.predecessor_generation = takeover.source_generation
+                   AND retry.placement_event_ordinal = takeover.successor_event_ordinal
+                 JOIN runner_current_lease_event AS head USING (lease_id, generation)
+                 JOIN runner_lease_event AS event USING (lease_id, generation, event_ordinal)
+                 WHERE takeover.session_id = $1 AND takeover.turn_id = $2
+                   AND event.state_kind IN ('offered', 'claimed')",
+            ).bind(session.into_uuid()).bind(turn.into_uuid()).fetch_optional(&mut *connection).await?;
+            let Some(issuing) = issuing else {
+                return Ok(None);
+            };
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: signalbox_domain::TurnAttemptId::from_uuid(issuing),
+            }
+        }
         "awaiting_tool_recovery" => ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
             attempt: tool_attempt_id_from_uuid(required(&lifecycle, "recovery_tool_attempt_id")?),
         },
@@ -2059,7 +2078,7 @@ pub(crate) async fn load_active_batch_from_connection(
             .into());
         }
     };
-    ToolBatchReconstitutionInput::new(
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
@@ -2070,10 +2089,49 @@ pub(crate) async fn load_active_batch_from_connection(
         phase,
     )
     .with_retired_attempts(retired_attempts)
-    .with_runner_authorized_attempts(runner_authorized_attempts)
-    .reconstitute()
-    .map(Some)
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    .with_runner_authorized_attempts(runner_authorized_attempts);
+    for predecessor in load_runner_recovery_predecessors(
+        connection,
+        session,
+        turn,
+        producing_call,
+        match phase {
+            ToolBatchPhaseReconstitutionInput::Executing { turn_attempt } => Some(turn_attempt),
+            _ => None,
+        },
+    )
+    .await?
+    {
+        input = input.with_runner_recovery_predecessor(predecessor);
+    }
+    input
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+}
+
+async fn load_runner_recovery_predecessors(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: signalbox_domain::ModelCallId,
+    current: Option<signalbox_domain::TurnAttemptId>,
+) -> Result<Vec<signalbox_domain::TurnAttemptId>, ToolLoopRepositoryError> {
+    let predecessors: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT takeover.yielded_turn_attempt_id FROM runner_recovery_takeover AS takeover
+         JOIN turn_attempt AS continuation ON continuation.continued_from_attempt_id = takeover.yielded_turn_attempt_id
+         WHERE takeover.session_id = $1 AND takeover.turn_id = $2
+           AND takeover.producing_model_call_id = $3
+           AND takeover.yielded_turn_attempt_id IS DISTINCT FROM $4
+           AND EXISTS (SELECT 1 FROM runner_current_tool_attempt AS attempt JOIN tool_request AS request USING (request_id)
+               WHERE request.producing_model_call_id = $3 AND attempt.issuing_turn_attempt_id = takeover.yielded_turn_attempt_id)",
+    ).bind(session.into_uuid()).bind(turn.into_uuid()).bind(producing_call.into_uuid())
+        .bind(current.map(signalbox_domain::TurnAttemptId::into_uuid))
+        .fetch_all(&mut *connection).await?;
+    Ok(predecessors
+        .into_iter()
+        .map(signalbox_domain::TurnAttemptId::from_uuid)
+        .collect())
 }
 
 pub(crate) async fn deny_awaiting_approvals_for_interrupt<NextDecision, NextContinuation>(
@@ -2149,7 +2207,7 @@ where
 
 /// Loads the exact frontier from which a runner-recovery interrupt must
 /// continue. A recovery wait retaining a tool round uses that round's yielded
-/// boundary; a wait without one uses the turn's starting frontier.
+/// boundary; a wait without one retains its latest pre-call relocation or starting frontier.
 pub(crate) async fn load_runner_recovery_source_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
@@ -2157,7 +2215,12 @@ pub(crate) async fn load_runner_recovery_source_snapshot(
 ) -> Result<Option<ResolvedContextFrontierSnapshot>, ToolLoopRepositoryError> {
     let row = sqlx::query(
         "SELECT lifecycle.active_tool_round_call_id,
-                lifecycle.starting_frontier_id,
+                COALESCE((SELECT boundary.context_frontier_id
+                    FROM runner_recovery_takeover AS takeover
+                    JOIN runner_placement_boundary AS boundary USING (command_id)
+                    WHERE takeover.session_id = lifecycle.session_id AND takeover.turn_id = lifecycle.turn_id
+                      AND takeover.producing_model_call_id IS NULL
+                    ORDER BY boundary.placement_revision DESC LIMIT 1), lifecycle.starting_frontier_id) AS starting_frontier_id,
                 round.boundary_kind,
                 round.boundary_frontier_id
            FROM turn_lifecycle AS lifecycle
@@ -2250,7 +2313,7 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
     retired_attempts.retain(|attempt| Some(*attempt) != interrupted_attempt);
-    ToolBatchReconstitutionInput::new(
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
@@ -2263,9 +2326,24 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
         },
     )
     .with_retired_attempts(retired_attempts)
-    .reconstitute()
-    .map(Some)
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    .with_runner_authorized_attempts(
+        load_runner_authorized_attempts(connection, producing_call).await?,
+    );
+    for predecessor in load_runner_recovery_predecessors(
+        connection,
+        session,
+        turn,
+        producing_call,
+        Some(yielded_attempt),
+    )
+    .await?
+    {
+        input = input.with_runner_recovery_predecessor(predecessor);
+    }
+    input
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
 pub(crate) async fn load_recovery_batch_by_attempt(
@@ -2310,7 +2388,7 @@ pub(crate) async fn load_recovery_batch_by_attempt(
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
     retired_attempts.retain(|attempt| *attempt != recovery_attempt);
-    ToolBatchReconstitutionInput::new(
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
@@ -2322,9 +2400,15 @@ pub(crate) async fn load_recovery_batch_by_attempt(
             attempt: recovery_attempt,
         },
     )
-    .with_retired_attempts(retired_attempts)
-    .reconstitute()
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    .with_retired_attempts(retired_attempts);
+    for predecessor in
+        load_runner_recovery_predecessors(connection, session, turn, producing_call, None).await?
+    {
+        input = input.with_runner_recovery_predecessor(predecessor);
+    }
+    input
+        .reconstitute()
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
 /// Identifies the single continuing tool round whose request suffix exactly
@@ -4536,6 +4620,58 @@ fn encode_approval(decision: &ToolApprovalDecision) -> (&'static str, Option<&st
     }
 }
 
+pub(crate) async fn terminal_result_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    ordinary: signalbox_domain::ContextFrontierId,
+) -> Result<signalbox_domain::ContextFrontierId, ToolLoopRepositoryError> {
+    let pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_recovery_takeover AS takeover
+         JOIN runner_session_placement_record AS successor ON successor.session_id = takeover.session_id
+           AND successor.event_ordinal = takeover.successor_event_ordinal
+         WHERE takeover.session_id = $1 AND successor.event_kind = 'runner_replaced'
+         AND NOT EXISTS (SELECT 1 FROM runner_placement_boundary AS boundary WHERE boundary.command_id = takeover.command_id))",
+    ).bind(session.into_uuid()).fetch_one(&mut *connection).await?;
+    Ok(if pending {
+        signalbox_domain::ContextFrontierId::from_uuid(Uuid::now_v7())
+    } else {
+        ordinary
+    })
+}
+
+pub(crate) async fn append_terminal_takeover_boundaries(
+    connection: &mut PgConnection,
+    mut projection: PreparedToolResultProjection,
+) -> Result<PreparedToolResultProjection, ToolLoopRepositoryError> {
+    let session = projection.snapshot().frontier().owning_session();
+    let pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_recovery_takeover AS takeover
+         JOIN runner_session_placement_record AS successor ON successor.session_id = takeover.session_id
+           AND successor.event_ordinal = takeover.successor_event_ordinal
+         WHERE takeover.session_id = $1 AND successor.event_kind = 'runner_replaced' AND NOT EXISTS (
+             SELECT 1 FROM runner_placement_boundary AS boundary WHERE boundary.command_id = takeover.command_id))",
+    ).bind(session.into_uuid()).fetch_one(&mut *connection).await?;
+    if pending {
+        persist_result_entries(connection, &projection).await?;
+        insert_snapshot(connection, projection.snapshot())
+            .await
+            .map_err(map_model_call_error)?;
+        let boundaries = crate::runner_protocol::append_takeover_boundaries(
+            connection,
+            session,
+            projection.snapshot(),
+        )
+        .await
+        .map_err(map_runner_replacement_error)?;
+        for boundary in boundaries {
+            projection = projection
+                .with_runner_placement_boundary(&boundary)
+                .map_err(|_| ToolLoopCorruption::Inconsistent("terminal takeover projection"))?;
+        }
+    }
+    Ok(projection)
+}
+
 pub(crate) async fn persist_result_entries(
     connection: &mut PgConnection,
     projection: &PreparedToolResultProjection,
@@ -4713,7 +4849,30 @@ pub(crate) async fn persist_result_entry_slice(
     connection: &mut PgConnection,
     entries: &[signalbox_domain::SemanticTranscriptEntry],
 ) -> Result<(), ToolLoopRepositoryError> {
+    let retained_projection = entries.iter().any(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        )
+    });
     for entry in entries {
+        if let SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } =
+            entry.payload()
+        {
+            let retained: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM runner_placement_boundary
+                 WHERE session_id = $1 AND semantic_entry_id = $2 AND placement_revision = $3)",
+            )
+            .bind(entry.source_session().into_uuid())
+            .bind(entry.identity().into_uuid())
+            .bind(Decimal::from(placement_revision.get()))
+            .fetch_one(&mut *connection)
+            .await?;
+            if !retained {
+                return Err(ToolLoopCorruption::Inconsistent("terminal placement boundary").into());
+            }
+            continue;
+        }
         let (kind, request, attempt, delegation_awaiting, delegation_spawning) =
             match entry.payload() {
                 SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => (
@@ -4761,6 +4920,24 @@ pub(crate) async fn persist_result_entry_slice(
                     return Err(ToolLoopCorruption::Inconsistent("tool result payload").into());
                 }
             };
+        if retained_projection {
+            let retained: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM semantic_transcript_entry
+                 WHERE source_session_id = $1 AND semantic_entry_id = $2 AND payload_kind = $3
+                   AND tool_result_request_id IS NOT DISTINCT FROM $4 AND tool_result_attempt_id IS NOT DISTINCT FROM $5
+                   AND delegation_result_awaiting_tool_request_id IS NOT DISTINCT FROM $6
+                   AND delegation_result_spawning_tool_request_id IS NOT DISTINCT FROM $7)",
+            ).bind(entry.source_session().into_uuid()).bind(entry.identity().into_uuid()).bind(kind)
+                .bind(request).bind(attempt).bind(delegation_awaiting).bind(delegation_spawning)
+                .fetch_one(&mut *connection).await?;
+            if !retained {
+                return Err(ToolLoopCorruption::Inconsistent(
+                    "retained terminal result projection",
+                )
+                .into());
+            }
+            continue;
+        }
         sqlx::query(
             "INSERT INTO semantic_transcript_entry
                 (source_session_id, semantic_entry_id, payload_kind,
