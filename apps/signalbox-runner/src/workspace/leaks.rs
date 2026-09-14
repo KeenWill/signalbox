@@ -115,14 +115,60 @@ impl RunnerWorkspaceStore {
         )? {
             for name in entry_names(&trash)? {
                 let locator = format!("{}/{}", release::TRASH_DIRECTORY, locator_component(&name));
-                let mut fact = entry_fact(&trash, &name, locator)?;
-                fact.kind = LeakFactKind::RetiredPresent;
-                facts.push(fact);
+                if let Some(fact) = trash_manifest_fact(&trash, &name, runner)? {
+                    facts.push(fact);
+                } else {
+                    let mut fact = entry_fact(&trash, &name, locator)?;
+                    fact.kind = LeakFactKind::RetiredPresent;
+                    facts.push(fact);
+                }
             }
         }
         facts.sort();
         Ok(facts)
     }
+}
+
+fn trash_manifest_fact(
+    trash: &File,
+    name: &OsStr,
+    runner: CanonicalUuid,
+) -> Result<Option<LeakFact>, RunnerWorkspaceError> {
+    let Some(name_text) = name.to_str() else {
+        return Ok(None);
+    };
+    let Ok(placement) = open_directory(trash, name_text) else {
+        return Ok(None);
+    };
+    let Ok(mut manifest) = read_manifest(&placement) else {
+        return Ok(None);
+    };
+    let leaf = if manifest.repository.is_some() {
+        REPOSITORY_WORKSPACE_DIRECTORY
+    } else {
+        PRIVATE_WORKSPACE_DIRECTORY
+    };
+    let expected_path = format!(
+        "{SESSIONS_DIRECTORY}/{}/{}/{leaf}",
+        manifest.session,
+        manifest.placement_revision.get()
+    );
+    if manifest.manifest_id.to_string() != name_text
+        || manifest.runner != runner
+        || manifest.relative_path != expected_path
+        || manifest.lifecycle != ManifestLifecycle::Releasing
+    {
+        return Ok(None);
+    }
+    manifest.lifecycle = ManifestLifecycle::Ready;
+    Ok(Some(LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: expected_path,
+        entry_digest: workspace_manifest_digest(&manifest)
+            .map_err(|_| RunnerWorkspaceError::CorruptManifest)?,
+        session: Some(manifest.session),
+        placement_revision: Some(manifest.placement_revision),
+    }))
 }
 
 fn entry_names(directory: &File) -> Result<Vec<OsString>, RunnerWorkspaceError> {

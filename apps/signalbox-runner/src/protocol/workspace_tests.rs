@@ -520,6 +520,7 @@ async fn startup_report_without_a_session_is_retained_until_its_exact_page_is_re
     let directory = tempfile::tempdir().expect("temporary parent");
     let mut state = enrolled(&directory);
     let receipt = state.state().receipt().expect("receipt").clone();
+    let operation = provision(&receipt);
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -550,6 +551,25 @@ async fn startup_report_without_a_session_is_retained_until_its_exact_page_is_re
     assert_eq!(report.page.facts.len(), 64);
     assert!(report.page.facts[0].session.is_none());
     assert!(!runner.startup_report.complete());
+    runner
+        .serve_message(&mut state, Message::WorkspaceProvision(operation.clone()))
+        .await
+        .expect("provisioning is deferred during startup reconciliation");
+    runner
+        .serve_message(&mut state, Message::WorkspaceProvision(operation.clone()))
+        .await
+        .expect("an exact deferred replay is accepted");
+    let mut different = operation.clone();
+    different.correlation.authorization_id = identity();
+    assert!(
+        runner
+            .serve_message(&mut state, Message::WorkspaceProvision(different))
+            .await
+            .is_err()
+    );
+    assert_eq!(runner.deferred_provision.as_ref(), Some(&operation));
+    assert!(state.retained_provision().is_none());
+    assert!(runner.workspace.is_none());
     let mut wrong = WorkspaceLeakRecorded {
         correlation: report.page.correlation.clone(),
         page_digest: signalbox_runner_wire::Digest::try_new("f".repeat(64))
@@ -572,6 +592,8 @@ async fn startup_report_without_a_session_is_retained_until_its_exact_page_is_re
         .await
         .expect("startup settled");
     assert!(!runner.startup_report.complete());
+    assert!(state.retained_provision().is_none());
+    assert!(runner.workspace.is_none());
     let Message::WorkspaceLeakPage(next) = receive_message(&mut hub).await.expect("next page")
     else {
         panic!("second page")
@@ -598,6 +620,14 @@ async fn startup_report_without_a_session_is_retained_until_its_exact_page_is_re
         .expect("complete startup report");
     assert!(runner.startup_report.complete());
     assert!(state.retained_leak_page().is_none());
+    assert_eq!(
+        state
+            .retained_provision()
+            .map(|(provision, _ready)| provision),
+        Some(&operation)
+    );
+    assert!(runner.deferred_provision.is_none());
+    assert!(runner.workspace.is_some());
 }
 
 #[tokio::test]
