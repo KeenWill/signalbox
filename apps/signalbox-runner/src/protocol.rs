@@ -947,9 +947,7 @@ where
                 Ok(None)
             }
             Message::OperationFailureRecorded(recorded) => {
-                if self.last_provision_failure.as_ref() == Some(&recorded.correlation)
-                    && state.retained_provision_failure().is_none()
-                {
+                if self.last_provision_failure.as_ref() == Some(&recorded.correlation) {
                     return Ok(None);
                 }
                 state.acknowledge_provision_failure(&recorded.correlation)?;

@@ -150,23 +150,3 @@ pub fn seal_executable_snapshot(file: &File) -> io::Result<()> {
         Ok(())
     }
 }
-
-/// Changes the mode of the object pinned by a descriptor, including an O_PATH descriptor.
-pub fn chmod_descriptor(descriptor: std::os::fd::BorrowedFd<'_>, mode: u32) -> io::Result<()> {
-    // SAFETY: BorrowedFd keeps the descriptor alive; AT_EMPTY_PATH selects its
-    // pinned object and the empty pathname is a valid nul-terminated string.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_fchmodat2,
-            descriptor.as_raw_fd(),
-            c"".as_ptr(),
-            mode,
-            libc::AT_EMPTY_PATH,
-        )
-    };
-    if result == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}

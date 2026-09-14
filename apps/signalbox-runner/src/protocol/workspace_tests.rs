@@ -650,3 +650,148 @@ async fn reconnect_resumes_accepted_cleanup_and_discards_durably_recorded_comple
         assert!(!Path::new(&ready.working_directory).exists());
     }
 }
+
+#[tokio::test]
+async fn duplicate_release_acknowledgement_preserves_a_later_release() {
+    use signalbox_runner_wire::{ReleaseCorrelation, WorkspaceRelease, WorkspaceReleaseRecorded};
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt.clone());
+    let mut hub = BufReader::new(hub);
+    let first = ReleaseCorrelation {
+        session_id: identity(),
+        placement_revision: positive(),
+        runner_id: receipt.runner_id(),
+        manifest_id: identity(),
+    };
+    let mut next = first.clone();
+    next.manifest_id = identity();
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceRelease(WorkspaceRelease {
+                correlation: first.clone(),
+            }),
+        )
+        .await
+        .expect("first release");
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("absent workspace released");
+    assert!(matches!(
+        receive_message(&mut hub).await.expect("completion"),
+        Message::WorkspaceReleased(_)
+    ));
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceReleaseRecorded(WorkspaceReleaseRecorded {
+                correlation: first.clone(),
+            }),
+        )
+        .await
+        .expect("first acknowledgement");
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceRelease(WorkspaceRelease {
+                correlation: next.clone(),
+            }),
+        )
+        .await
+        .expect("next release");
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceReleaseRecorded(WorkspaceReleaseRecorded { correlation: first }),
+        )
+        .await
+        .expect("duplicate prior acknowledgement");
+    assert_eq!(
+        state.retained_release().expect("next remains pending").0,
+        &next
+    );
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("next cleanup completes");
+    assert!(matches!(
+        receive_message(&mut hub).await.expect("next completion"),
+        Message::WorkspaceReleased(_)
+    ));
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceReleaseRecorded(WorkspaceReleaseRecorded { correlation: next }),
+        )
+        .await
+        .expect("next acknowledgement");
+    assert!(state.retained_release().is_none());
+}
+
+#[tokio::test]
+async fn duplicate_provision_failure_acknowledgement_preserves_a_later_failure() {
+    use signalbox_runner_wire::OperationFailureRecorded;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let (stream, _hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt.clone());
+    state
+        .record_provision(provision(&receipt))
+        .expect("first admitted operation");
+    runner
+        .finish_provision(
+            &mut state,
+            Err(crate::WorkspaceProvisionError::RepositoryUnavailable),
+        )
+        .expect("first acquisition refusal");
+    let first = state
+        .retained_provision_failure()
+        .expect("first failure")
+        .correlation
+        .clone();
+    runner
+        .serve_message(
+            &mut state,
+            Message::OperationFailureRecorded(OperationFailureRecorded {
+                correlation: first.clone(),
+            }),
+        )
+        .await
+        .expect("first acknowledgement");
+    state
+        .record_provision(provision(&receipt))
+        .expect("next admitted operation");
+    runner
+        .finish_provision(
+            &mut state,
+            Err(crate::WorkspaceProvisionError::RepositoryUnavailable),
+        )
+        .expect("next acquisition refusal");
+    let next = state
+        .retained_provision_failure()
+        .expect("next failure")
+        .clone();
+    runner
+        .serve_message(
+            &mut state,
+            Message::OperationFailureRecorded(OperationFailureRecorded { correlation: first }),
+        )
+        .await
+        .expect("duplicate prior acknowledgement");
+    assert_eq!(state.retained_provision_failure(), Some(&next));
+    runner
+        .serve_message(
+            &mut state,
+            Message::OperationFailureRecorded(OperationFailureRecorded {
+                correlation: next.correlation,
+            }),
+        )
+        .await
+        .expect("next acknowledgement");
+    assert!(state.retained_provision_failure().is_none());
+}

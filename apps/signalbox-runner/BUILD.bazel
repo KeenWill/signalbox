@@ -12,7 +12,6 @@ rust_library(
     crate_root = "src/lib.rs",
     deps = [
         "//crates/domain:signalbox_domain",
-        "//crates/file-media-linux-sandbox:signalbox_file_media_linux_sandbox",
         "//crates/runner-wire:signalbox_runner_wire",
         "//crates/tools-basic:signalbox_tools_basic",
     ],

@@ -2,9 +2,8 @@
 
 use super::*;
 use crate::journal::AcceptedWorkspaceRelease;
-use signalbox_file_media_linux_sandbox::chmod_descriptor;
 use signalbox_runner_wire::ReleaseCorrelation;
-use std::os::fd::AsFd as _;
+use std::os::fd::AsRawFd as _;
 
 pub(super) const TRASH_DIRECTORY: &str = "trash";
 
@@ -175,9 +174,11 @@ fn remove_directory_steps(mut steps: Vec<RemovalStep>) -> Result<(), RunnerWorks
                     if !identity.names(parent.as_ref(), &name)? {
                         return Err(RunnerWorkspaceError::ManifestConflict);
                     }
-                    chmod_descriptor(
-                        opaque.as_fd(),
-                        (Mode::RUSR | Mode::WUSR | Mode::XUSR).bits(),
+                    // Linux's descriptor link names the pinned directory even
+                    // when its mode prevents opening it for reading.
+                    std::fs::set_permissions(
+                        format!("/proc/self/fd/{}", opaque.as_raw_fd()),
+                        std::fs::Permissions::from_mode(DIRECTORY_MODE),
                     )
                     .map_err(RunnerWorkspaceError::Io)?;
                     if DirectoryIdentity::from_file(&opaque)? != identity

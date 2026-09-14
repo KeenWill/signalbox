@@ -158,9 +158,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         state: &mut RunnerStateRoot,
         correlation: signalbox_runner_wire::ReleaseCorrelation,
     ) -> Result<(), RunnerConnectionError> {
-        if self.last_release_recorded.as_ref() == Some(&correlation)
-            && state.retained_release().is_none()
-        {
+        if self.last_release_recorded.as_ref() == Some(&correlation) {
             return Ok(());
         }
         state.acknowledge_release(&correlation)?;
