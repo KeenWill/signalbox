@@ -752,6 +752,7 @@ async fn observer_pause_waits_for_the_repository_admission_lock() -> Result<(), 
     let (_container, core, url) = postgres().await?;
     migrate(&core).await?;
     let pool = module_pool(&url).await?;
+    let observer = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new("serialized/project".to_owned())?;
     assert!(identity_attempt(&store, &repository, Some("daemon")).await);
@@ -778,23 +779,22 @@ async fn observer_pause_waits_for_the_repository_admission_lock() -> Result<(), 
         }
     })
     .await??;
-    let ready: bool =
-        sqlx::query_scalar("SELECT ready FROM mod_repo_watch.observer_actor WHERE repository=$1")
-            .bind(repository.as_str())
-            .fetch_one(&core)
-            .await?;
+    let ready: bool = sqlx::query_scalar("SELECT ready FROM observer_actor WHERE repository=$1")
+        .bind(repository.as_str())
+        .fetch_one(&observer)
+        .await?;
     assert!(
         ready,
         "the earlier transaction retains ready identity until it releases admission"
     );
     drop(held);
     pause.await??;
-    let ready: bool =
-        sqlx::query_scalar("SELECT ready FROM mod_repo_watch.observer_actor WHERE repository=$1")
-            .bind(repository.as_str())
-            .fetch_one(&core)
-            .await?;
+    let ready: bool = sqlx::query_scalar("SELECT ready FROM observer_actor WHERE repository=$1")
+        .bind(repository.as_str())
+        .fetch_one(&observer)
+        .await?;
     assert!(!ready);
+    observer.close().await;
     pool.close().await;
     core.close().await;
     Ok(())
