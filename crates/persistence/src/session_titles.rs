@@ -274,13 +274,10 @@ impl SessionTitleRepository {
         usage: UsageTokenAxes,
     ) -> Result<Option<String>, SessionMetadataRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT session_id, initial_for_turn IS NOT NULL AS initial, state_kind, title
-                FROM session_title_model_call WHERE model_call_id = $1 FOR UPDATE",
-        )
-        .bind(call.into_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
+        let row = sqlx::query(crate::lock_inventory::FINISH_GENERATED_SESSION_TITLE)
+            .bind(call.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
         if row.try_get::<String, _>("state_kind")? == "terminal" {
             return Ok(row.try_get("title")?);
         }
