@@ -9,8 +9,6 @@ const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
 const RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e2;
 const OTHER_RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e3;
 const PLACEMENT_REVISION: u64 = 3;
-const OPEN_DIRECTORY_MODE: u32 = 0o750;
-const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
 const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
 const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
 fn fixture_root() -> (TempDir, RunnerStateRoot) {
@@ -18,16 +16,6 @@ fn fixture_root() -> (TempDir, RunnerStateRoot) {
     let state = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("locked root");
     (parent, state)
 }
-fn request(runner: u128) -> PrivateWorkspaceRequest {
-    PrivateWorkspaceRequest::new(
-        CanonicalUuid::from_uuid(Uuid::from_u128(SESSION)),
-        PositiveU64::try_new(PLACEMENT_REVISION)
-            .expect("the fixture placement revision is positive"),
-        CanonicalUuid::from_uuid(Uuid::from_u128(runner)),
-        SandboxProfile::WorkspaceRestricted,
-    )
-}
-
 fn repository_request() -> RepositoryWorkspaceRequest {
     RepositoryWorkspaceRequest::new(
         CanonicalUuid::from_uuid(Uuid::from_u128(SESSION)),
@@ -198,198 +186,6 @@ async fn repository_workspace_replay_rejects_a_changed_clone_url_identity() {
     ));
 }
 
-#[test]
-fn private_root_publishes_exact_ready_facts_and_permissions() {
-    let (parent, state) = fixture_root();
-    let expected = request(RUNNER);
-    let prepared = state
-        .workspace_store()
-        .expect("the locked root forms a workspace store")
-        .prepare_private_root(&expected)
-        .expect("the private workspace publishes");
-    let placement = parent
-        .path()
-        .join("runner-state")
-        .join("sessions")
-        .join(expected.session().to_string())
-        .join(expected.placement_revision().get().to_string());
-    let manifest_mode = fs::metadata(placement.join(MANIFEST_FILE))
-        .expect("the protected manifest is inspectable")
-        .permissions()
-        .mode()
-        & 0o7777;
-    let expected_execution_directory = placement
-        .join("work")
-        .canonicalize()
-        .expect("the published work directory has a canonical path");
-
-    assert_eq!(prepared.manifest.session, expected.session());
-    assert_eq!(prepared.manifest.runner, expected.runner());
-    assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
-    assert_eq!(prepared.manifest.relative_path, EXPECTED_RELATIVE_PATH);
-    assert_eq!(
-        prepared.execution_directory.as_str(),
-        expected_execution_directory
-            .to_str()
-            .expect("the fixture path is UTF-8")
-    );
-    assert_eq!(
-        prepared.manifest_digest,
-        workspace_manifest_digest(&prepared.manifest)
-            .expect("the ready private manifest has its canonical digest")
-    );
-    assert!(prepared.manifest.repository.is_none());
-    assert!(prepared.manifest.credential_profile.is_none());
-    assert!(prepared.manifest.recovery.is_none());
-    assert!(placement.join("work").is_dir());
-    assert_eq!(manifest_mode, DOCUMENT_MODE);
-}
-
-#[test]
-fn private_root_reopen_replays_the_exact_ready_manifest() {
-    let (parent, state) = fixture_root();
-    let first = state
-        .workspace_store()
-        .expect("the locked root forms a workspace store")
-        .prepare_private_root(&request(RUNNER))
-        .expect("the private workspace publishes");
-    drop(state);
-    let reopened = RunnerStateRoot::open(&parent.path().join("runner-state"))
-        .expect("the runner root reopens after restart");
-    let replay = reopened
-        .workspace_store()
-        .expect("the reopened root forms a workspace store")
-        .prepare_private_root(&request(RUNNER))
-        .expect("the durable private workspace replays");
-
-    assert_eq!(replay, first);
-}
-
-#[test]
-fn private_root_replay_rejects_conflicting_runner_facts() {
-    let (_parent, state) = fixture_root();
-    state
-        .workspace_store()
-        .expect("the locked root forms a workspace store")
-        .prepare_private_root(&request(RUNNER))
-        .expect("the private workspace publishes");
-    let conflict = state
-        .workspace_store()
-        .expect("the locked root forms another workspace store")
-        .prepare_private_root(&request(OTHER_RUNNER))
-        .expect_err("another runner cannot reinterpret the workspace");
-
-    assert!(matches!(conflict, RunnerWorkspaceError::ManifestConflict));
-}
-
-#[test]
-fn private_root_replay_rejects_a_corrupt_protected_manifest() {
-    let (parent, state) = fixture_root();
-    let expected = request(RUNNER);
-    state
-        .workspace_store()
-        .expect("the locked root forms a workspace store")
-        .prepare_private_root(&expected)
-        .expect("the private workspace publishes");
-    let manifest = parent
-        .path()
-        .join("runner-state")
-        .join("sessions")
-        .join(expected.session().to_string())
-        .join(expected.placement_revision().get().to_string())
-        .join(MANIFEST_FILE);
-    fs::write(&manifest, b"{}\n").expect("the protected manifest fixture is corrupted");
-    let failure = state
-        .workspace_store()
-        .expect("the locked root forms another workspace store")
-        .prepare_private_root(&expected)
-        .expect_err("a corrupt protected manifest fails closed");
-
-    assert!(matches!(failure, RunnerWorkspaceError::CorruptManifest));
-}
-
-#[test]
-fn private_root_rejects_a_symlinked_sessions_directory() {
-    let (parent, state) = fixture_root();
-    let outside = parent.path().join("outside");
-    fs::create_dir(&outside).expect("the outside fixture directory exists");
-    std::os::unix::fs::symlink(
-        &outside,
-        parent.path().join("runner-state").join("sessions"),
-    )
-    .expect("the sessions alias fixture exists");
-    let failure = state
-        .workspace_store()
-        .expect("the locked root forms a workspace store")
-        .prepare_private_root(&request(RUNNER))
-        .expect_err("a symlink cannot stand in for the sessions directory");
-
-    assert_eq!(failure.to_string(), "runner workspace storage failed");
-    assert_eq!(
-        fs::read_dir(&outside)
-            .expect("the outside fixture remains readable")
-            .count(),
-        0
-    );
-}
-
-#[test]
-fn private_root_rejects_without_repairing_an_open_sessions_directory() {
-    let (parent, state) = fixture_root();
-    let sessions = parent.path().join("runner-state").join("sessions");
-    fs::create_dir(&sessions).expect("the open sessions fixture exists");
-    fs::set_permissions(&sessions, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))
-        .expect("the sessions fixture is deliberately group-readable");
-    let failure = state
-        .workspace_store()
-        .expect("the locked root forms a workspace store")
-        .prepare_private_root(&request(RUNNER))
-        .expect_err("an open sessions directory fails closed");
-    let retained_mode = fs::metadata(&sessions)
-        .expect("the rejected sessions directory remains inspectable")
-        .permissions()
-        .mode()
-        & 0o7777;
-
-    assert_eq!(failure.to_string(), "runner workspace storage failed");
-    assert_eq!(retained_mode, OPEN_DIRECTORY_MODE);
-}
-
-#[test]
-fn activated_private_root_reopens_with_its_files_and_same_ready_receipt() {
-    let (parent, state) = fixture_root();
-    let store = state.workspace_store().expect("workspace store");
-    let first = store
-        .prepare_private_root(&request(RUNNER))
-        .expect("ready root");
-    let work = Path::new(first.execution_directory.as_str());
-    fs::write(work.join("session-notes"), b"retained session files").expect("session file");
-    store.activate(&first).expect("ack activates manifest");
-    store.activate(&first).expect("equal ack replays");
-    let active = read_manifest(
-        &open_directory(
-            &File::open(work.parent().expect("placement")).expect("placement descriptor"),
-            ".",
-        )
-        .expect("private placement"),
-    )
-    .expect("active manifest");
-    assert_eq!(active.lifecycle, ManifestLifecycle::Active);
-    drop(store);
-    drop(state);
-    let state = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("reopened root");
-    let replay = state
-        .workspace_store()
-        .expect("store")
-        .prepare_private_root(&request(RUNNER))
-        .expect("re-adopt files");
-    assert_eq!(replay, first);
-    assert_eq!(
-        fs::read(work.join("session-notes")).expect("retained file"),
-        b"retained session files"
-    );
-}
-
 fn enrolled_workspace_root() -> (TempDir, RunnerStateRoot) {
     let (parent, mut state) = fixture_root();
     let identity = |value| CanonicalUuid::from_uuid(Uuid::from_u128(value));
@@ -426,7 +222,17 @@ fn anonymous_repository_configuration() -> crate::RunnerConfiguration {
 
 async fn acknowledged_repository() -> (TempDir, RunnerStateRoot, PreparedWorkspace) {
     let (parent, mut state) = enrolled_workspace_root();
+    let prepared = acknowledge_repository_revision(&mut state, PLACEMENT_REVISION).await;
+    (parent, state, prepared)
+}
+
+async fn acknowledge_repository_revision(
+    state: &mut RunnerStateRoot,
+    revision: u64,
+) -> PreparedWorkspace {
     let mut request = repository_request();
+    request.placement_revision =
+        PositiveU64::try_new(revision).expect("positive fixture placement");
     request.credential_profile = None;
     request.sandbox_profile = SandboxProfile::Ambient;
     let recovery = Recovery::UnbornBranch {
@@ -448,7 +254,7 @@ async fn acknowledged_repository() -> (TempDir, RunnerStateRoot, PreparedWorkspa
     state
         .record_provision(operation.clone())
         .expect("durable request");
-    let prepared = publish_repository_request(&state, &request, recovery).await;
+    let prepared = publish_repository_request(state, &request, recovery).await;
     state
         .record_workspace_ready(signalbox_runner_wire::WorkspaceReady {
             correlation: operation.correlation.clone(),
@@ -471,7 +277,7 @@ async fn acknowledged_repository() -> (TempDir, RunnerStateRoot, PreparedWorkspa
             manifest_digest: prepared.manifest_digest.clone(),
         })
         .expect("retain acknowledged identity");
-    (parent, state, prepared)
+    prepared
 }
 
 #[tokio::test]
@@ -548,13 +354,17 @@ async fn released_acknowledged_workspace_does_not_block_restart() {
         .expect("completed release forgets the removed active identity");
 }
 
-#[test]
-fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
+#[tokio::test]
+async fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
     let (parent, mut state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
-    let prepared = store
-        .prepare_private_root(&request(RUNNER))
-        .expect("private workspace");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
     let work = Path::new(prepared.execution_directory.as_str());
     let victim = parent.path().join("outside");
     fs::write(&victim, b"preserve outside bytes").expect("outside fixture");
@@ -590,13 +400,17 @@ fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
     assert!(reopened.retained_release().is_none());
 }
 
-#[test]
-fn accepted_release_restarts_after_trash_manifest_was_deleted() {
+#[tokio::test]
+async fn accepted_release_restarts_after_trash_manifest_was_deleted() {
     let (parent, mut state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
-    let prepared = store
-        .prepare_private_root(&request(RUNNER))
-        .expect("private workspace");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
     let correlation = release_correlation(&prepared);
     state
         .record_release(correlation.clone())
@@ -628,13 +442,17 @@ fn accepted_release_restarts_after_trash_manifest_was_deleted() {
     assert!(!renamed.exists());
 }
 
-#[test]
-fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
+#[tokio::test]
+async fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
     let (parent, state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
-    let prepared = store
-        .prepare_private_root(&request(RUNNER))
-        .expect("private workspace");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
     let placement_path = Path::new(prepared.execution_directory.as_str())
         .parent()
         .expect("placement");
@@ -662,10 +480,10 @@ fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
         trash.join(prepared.manifest.manifest_id.to_string()),
     )
     .expect("simulate committed release rename");
-    fs::remove_dir(
+    fs::remove_dir_all(
         trash
             .join(prepared.manifest.manifest_id.to_string())
-            .join(PRIVATE_WORKSPACE_DIRECTORY),
+            .join(REPOSITORY_WORKSPACE_DIRECTORY),
     )
     .expect("simulate partial recursive deletion with the manifest retained");
 
@@ -704,13 +522,17 @@ fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
     assert_eq!(facts[0].placement_revision, None);
 }
 
-#[test]
-fn release_requires_the_provisioning_runner_and_exact_manifest() {
+#[tokio::test]
+async fn release_requires_the_provisioning_runner_and_exact_manifest() {
     let (_parent, mut state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
-    let prepared = store
-        .prepare_private_root(&request(RUNNER))
-        .expect("private workspace");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
     let mut correlation = release_correlation(&prepared);
     correlation.runner_id = CanonicalUuid::from_uuid(Uuid::from_u128(OTHER_RUNNER));
     assert!(state.record_release(correlation).is_err());
@@ -726,13 +548,17 @@ fn release_requires_the_provisioning_runner_and_exact_manifest() {
     assert!(Path::new(prepared.execution_directory.as_str()).exists());
 }
 
-#[test]
-fn startup_inventory_reports_manifests_and_strays_without_following_links() {
+#[tokio::test]
+async fn startup_inventory_reports_manifests_and_strays_without_following_links() {
     let (parent, state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned store");
-    let prepared = store
-        .prepare_private_root(&request(RUNNER))
-        .expect("ready workspace");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
     store.activate(&prepared).expect("active workspace");
     let sessions = parent.path().join("runner-state/sessions");
     std::os::unix::fs::symlink(parent.path(), sessions.join("unknown")).expect("untrusted link");
@@ -875,4 +701,56 @@ fn reconnect_scan_waits_for_canceled_staging_cleanup() {
             "successful unpublished cleanup must not produce a permanent leak fact: {facts:?}"
         );
     });
+}
+
+#[tokio::test]
+async fn active_receipts_larger_than_a_frame_do_not_block_workspace_acknowledgement() {
+    use crate::active_workspaces::ActiveWorkspaces;
+    let (parent, state, _) = acknowledged_repository().await;
+    let root = parent.path().join("runner-state");
+    let path = root.join("active-workspaces.json");
+    let mut receipts: ActiveWorkspaces =
+        serde_json::from_slice(&fs::read(&path).expect("active receipt document"))
+            .expect("protected receipts");
+    let seed = receipts
+        .records
+        .values()
+        .next()
+        .expect("acknowledged fixture")
+        .clone();
+    let entry_bytes = serde_json::to_vec(&seed).expect("receipt encoding").len();
+    // Generate enough syntactically valid retained receipts to cross the operation frame
+    // ceiling. Their filesystem authentication is exercised by the restart tests above.
+    for _ in 0..=signalbox_runner_wire::MAX_FRAME_BYTES / entry_bytes {
+        let mut record = seed.clone();
+        let manifest = &mut record.ready.ready.manifest;
+        manifest.manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+        record.ready.ready.manifest_digest =
+            workspace_manifest_digest(manifest).expect("ready digest");
+        receipts.records.insert(manifest.manifest_id, record);
+    }
+    let encoded = serde_json::to_vec(&receipts).expect("retained receipt inventory");
+    assert!(encoded.len() > signalbox_runner_wire::MAX_FRAME_BYTES);
+    fs::write(&path, encoded).expect("retained inventory fixture");
+    drop(state);
+    let mut reopened = RunnerStateRoot::open(&root)
+        .expect("receipt inventory is independent of the frame ceiling");
+    let next = acknowledge_repository_revision(&mut reopened, PLACEMENT_REVISION + 1).await;
+    assert!(
+        reopened.retained_provision().is_none(),
+        "acknowledgement clears the pending operation"
+    );
+    assert!(
+        fs::metadata(root.join("operation-journal.json"))
+            .expect("operation journal")
+            .len()
+            < signalbox_runner_wire::MAX_FRAME_BYTES as u64
+    );
+    drop(reopened);
+    let reopened = RunnerStateRoot::open(&root).expect("acknowledgement survives another restart");
+    assert!(reopened.retained_provision().is_none());
+    let receipts: ActiveWorkspaces =
+        serde_json::from_slice(&fs::read(path).expect("retained inventory"))
+            .expect("receipt document");
+    assert!(receipts.records.contains_key(&next.manifest.manifest_id));
 }

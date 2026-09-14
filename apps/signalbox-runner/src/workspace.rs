@@ -41,60 +41,6 @@ const SESSIONS_DIRECTORY: &str = "sessions";
 const PRIVATE_WORKSPACE_DIRECTORY: &str = "work";
 const REPOSITORY_WORKSPACE_DIRECTORY: &str = "repo";
 
-/// Complete durable facts needed to prepare one repository-free managed root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PrivateWorkspaceRequest {
-    session: CanonicalUuid,
-    placement_revision: PositiveU64,
-    runner: CanonicalUuid,
-    sandbox_profile: SandboxProfile,
-}
-
-impl PrivateWorkspaceRequest {
-    /// Constructs one explicit repository-free workspace request.
-    pub(crate) const fn new(
-        session: CanonicalUuid,
-        placement_revision: PositiveU64,
-        runner: CanonicalUuid,
-        sandbox_profile: SandboxProfile,
-    ) -> Self {
-        Self {
-            session,
-            placement_revision,
-            runner,
-            sandbox_profile,
-        }
-    }
-
-    /// Returns the owning session.
-    pub(crate) const fn session(&self) -> CanonicalUuid {
-        self.session
-    }
-
-    /// Returns the positive placement revision.
-    pub(crate) const fn placement_revision(&self) -> PositiveU64 {
-        self.placement_revision
-    }
-
-    /// Returns the cleanup-owning runner.
-    pub(crate) const fn runner(&self) -> CanonicalUuid {
-        self.runner
-    }
-
-    /// Returns the exact sandbox profile.
-    pub(crate) const fn sandbox_profile(&self) -> SandboxProfile {
-        self.sandbox_profile
-    }
-
-    fn relative_path(&self) -> String {
-        format!(
-            "{SESSIONS_DIRECTORY}/{}/{}/{PRIVATE_WORKSPACE_DIRECTORY}",
-            self.session,
-            self.placement_revision.get(),
-        )
-    }
-}
-
 /// Complete durable facts needed to publish one repository workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RepositoryWorkspaceRequest {
@@ -355,27 +301,6 @@ impl RunnerWorkspaceStore {
         Ok(())
     }
 
-    /// Creates and publishes one private root, or replays its exact ready manifest.
-    pub(crate) fn prepare_private_root(
-        &self,
-        request: &PrivateWorkspaceRequest,
-    ) -> Result<PreparedWorkspace, RunnerWorkspaceError> {
-        validate_root_directory(&self.canonical_root, &self.root)
-            .map_err(RunnerWorkspaceError::Io)?;
-        let sessions = open_or_create_directory(&self.root, SESSIONS_DIRECTORY)?;
-        let session_name = request.session().to_string();
-        let session = open_or_create_directory(&sessions, &session_name)?;
-        let placement_name = request.placement_revision().get().to_string();
-        let execution_path = self.canonical_root.join(request.relative_path());
-        match open_directory(&session, &placement_name) {
-            Ok(placement) => read_ready_private_workspace(&placement, request, &execution_path),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                create_private_workspace(&session, &placement_name, request, &execution_path)
-            }
-            Err(error) => Err(RunnerWorkspaceError::Io(error)),
-        }
-    }
-
     /// Prepares and atomically publishes one repository, or replays its ready manifest.
     pub(crate) async fn prepare_repository_workspace<Prepare, Preparation, PreparationError>(
         &self,
@@ -621,96 +546,6 @@ fn read_ready_repository_workspace(
 struct ManifestDocument {
     version: u64,
     manifest: WorkspaceManifest,
-}
-
-fn create_private_workspace(
-    session: &File,
-    placement_name: &str,
-    request: &PrivateWorkspaceRequest,
-    execution_path: &Path,
-) -> Result<PreparedWorkspace, RunnerWorkspaceError> {
-    let manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
-    let staging_name = format!(".{placement_name}-{manifest_id}.staging");
-    mkdirat(
-        session,
-        staging_name.as_str(),
-        Mode::RUSR | Mode::WUSR | Mode::XUSR,
-    )
-    .map_err(rustix_io)?;
-    let staging = open_created_directory(session, &staging_name)?;
-    let mut manifest = private_manifest(ManifestLifecycle::Staging, manifest_id, request);
-    write_manifest(&staging, &manifest)?;
-    let work = open_or_create_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY)?;
-    work.sync_all().map_err(RunnerWorkspaceError::Io)?;
-    manifest.lifecycle = ManifestLifecycle::Ready;
-    write_manifest(&staging, &manifest)?;
-    staging.sync_all().map_err(RunnerWorkspaceError::Io)?;
-    if !path_names_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY, &work)?
-        || !path_names_directory(session, &staging_name, &staging)?
-    {
-        return Err(RunnerWorkspaceError::ManifestConflict);
-    }
-    if let Err(error) = renameat_with(
-        session,
-        staging_name.as_str(),
-        session,
-        placement_name,
-        RenameFlags::NOREPLACE,
-    ) {
-        return Err(RunnerWorkspaceError::Io(io::Error::from_raw_os_error(
-            error.raw_os_error(),
-        )));
-    }
-    session
-        .sync_all()
-        .map_err(RunnerWorkspaceError::CommitAmbiguous)?;
-    let placement = open_directory(session, placement_name).map_err(RunnerWorkspaceError::Io)?;
-    read_ready_private_workspace(&placement, request, execution_path)
-}
-
-fn private_manifest(
-    lifecycle: ManifestLifecycle,
-    manifest_id: CanonicalUuid,
-    request: &PrivateWorkspaceRequest,
-) -> WorkspaceManifest {
-    WorkspaceManifest {
-        lifecycle,
-        manifest_id,
-        session: request.session(),
-        placement_revision: request.placement_revision(),
-        runner: request.runner(),
-        repository: None,
-        canonical_clone_url_digest: None,
-        credential_profile: None,
-        sandbox_profile: request.sandbox_profile(),
-        relative_path: request.relative_path(),
-        recovery: None,
-    }
-}
-
-fn read_ready_private_workspace(
-    placement: &File,
-    request: &PrivateWorkspaceRequest,
-    execution_path: &Path,
-) -> Result<PreparedWorkspace, RunnerWorkspaceError> {
-    let mut manifest = read_manifest(placement)?;
-    if manifest.lifecycle == ManifestLifecycle::Active {
-        manifest.lifecycle = ManifestLifecycle::Ready;
-    }
-    let expected = private_manifest(ManifestLifecycle::Ready, manifest.manifest_id, request);
-    if manifest != expected {
-        return Err(RunnerWorkspaceError::ManifestConflict);
-    }
-    let work = open_directory(placement, PRIVATE_WORKSPACE_DIRECTORY)
-        .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    let execution_directory = checked_execution_directory(execution_path, &work)?;
-    let manifest_digest =
-        workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    Ok(PreparedWorkspace {
-        manifest,
-        manifest_digest,
-        execution_directory,
-    })
 }
 
 fn checked_execution_directory(

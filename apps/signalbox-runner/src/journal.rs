@@ -16,7 +16,6 @@ use signalbox_runner_wire::{
     WorkspaceProvision, WorkspaceReady, WorkspaceRecorded,
 };
 use std::{
-    collections::BTreeMap,
     fs::File,
     io::{self, Read as _},
     os::unix::fs::MetadataExt as _,
@@ -32,7 +31,6 @@ const MAX_JOURNAL_BYTES: u64 = MAX_FRAME_BYTES as u64;
 pub(crate) struct Journal {
     entries: Vec<JournalEntry>,
     leak_page: Option<LeakPage>,
-    active_workspaces: BTreeMap<signalbox_runner_wire::CanonicalUuid, ActiveWorkspace>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,13 +50,6 @@ enum JournalEntry {
         ready: Option<WorkspaceReady>,
         failure: Option<Box<OperationFailure>>,
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ActiveWorkspace {
-    pub(crate) ready: WorkspaceReady,
-    pub(crate) directory_identity: crate::workspace::DirectoryIdentity,
 }
 
 /// Cleanup capability obtained only from a durably accepted journal entry.
@@ -83,15 +74,6 @@ impl Journal {
         &self,
         state: &crate::RunnerState,
     ) -> Result<(), RunnerStateError> {
-        for active in self.active_workspaces.values() {
-            let ready = &active.ready;
-            if !state.receipt().is_some_and(|receipt| {
-                receipt.runner_id() == ready.correlation.runner_id
-                    && receipt.registration_revision() >= ready.correlation.registration_revision
-            }) {
-                return Err(RunnerStateError::CorruptState);
-            }
-        }
         if let Some(JournalEntry::Lease { phase, .. }) = self.entries.first() {
             match state {
                 crate::RunnerState::Enrolled { receipt }
@@ -130,11 +112,7 @@ impl Journal {
 
     pub(crate) fn initialize(directory: &File) -> Result<Self, RunnerStateError> {
         match Self::open(directory) {
-            Ok(journal)
-                if journal.entries.is_empty()
-                    && journal.leak_page.is_none()
-                    && journal.active_workspaces.is_empty() =>
-            {
+            Ok(journal) if journal.entries.is_empty() && journal.leak_page.is_none() => {
                 return Ok(journal);
             }
             Ok(_) => return Err(RunnerStateError::CorruptState),
@@ -231,15 +209,6 @@ impl Journal {
     }
 
     fn validate(&self) -> Result<(), RunnerStateError> {
-        for (manifest, active) in &self.active_workspaces {
-            let ready = &active.ready;
-            if *manifest != ready.ready.manifest.manifest_id
-                || Message::WorkspaceReady(ready.clone()).validate().is_err()
-            {
-                return Err(RunnerStateError::CorruptState);
-            }
-        }
-
         if self.entries.len() > 1 {
             return Err(RunnerStateError::CorruptState);
         }
@@ -298,17 +267,8 @@ impl Journal {
     fn without_operation(&self) -> Self {
         Self {
             entries: Vec::new(),
-            active_workspaces: self.active_workspaces.clone(),
             leak_page: self.leak_page.clone(),
         }
-    }
-
-    pub(crate) fn active_workspaces(&self) -> impl Iterator<Item = &ActiveWorkspace> {
-        self.active_workspaces.values().filter(|active| {
-            !self.release().is_some_and(|(release, _, _)| {
-                release.manifest_id == active.ready.ready.manifest.manifest_id
-            })
-        })
     }
 
     fn publish(&mut self, directory: &File, next: Self) -> Result<(), RunnerStateError> {
@@ -437,9 +397,7 @@ impl Journal {
     ) -> Result<(), RunnerStateError> {
         match self.release() {
             Some((retained, _, _)) if retained == correlation => {
-                let mut next = self.without_operation();
-                next.active_workspaces.remove(&correlation.manifest_id);
-                self.publish(directory, next)
+                self.publish(directory, self.without_operation())
             }
             _ => Err(RunnerStateError::InvalidTransition),
         }
@@ -611,7 +569,6 @@ impl Journal {
         &mut self,
         directory: &File,
         recorded: &WorkspaceRecorded,
-        directory_identity: crate::workspace::DirectoryIdentity,
     ) -> Result<(), RunnerStateError> {
         match self.entries.first() {
             Some(JournalEntry::Provision {
@@ -620,15 +577,7 @@ impl Journal {
                 && ready.ready.manifest.manifest_id == recorded.manifest_id
                 && ready.ready.manifest_digest == recorded.manifest_digest =>
             {
-                let mut next = self.without_operation();
-                next.active_workspaces.insert(
-                    recorded.manifest_id,
-                    ActiveWorkspace {
-                        ready: ready.clone(),
-                        directory_identity,
-                    },
-                );
-                self.publish(directory, next)
+                self.publish(directory, self.without_operation())
             }
             _ => Err(RunnerStateError::InvalidTransition),
         }
@@ -1152,7 +1101,7 @@ mod tests {
         let mut prior_reader = File::open(&published).expect("open the published journal");
         let prior_inode = prior_reader.metadata().expect("prior inode").ino();
         let directory = File::open(&path).expect("open directory for durable publication");
-        let next = br#"{ "version": 1, "journal": {"entries": [], "active_workspaces": {}} }"#;
+        let next = br#"{ "version": 1, "journal": {"entries": []} }"#;
         write_document(&directory, DocumentKind::Journal, next)
             .expect("fsync and publish replacement");
         assert_ne!(
@@ -1189,7 +1138,7 @@ mod tests {
         )
         .expect("open path-only directory");
         let directory = File::from(descriptor);
-        let next = br#"{ "version": 1, "journal": {"entries": [], "active_workspaces": {}} }"#;
+        let next = br#"{ "version": 1, "journal": {"entries": []} }"#;
         let error = write_document(&directory, DocumentKind::Journal, next)
             .expect_err("a failed directory fsync cannot report a durable commit");
         assert!(matches!(error, RunnerStateError::CommitAmbiguous { .. }));

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{CanonicalUuid, Digest, PositiveU64};
 use uuid::Uuid;
 
-use crate::journal::Journal;
+use crate::{active_workspaces::ActiveWorkspaces, journal::Journal};
 
 const STATE_DOCUMENT_VERSION: u64 = 1;
 const ROOT_MODE: u32 = 0o700;
@@ -177,8 +177,12 @@ pub enum StateResource {
     TemporaryDocument,
     /// Current private operation journal.
     Journal,
+    /// Acknowledged active workspace receipts.
+    ActiveWorkspaces,
     /// Single-use replacement journal used for atomic publication.
     TemporaryJournal,
+    /// Atomic replacement of the active workspace receipts.
+    TemporaryActiveWorkspaces,
 }
 
 impl fmt::Display for StateResource {
@@ -189,6 +193,8 @@ impl fmt::Display for StateResource {
             Self::StateDocument => "runner state document",
             Self::TemporaryDocument => "runner temporary state document",
             Self::Journal => "runner operation journal",
+            Self::ActiveWorkspaces => "runner active workspace receipts",
+            Self::TemporaryActiveWorkspaces => "runner temporary active workspace receipts",
             Self::TemporaryJournal => "runner temporary operation journal",
         })
     }
@@ -317,6 +323,7 @@ pub struct RunnerStateRoot {
     state: RunnerState,
     journal: Journal,
     staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
+    active_workspaces: ActiveWorkspaces,
 }
 
 impl RunnerStateRoot {
@@ -420,7 +427,7 @@ impl RunnerStateRoot {
             }
         })?;
 
-        let (state, journal) = match openat(
+        let (state, journal, active_workspaces) = match openat(
             &directory,
             STATE_FILE,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -429,14 +436,16 @@ impl RunnerStateRoot {
             Ok(descriptor) => (
                 read_state(File::from(descriptor), effective_user)?,
                 Journal::open(&directory)?,
+                ActiveWorkspaces::open(&directory)?,
             ),
             Err(rustix::io::Errno::NOENT) => {
                 let journal = Journal::initialize(&directory)?;
+                let active_workspaces = ActiveWorkspaces::initialize(&directory)?;
                 let state = RunnerState::Pristine {
                     request_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
                 };
                 write_state(&directory, &state)?;
-                (state, journal)
+                (state, journal, active_workspaces)
             }
             Err(error) => {
                 return Err(RunnerStateError::Io {
@@ -447,6 +456,7 @@ impl RunnerStateRoot {
             }
         };
         journal.validate_owner(&state)?;
+        active_workspaces.validate_owner(&state)?;
         let canonical_root = fs::canonicalize(path).map_err(|source| RunnerStateError::Io {
             operation: StateOperation::Inspect,
             resource: StateResource::Root,
@@ -458,6 +468,7 @@ impl RunnerStateRoot {
             state,
             journal,
             staging_cleanup: std::sync::Arc::default(),
+            active_workspaces,
         })
     }
 
@@ -531,6 +542,20 @@ impl RunnerStateRoot {
         correlation: &signalbox_runner_wire::ReleaseCorrelation,
         failed: bool,
     ) -> Result<(), RunnerStateError> {
+        let Some((prior, phase, failure)) = self.journal.release() else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        if prior != correlation
+            || (if failed {
+                failure.is_none()
+            } else {
+                phase != signalbox_runner_wire::ReleasePhase::ReleaseCompleted
+            })
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.active_workspaces
+            .remove(&self.directory, correlation.manifest_id)?;
         self.journal
             .acknowledge_release(&self.directory, correlation, failed)
     }
@@ -538,6 +563,15 @@ impl RunnerStateRoot {
         &mut self,
         correlation: &signalbox_runner_wire::ReleaseCorrelation,
     ) -> Result<(), RunnerStateError> {
+        if self
+            .journal
+            .release()
+            .is_none_or(|(prior, _, _)| prior != correlation)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.active_workspaces
+            .remove(&self.directory, correlation.manifest_id)?;
         self.journal.discard_release(&self.directory, correlation)
     }
     pub(crate) fn retained_leak_page(&self) -> Option<&signalbox_runner_wire::LeakPage> {
@@ -566,7 +600,12 @@ impl RunnerStateRoot {
         let store = self
             .workspace_store()
             .map_err(|_| WorkspaceProvisionError::Storage)?;
-        for active in self.journal.active_workspaces() {
+        for active in self.active_workspaces.records.values() {
+            if self.journal.release().is_some_and(|(release, _, _)| {
+                release.manifest_id == active.ready.ready.manifest.manifest_id
+            }) {
+                continue;
+            }
             let ready = &active.ready;
             let manifest = &ready.ready.manifest;
             if !configuration
@@ -668,8 +707,16 @@ impl RunnerStateRoot {
             .workspace_store()?
             .authenticate_active(ready)
             .map_err(|_| RunnerStateError::InvalidTransition)?;
+        if ready.correlation != recorded.correlation
+            || ready.ready.manifest.manifest_id != recorded.manifest_id
+            || ready.ready.manifest_digest != recorded.manifest_digest
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.active_workspaces
+            .record(&self.directory, ready.clone(), identity)?;
         self.journal
-            .acknowledge_workspace(&self.directory, recorded, identity)
+            .acknowledge_workspace(&self.directory, recorded)
     }
 
     /// Fsyncs the exact claimed lease phase before its named execution step.
@@ -824,6 +871,7 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
 pub(crate) enum DocumentKind {
     Enrollment,
     Journal,
+    ActiveWorkspaces,
 }
 
 impl DocumentKind {
@@ -831,6 +879,7 @@ impl DocumentKind {
         match self {
             Self::Enrollment => STATE_FILE,
             Self::Journal => "operation-journal.json",
+            Self::ActiveWorkspaces => "active-workspaces.json",
         }
     }
 
@@ -838,6 +887,7 @@ impl DocumentKind {
         match self {
             Self::Enrollment => StateResource::StateDocument,
             Self::Journal => StateResource::Journal,
+            Self::ActiveWorkspaces => StateResource::ActiveWorkspaces,
         }
     }
 
@@ -845,6 +895,7 @@ impl DocumentKind {
         match self {
             Self::Enrollment => StateResource::TemporaryDocument,
             Self::Journal => StateResource::TemporaryJournal,
+            Self::ActiveWorkspaces => StateResource::TemporaryActiveWorkspaces,
         }
     }
 }

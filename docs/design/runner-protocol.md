@@ -73,10 +73,11 @@ authorization and returns one `ProvisionedWorkspace` receipt whose manifest
 facts match every correlation.
 
 [Workspace publication](../spec/runner-protocol.md#workspace-publication) owns
-the ambient anonymous clone, private root, protected manifest, and restart
-re-adoption. Restricted acquisition clones inside the restricted profile. Each
-placement has exactly one writable root, whether a repository, selected plain
-directory, or private root. Confinement is defined over that root.
+the ambient anonymous clone, protected manifest, and restart re-adoption.
+Repository-free private-root acquisition is not built. Restricted acquisition
+clones inside the restricted profile. Each placement has exactly one writable
+root, whether a repository, selected plain directory, or private root.
+Confinement is defined over that root.
 
 ### Sandbox profiles
 

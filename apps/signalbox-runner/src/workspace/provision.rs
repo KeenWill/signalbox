@@ -1,4 +1,4 @@
-//! Checked repository acquisition and private-root publication.
+//! Checked anonymous repository acquisition.
 
 use std::{error::Error, fmt, path::Path, process::Stdio};
 
@@ -10,8 +10,8 @@ use tokio::{io::AsyncReadExt as _, process::Command};
 use crate::RunnerConfiguration;
 
 use super::{
-    PrepareRepositoryWorkspaceError, PreparedWorkspace, PrivateWorkspaceRequest,
-    RepositoryWorkspaceRequest, RunnerWorkspaceError, RunnerWorkspaceStore,
+    PrepareRepositoryWorkspaceError, PreparedWorkspace, RepositoryWorkspaceRequest,
+    RunnerWorkspaceError, RunnerWorkspaceStore,
 };
 
 /// Sanitized refusal or failure of one workspace acquisition.
@@ -55,13 +55,13 @@ impl From<RunnerWorkspaceError> for WorkspaceProvisionError {
 /// Local configuration resolved before accepting the operation into the journal.
 pub(crate) struct CheckedProvision {
     operation: WorkspaceProvision,
-    clone_url: Option<String>,
+    clone_url: String,
 }
 
 impl CheckedProvision {
     #[cfg(test)]
     pub(crate) fn with_local_clone_fixture(mut self, path: String) -> Self {
-        self.clone_url = Some(path);
+        self.clone_url = path;
         self
     }
 
@@ -98,12 +98,9 @@ impl CheckedProvision {
                 if correlation.credential_profile.is_some() {
                     return Err(WorkspaceProvisionError::CredentialUnavailable);
                 }
-                Some(repository.clone_url().to_owned())
+                repository.clone_url().to_owned()
             }
-            None if correlation.credential_profile.is_none() && operation.recovery.is_none() => {
-                None
-            }
-            None => return Err(WorkspaceProvisionError::ManifestConflict),
+            None => return Err(WorkspaceProvisionError::RepositoryUnavailable),
         };
         Ok(Self {
             operation,
@@ -117,7 +114,7 @@ impl CheckedProvision {
     ) -> Result<WorkspaceReady, WorkspaceProvisionError> {
         let correlation = self.operation.correlation;
         let prepared = match (&correlation.repository, self.clone_url) {
-            (Some(repository), Some(clone_url)) => {
+            (Some(repository), clone_url) => {
                 let request = RepositoryWorkspaceRequest::new(
                     correlation.session_id,
                     correlation.placement_revision,
@@ -138,12 +135,6 @@ impl CheckedProvision {
                         PrepareRepositoryWorkspaceError::Preparation(error) => error,
                     })?
             }
-            (None, None) => store.prepare_private_root(&PrivateWorkspaceRequest::new(
-                correlation.session_id,
-                correlation.placement_revision,
-                correlation.runner_id,
-                correlation.sandbox_profile,
-            ))?,
             _ => return Err(WorkspaceProvisionError::ManifestConflict),
         };
         if self
