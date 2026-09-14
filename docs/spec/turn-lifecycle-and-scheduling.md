@@ -287,12 +287,13 @@ the fence migration has run, runs the remaining migrations, and binds the runner
 socket in recovery-only mode. Authenticated resume reconciles retained leases
 and results before the generic scan; ordinary enrollment is retryably refused.
 Recovery waits for outstanding execution authority and in-progress resume to
-settle, rechecks retained replacement commands, and marks only unreplaced
-prior-process connection epochs lost. With no retained execution it completes
-immediately. The generic scan excludes unsettled runner-owned attempts. Recovery
-admission precedes blob namespace checks and recovery frames access no blob
-state. After the generic scan, startup initializes configured blob stores, binds
-the process socket, and enables ordinary enrollment and scheduling. A blob-store
+settle, rechecks durable execution even without a connection notification,
+rechecks retained replacement commands, and marks only unreplaced prior-process
+connection epochs lost. With no retained execution it completes immediately. The
+generic scan excludes unsettled runner-owned attempts. Recovery admission
+precedes blob namespace checks and recovery frames access no blob state. After
+the generic scan, startup initializes configured blob stores, binds the process
+socket, and enables ordinary enrollment and scheduling. A blob-store
 initialization failure makes that store unavailable and does not fail the phase.
 Any other phase failure is a failed startup with a classified, key-bearing log
 line and a failure exit code.
