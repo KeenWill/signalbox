@@ -91,6 +91,7 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
         store
             .record_replacement_provisioning_failure(
                 &authorization,
+                candidate_connection.epoch(),
                 signalbox_domain::RunnerProvisioningFailureKind::SandboxUnavailable,
                 &detail,
             )

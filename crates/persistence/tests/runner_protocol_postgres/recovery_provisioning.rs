@@ -418,6 +418,16 @@ fn private_workspace(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
 -> Result<(), Box<dyn Error>> {
+    provisioning_failure_fixture(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provisioning_failure_rejects_fenced_frames_and_replays() -> Result<(), Box<dyn Error>> {
+    provisioning_failure_fixture(true).await
+}
+
+async fn provisioning_failure_fixture(fenced: bool) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -453,7 +463,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
             authorized(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
-        .unwrap();
+        .expect("retained provisioning fixture authority");
     let connection = store
         .open_connection(predecessor.identities().enrollment())
         .await?;
@@ -493,13 +503,52 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
     let detail = serde_json::json!({"code": "fixture_refusal", "message": "workspace unavailable", "payload": {}});
     let kind = signalbox_domain::RunnerProvisioningFailureKind::SandboxUnavailable;
 
+    let old_epoch = candidate_connection.epoch();
+    let candidate_connection = if fenced {
+        let current = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert!(
+            store
+                .record_replacement_provisioning_failure(authorization, old_epoch, kind, &detail)
+                .await
+                .is_err()
+        );
+        let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_provisioning_failure WHERE authorization_id = $1")
+            .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(retained, 0);
+        current
+    } else {
+        candidate_connection
+    };
     store
-        .record_replacement_provisioning_failure(authorization, kind, &detail)
+        .record_replacement_provisioning_failure(
+            authorization,
+            candidate_connection.epoch(),
+            kind,
+            &detail,
+        )
         .await?;
     store
-        .record_replacement_provisioning_failure(authorization, kind, &detail)
+        .record_replacement_provisioning_failure(
+            authorization,
+            candidate_connection.epoch(),
+            kind,
+            &detail,
+        )
         .await?;
 
+    if fenced {
+        assert!(
+            store
+                .record_replacement_provisioning_failure(authorization, old_epoch, kind, &detail)
+                .await
+                .is_err()
+        );
+    }
+    store
+        .reconcile_replacement_provisioning_failure(authorization, kind, &detail)
+        .await?;
     let rejected =
         RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
             signalbox_domain::RunnerRecoveryRejection::ProvisioningFailed,
@@ -513,6 +562,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
         store
             .record_replacement_provisioning_failure(
                 authorization,
+                candidate_connection.epoch(),
                 kind,
                 &serde_json::json!({"changed": true})
             )
@@ -523,7 +573,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
         store
             .load_enrollment(candidate.identities().enrollment())
             .await?
-            .unwrap()
+            .expect("retained provisioning fixture authority")
             .state(),
         RunnerEnrollmentState::Pending
     );
@@ -778,6 +828,17 @@ async fn rejected_staging_releases_ready_workspace(
     let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
+    store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::DaemonShutdown,
+        )
+        .await?;
+    let candidate_connection = store
+        .open_connection(candidate.identities().enrollment())
+        .await?;
+    assert!(candidate_connection.epoch().get() > 1);
     let command = signalbox_domain::ReplaceLostRunner {
         command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
         session,

@@ -163,6 +163,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn provisioning_failed(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         failure: signalbox_runner_wire::OperationFailed,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded>;
     /// Loads committed command-bound operations for this candidate.
@@ -717,6 +718,7 @@ impl PostgresRunnerRegistrationService {
                     }
                     self.provisioning_failed_durably(
                         request.enrollment_id,
+                        None,
                         signalbox_runner_wire::OperationFailed {
                             failure: failure.clone(),
                         },
@@ -1357,9 +1359,10 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn provisioning_failed(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         failure: signalbox_runner_wire::OperationFailed,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
-        Box::pin(self.provisioning_failed_durably(enrollment, failure))
+        Box::pin(self.provisioning_failed_durably(enrollment, Some(epoch), failure))
     }
     fn replacement_operations(
         &self,
@@ -2219,7 +2222,7 @@ where
                     }
                     Message::OperationFailed(failure) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::OperationFailed, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.provisioning_failed(context.enrollment, failure).await {
+                        match service.provisioning_failed(context.enrollment, context.epoch, failure).await {
                             Ok(recorded) => {
                                 if let signalbox_runner_wire::OperationCorrelation::Provision(correlation) = &recorded.correlation
                                     && busy_provision == Some(correlation.authorization_id) { busy_provision = None; }
@@ -3147,6 +3150,7 @@ mod tests {
         fn provisioning_failed(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
             failure: signalbox_runner_wire::OperationFailed,
         ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
             Box::pin(async move {

@@ -147,8 +147,8 @@ changing the original release record; unrelated stale release receipts still
 fail the current-epoch check.
 
 Retained staging-release authority cannot be reauthorized after durable
-connection loss. Live release completion checks the caller's connection epoch in
-the receipt transaction, including equal replay.
+connection loss. Live provisioning failure and release completion check the
+caller's connection epoch in the receipt transaction, including equal replay.
 
 The runner retains the complete provisioning request, resolved clone-URL digest,
 and ready receipt in its private journal. Restart checks the configured mapping

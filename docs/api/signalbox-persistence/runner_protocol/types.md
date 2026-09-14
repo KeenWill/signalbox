@@ -651,6 +651,13 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn record_replacement_provisioning_failure(
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &value::Value,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+    pub async fn reconcile_replacement_provisioning_failure(
+        &self,
+        authorization: &signalbox_domain::RunnerReplacementProvisioning,
         kind: signalbox_domain::RunnerProvisioningFailureKind,
         detail: &value::Value,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;

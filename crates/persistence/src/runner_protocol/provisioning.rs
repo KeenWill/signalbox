@@ -24,7 +24,7 @@ impl RunnerProtocolStore {
             JOIN runner_connection_authority_head head ON head.enrollment_id = enrollment.enrollment_id
             LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
                 FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
-            WHERE (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
+            WHERE (head.latest_loss_epoch IS NULL OR (SELECT loss.connection_epoch FROM runner_connection_loss_epoch loss WHERE loss.enrollment_id = head.enrollment_id AND loss.loss_epoch = head.latest_loss_epoch) < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
                 AND enrollment.enrollment_id = $1 AND enrollment.state_kind <> 'revoked'
                 AND operation.session_id = $2 AND operation.placement_revision = $3
                 AND operation.runner_id = $4 AND enrollment.runner_id = $4
@@ -73,7 +73,7 @@ impl RunnerProtocolStore {
             JOIN runner_connection_event event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
             LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
                 FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
-            WHERE (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
+            WHERE (head.latest_loss_epoch IS NULL OR (SELECT loss.connection_epoch FROM runner_connection_loss_epoch loss WHERE loss.enrollment_id = head.enrollment_id AND loss.loss_epoch = head.latest_loss_epoch) < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
                 AND enrollment.enrollment_id = $1 AND head.connection_epoch = $2 AND event.state_kind = 'connected'
                 AND enrollment.state_kind <> 'revoked' AND operation.session_id = $3
                 AND operation.placement_revision = $4 AND operation.runner_id = enrollment.runner_id AND ready.manifest_id = $5
@@ -106,7 +106,7 @@ impl RunnerProtocolStore {
             JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
             WHERE operation.registration_enrollment_id = $1 AND head.connection_epoch = $2 AND result.result_kind = 'rejected'
               AND COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch) = head.connection_epoch
-              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
+              AND (head.latest_loss_epoch IS NULL OR (SELECT loss.connection_epoch FROM runner_connection_loss_epoch loss WHERE loss.enrollment_id = head.enrollment_id AND loss.loss_epoch = head.latest_loss_epoch) < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
               AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_released AS released WHERE released.authorization_id = operation.authorization_id)")
             .bind(enrollment.into_uuid()).bind(Decimal::from(epoch.get())).fetch_all(&mut *connection).await?;
         let mut workspaces = Vec::new();
@@ -156,7 +156,7 @@ impl RunnerProtocolStore {
               AND operation.placement_revision = $3 AND operation.runner_id = $4
               AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
               AND COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch) = head.connection_epoch
-              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
+              AND (head.latest_loss_epoch IS NULL OR (SELECT loss.connection_epoch FROM runner_connection_loss_epoch loss WHERE loss.enrollment_id = head.enrollment_id AND loss.loss_epoch = head.latest_loss_epoch) < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
               AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption AS consumption WHERE consumption.authorization_id = operation.authorization_id)")
             .bind(enrollment.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
             .bind(runner.into_uuid()).bind(manifest.into_uuid()).bind(Decimal::from(epoch.get())).fetch_optional(&mut *transaction).await?;
@@ -167,10 +167,33 @@ impl RunnerProtocolStore {
             .bind(authorization).execute(&mut *transaction).await?;
         commit_mutation(transaction).await
     }
-    /// Records an exact provisioning refusal and settles its owning command atomically.
+    /// Records a live provisioning refusal under its caller's current epoch.
     pub async fn record_replacement_provisioning_failure(
         &self,
         authorization: &RunnerReplacementProvisioning,
+        epoch: RunnerConnectionEpoch,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &serde_json::Value,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_replacement_provisioning_failure(authorization, Some(epoch), kind, detail)
+            .await
+    }
+
+    /// Reconciles authenticated Resume failure evidence before opening its next epoch.
+    pub async fn reconcile_replacement_provisioning_failure(
+        &self,
+        authorization: &RunnerReplacementProvisioning,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &serde_json::Value,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_replacement_provisioning_failure(authorization, None, kind, detail)
+            .await
+    }
+
+    async fn store_replacement_provisioning_failure(
+        &self,
+        authorization: &RunnerReplacementProvisioning,
+        epoch: Option<RunnerConnectionEpoch>,
         kind: signalbox_domain::RunnerProvisioningFailureKind,
         detail: &serde_json::Value,
     ) -> Result<(), RunnerProtocolStoreError> {
@@ -186,6 +209,29 @@ impl RunnerProtocolStore {
             .bind(authorization.session.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(authorization.enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(authorization.enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if let Some(epoch) = epoch {
+            let current =
+                load_connection_head_in(transaction.as_mut(), authorization.enrollment).await?;
+            if !current.is_some_and(|head| {
+                head.epoch() == epoch
+                    && matches!(
+                        head.state(),
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                    )
+            }) {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::CorrelationMismatch,
+                ));
+            }
+        }
         let row = sqlx::query("SELECT * FROM runner_replacement_provisioning_authorization WHERE authorization_id = $1")
             .bind(authorization.authorization.into_uuid()).fetch_one(&mut *transaction).await?;
         if decode_authorization(&row)? != *authorization {
