@@ -167,15 +167,50 @@ pub(super) async fn retain_release_leak(
     manifest: Uuid,
     kind: &str,
 ) -> Result<(), RunnerProtocolStoreError> {
+    let release = sqlx::query(
+        "SELECT release.*, ready.manifest_digest
+        FROM runner_workspace_release release
+        LEFT JOIN runner_replacement_workspace_ready ready USING (manifest_id)
+        WHERE release.manifest_id = $1",
+    )
+    .bind(manifest)
+    .fetch_one(&mut *connection)
+    .await?;
+    let digest = match release.decode_column::<Option<String>>("manifest_digest")? {
+        Some(digest) => digest,
+        None => {
+            let ordinal = release
+                .decode_column::<Option<Decimal>>("source_event_ordinal")?
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            let source = sqlx::query("SELECT * FROM runner_session_placement_record WHERE session_id = $1 AND event_ordinal = $2")
+                .bind(release.decode_column::<Uuid>("session_id")?).bind(ordinal)
+                .fetch_one(&mut *connection).await?;
+            placement_manifest_digest(&source)?
+        }
+    };
     sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
-        SELECT release.runner_id, release.relative_path,
-            COALESCE(ready.manifest_digest, encode(sha256(convert_to(jsonb_build_object('manifest_id',release.manifest_id,'session_id',release.session_id,'placement_revision',release.placement_revision)::text,'UTF8')),'hex')),
-            $2,release.session_id,release.placement_revision FROM runner_workspace_release release
-        LEFT JOIN runner_replacement_workspace_ready ready USING (authorization_id)
-        WHERE release.manifest_id = $1
+        SELECT runner_id,relative_path,$3,$2,session_id,placement_revision
+        FROM runner_workspace_release WHERE manifest_id = $1
         ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind")
-        .bind(manifest).bind(kind).execute(connection).await?;
+        .bind(manifest).bind(kind).bind(digest).execute(connection).await?;
     Ok(())
+}
+
+fn placement_manifest_digest(source: &PgRow) -> Result<String, RunnerProtocolStoreError> {
+    let workspace = decode_provisioned_workspace(
+        source,
+        session_id(source.decode_column("session_id")?),
+        runner_id(source.decode_column("pinned_runner_id")?),
+    )?
+    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let manifest = signalbox_runner_wire::WorkspaceManifest::from_domain(
+        signalbox_runner_wire::ManifestLifecycle::Ready,
+        &workspace,
+    )
+    .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+    signalbox_runner_wire::workspace_manifest_digest(&manifest)
+        .map(|digest| digest.as_str().to_owned())
+        .map_err(|_| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
 pub(super) async fn retire_releases_on_loss(
@@ -469,12 +504,22 @@ pub(super) async fn retain_retired_placement(
         ON CONFLICT DO NOTHING")
         .bind(session.into_uuid()).bind(Decimal::from(ordinal - 1)).bind(Decimal::from(ordinal)).execute(&mut *connection).await?.rows_affected();
     if inserted == 0 {
+        let retained: Option<String> = sqlx::query_scalar(
+            "SELECT manifest_digest FROM runner_replacement_workspace_ready WHERE manifest_id = $1",
+        )
+        .bind(manifest)
+        .fetch_optional(&mut *connection)
+        .await?;
+        let digest = match retained {
+            Some(digest) => digest,
+            None => placement_manifest_digest(&source)?,
+        };
         sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
             SELECT pinned_runner_id,workspace_relative_path,
-                encode(sha256(convert_to(jsonb_build_object('manifest_id',workspace_manifest_id,'session_id',session_id,'placement_revision',workspace_placement_revision)::text,'UTF8')),'hex'),
+                $3,
                 'retired_present',session_id,workspace_placement_revision FROM runner_session_placement_record WHERE session_id = $1 AND event_ordinal = $2
             ON CONFLICT DO NOTHING")
-            .bind(session.into_uuid()).bind(Decimal::from(ordinal - 1)).execute(connection).await?;
+            .bind(session.into_uuid()).bind(Decimal::from(ordinal - 1)).bind(digest).execute(connection).await?;
     }
     Ok(())
 }

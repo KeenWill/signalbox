@@ -125,6 +125,12 @@ async fn run(
                 return shutdown_with_timeout(&mut connection).await;
             }
             Err(error) if error.is_reconnectable() && !shutdown_requested => {
+                if let Some(mut worker) = connection.take_workspace_release_worker() {
+                    worker
+                        .reap(&mut state)
+                        .await
+                        .map_err(RunnerDaemonError::Connection)?;
+                }
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Serving, &error, delay);
                 if wait_for_retry(delay, &mut terminate, &mut interrupt).await {

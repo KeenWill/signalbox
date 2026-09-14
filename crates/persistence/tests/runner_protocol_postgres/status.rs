@@ -288,7 +288,7 @@ fn report_fact(index: usize) -> signalbox_runner_wire::LeakFact {
     }
 }
 
-fn report_page(
+pub(super) fn report_page(
     report: &signalbox_runner_wire::Digest,
     page_number: u64,
     prior: Option<&signalbox_runner_wire::Digest>,

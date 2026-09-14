@@ -878,6 +878,13 @@ async fn rejected_staging_releases_ready_workspace(
                     && leak.locator == ready.relative_path
                     && leak.entry_digest.as_str() == ready_digest().as_str())
         );
+        startup_report_matches_the_retained_release_leak(
+            &store,
+            &pool,
+            candidate.identities().enrollment(),
+            &ready,
+        )
+        .await?;
         return Ok(());
     }
     assert!(
@@ -939,6 +946,13 @@ async fn rejected_staging_releases_ready_workspace(
                     && leak.kind == RunnerWorkspaceLeakKind::CleanupFailed
                     && leak.entry_digest.as_str() == ready_digest().as_str())
         );
+        startup_report_matches_the_retained_release_leak(
+            &store,
+            &pool,
+            candidate.identities().enrollment(),
+            &ready,
+        )
+        .await?;
         return Ok(());
     }
     store
@@ -982,4 +996,49 @@ fn release_receipt(
         runner: workspace.runner,
         manifest,
     }
+}
+
+async fn startup_report_matches_the_retained_release_leak(
+    store: &RunnerProtocolStore,
+    pool: &PgPool,
+    enrollment: signalbox_domain::RunnerEnrollmentId,
+    ready: &ProvisionedWorkspace,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, Digest, LeakFact, LeakFactKind, PositiveU64, leak_report_digest,
+    };
+    let stored: String = sqlx::query_scalar(
+        "SELECT entry_digest FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+    )
+    .bind(ready.runner.into_uuid())
+    .bind(ready.relative_path.as_str())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        stored,
+        ready_digest().as_str(),
+        "release diagnostics retain the WorkspaceReady digest"
+    );
+    let facts = [LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: ready.relative_path.as_str().to_owned(),
+        entry_digest: Digest::try_new(ready_digest().as_str().to_owned())?,
+        session: Some(CanonicalUuid::from_uuid(ready.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(ready.placement_revision.get())?),
+    }];
+    let report = leak_report_digest(&facts)?;
+    let page = super::status::report_page(&report, 1, None, true, &facts);
+    store.record_workspace_leak_page(enrollment, &page).await?;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+    )
+    .bind(ready.runner.into_uuid())
+    .bind(ready.relative_path.as_str())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        rows, 1,
+        "startup reconciles the existing release leak instead of duplicating it"
+    );
+    Ok(())
 }

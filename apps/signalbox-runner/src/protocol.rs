@@ -32,6 +32,7 @@ use crate::{
 
 mod leaks;
 mod workspaces;
+pub use workspaces::WorkspaceReleaseWorker;
 
 const SOCKET_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
@@ -513,6 +514,7 @@ pub struct RunnerConnection<S> {
     deferred_provision: Option<signalbox_runner_wire::WorkspaceProvision>,
     deferred_dispatch: Option<signalbox_runner_wire::Dispatch>,
     deferred_release: Option<signalbox_runner_wire::WorkspaceRelease>,
+    deferred_provision: Option<signalbox_runner_wire::WorkspaceProvision>,
     offer_claimed: bool,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
@@ -725,6 +727,7 @@ where
             deferred_provision: None,
             deferred_dispatch: None,
             deferred_release: None,
+            deferred_provision: None,
             offer_claimed: false,
             receipt,
             advertisement: advertisement.clone(),
