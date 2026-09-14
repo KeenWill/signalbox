@@ -1432,6 +1432,35 @@ async fn startup_report_preserves_retired_initial_workspace_release_outcomes()
             kind, "manifest_conflict",
             "a retained release cannot suppress a readable conflicting trash manifest"
         );
+        let unreadable = [LeakFact {
+            kind: LeakFactKind::RetiredPresent,
+            locator: format!("trash/{}", workspace.manifest_id.into_uuid()),
+            // Arbitrary directory metadata after the manifest is absent.
+            entry_digest: signalbox_runner_wire::Digest::try_new("e".repeat(64))?,
+            session: None,
+            placement_revision: None,
+        }];
+        let report = leak_report_digest(&unreadable)?;
+        let mut page = super::status::report_page(&report, 1, None, true, &unreadable);
+        page.registration_revision = RunnerGeneration::try_from_u64(registration.revision().get())
+            .expect("nonzero registration");
+        store
+            .record_workspace_leak_page(enrolled.enrollment(), &page)
+            .await?;
+        let kinds: Vec<String> = sqlx::query_scalar(
+            "SELECT kind FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2 AND entry_digest = $3",
+        ).bind(workspace.runner.into_uuid()).bind(&unreadable[0].locator)
+            .bind(unreadable[0].entry_digest.as_str()).fetch_all(&pool).await?;
+        let expected = match outcome {
+            ReleaseState::Completed => vec!["retired_present"],
+            ReleaseState::CleanupFailed(_) | ReleaseState::Unowned | ReleaseState::Pending => {
+                vec![]
+            }
+        };
+        assert_eq!(
+            kinds, expected,
+            "only a pending or failed release explains manifest-free trash; {outcome:?}"
+        );
     }
     Ok(())
 }

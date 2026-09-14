@@ -179,9 +179,9 @@ retains its canonical workspace locator, ready-manifest digest, and session
 correlation in the startup report, matching the stored cleanup diagnostic.
 Readable trash manifests with inconsistent identity, path, or lifecycle are
 reported as manifest conflicts. Pending and completed releases, including
-retired initial placements, are reconciled by startup reporting. When a trash
-manifest is already deleted, its canonical trash name identifies the retained
-release and its existing diagnostic.
+retired initial placements, are reconciled by startup reporting. A canonical
+trash name without a readable manifest is reconciled only against an
+outstanding, cleanup-failed, or unowned release.
 
 Before accepting new provisioning or executing tools, startup reports ready and
 active manifests and unknown entries in bounded, digest-correlated pages.
