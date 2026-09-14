@@ -322,8 +322,8 @@ pub struct RunnerStateRoot {
     canonical_root: std::path::PathBuf,
     state: RunnerState,
     journal: Journal,
-    staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
     active_workspaces: ActiveWorkspaces,
+    staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerStateRoot {
@@ -467,8 +467,8 @@ impl RunnerStateRoot {
             canonical_root,
             state,
             journal,
-            staging_cleanup: std::sync::Arc::default(),
             active_workspaces,
+            staging_cleanup: std::sync::Arc::default(),
         })
     }
 
@@ -546,11 +546,11 @@ impl RunnerStateRoot {
             return Err(RunnerStateError::InvalidTransition);
         };
         if prior != correlation
-            || (if failed {
+            || if failed {
                 failure.is_none()
             } else {
                 phase != signalbox_runner_wire::ReleasePhase::ReleaseCompleted
-            })
+            }
         {
             return Err(RunnerStateError::InvalidTransition);
         }
@@ -563,10 +563,10 @@ impl RunnerStateRoot {
         &mut self,
         correlation: &signalbox_runner_wire::ReleaseCorrelation,
     ) -> Result<(), RunnerStateError> {
-        if self
+        if !self
             .journal
             .release()
-            .is_none_or(|(prior, _, _)| prior != correlation)
+            .is_some_and(|(retained, _, _)| retained == correlation)
         {
             return Err(RunnerStateError::InvalidTransition);
         }
