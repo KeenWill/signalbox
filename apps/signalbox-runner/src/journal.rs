@@ -417,7 +417,7 @@ impl Journal {
         let Some(JournalEntry::Provision {
             request,
             canonical_clone_url_digest,
-            ready: None,
+            ready: _,
             failure: prior,
         }) = self.entries.first()
         else {
