@@ -238,7 +238,7 @@ async fn restart_rejects_a_changed_repository_mapping_before_cloning() {
 
 #[tokio::test]
 async fn restart_rejects_a_changed_repository_mapping_after_ready() {
-    use signalbox_runner_wire::{FailureCategory, clone_url_digest};
+    use signalbox_runner_wire::clone_url_digest;
     let directory = tempfile::tempdir().expect("temporary parent");
     let original_url = "https://github.com/KeenWill/signalbox.git";
     let changed_url = "https://github.com/KeenWill/changed-repository.git";
@@ -257,40 +257,40 @@ async fn restart_rejects_a_changed_repository_mapping_after_ready() {
         .expect("journal before workspace preparation");
     let ready = prepared_repository(&state, request.clone()).await;
     state
-        .record_workspace_ready(ready)
+        .record_workspace_ready(ready.clone())
         .expect("retained ready receipt");
     drop(state);
 
     let root = directory.path().join("state");
     let mut state = RunnerStateRoot::open(&root).expect("restart with retained ready receipt");
-    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    assert!(matches!(
+        state.authenticate_active_workspaces(&changed),
+        Err(crate::WorkspaceProvisionError::ManifestConflict)
+    ));
+    let (stream, _hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt).with_configuration(changed);
-    let mut hub = BufReader::new(hub);
-    runner
-        .ensure_workspace(&mut state)
-        .expect("replace the stale ready receipt with a conflict");
-    runner
-        .send_retained_workspace(&state)
-        .await
-        .expect("send retained mapping conflict");
-    let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("failure frame")
-    else {
-        panic!("changed mapping is a terminal operation failure")
-    };
-    assert_eq!(
-        failed.failure.correlation,
-        OperationCorrelation::Provision(request.correlation)
-    );
-    assert_eq!(failed.failure.category, FailureCategory::WorkspaceConflict);
-    assert_eq!(failed.failure.detail.code.as_str(), "manifest-conflict");
-    assert!(
-        state
-            .retained_provision()
-            .is_some_and(|(_, ready)| ready.is_none())
-    );
+    assert!(matches!(
+        runner.ensure_workspace(&mut state),
+        Err(RunnerConnectionError::Workspace(
+            crate::WorkspaceProvisionError::ManifestConflict
+        ))
+    ));
+    assert_eq!(state.retained_provision(), Some((&request, Some(&ready))));
+    assert!(state.retained_provision_failure().is_none());
     drop(state);
-    let reopened = RunnerStateRoot::open(&root).expect("restart retains the conflict");
-    assert_eq!(reopened.retained_provision_failure(), Some(&failed.failure));
+    let reopened = RunnerStateRoot::open(&root).expect("restart preserves the ready receipt");
+    assert_eq!(
+        reopened.retained_provision(),
+        Some((&request, Some(&ready)))
+    );
+    assert_eq!(
+        reopened.retained_provision_clone_url_digest(),
+        Some(&clone_url_digest(original_url))
+    );
+    assert!(reopened.retained_provision_failure().is_none());
+    reopened
+        .authenticate_active_workspaces(&original)
+        .expect("restoring the original mapping authenticates the retained receipt");
 }
 
 #[tokio::test]

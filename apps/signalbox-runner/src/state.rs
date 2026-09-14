@@ -545,12 +545,24 @@ impl RunnerStateRoot {
             .acknowledge_release(&self.directory, correlation)
     }
 
-    /// Authenticates acknowledged workspace identities before reconnecting after startup.
+    /// Authenticates retained ready mappings and acknowledged identities before reconnecting.
     pub fn authenticate_active_workspaces(
         &self,
         configuration: &crate::RunnerConfiguration,
     ) -> Result<(), crate::WorkspaceProvisionError> {
         use crate::WorkspaceProvisionError;
+        if let Some((request, Some(_))) = self.journal.provision() {
+            let checked = crate::workspace::provision::CheckedProvision::check(
+                configuration,
+                request.clone(),
+            )
+            .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
+            if Some(checked.canonical_clone_url_digest())
+                != self.journal.provision_clone_url_digest()
+            {
+                return Err(WorkspaceProvisionError::ManifestConflict);
+            }
+        }
         let store = self
             .workspace_store()
             .map_err(|_| WorkspaceProvisionError::Storage)?;
