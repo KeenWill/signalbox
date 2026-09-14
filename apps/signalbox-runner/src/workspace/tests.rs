@@ -523,6 +523,49 @@ async fn startup_inventory_preserves_releasing_manifest_before_and_after_rename(
 }
 
 #[tokio::test]
+async fn startup_inventory_collapses_duplicate_releasing_manifests() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let placement = File::open(placement_path).expect("placement descriptor");
+    let mut releasing = read_manifest(&placement).expect("ready manifest");
+    releasing.lifecycle = ManifestLifecycle::Releasing;
+    write_manifest(&placement, &releasing).expect("in-place releasing manifest");
+
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    let duplicate = trash.join(prepared.manifest.manifest_id.to_string());
+    fs::create_dir(&duplicate).expect("duplicate trash placement");
+    fs::set_permissions(&duplicate, fs::Permissions::from_mode(DIRECTORY_MODE))
+        .expect("private duplicate placement");
+    let duplicate = File::open(duplicate).expect("duplicate placement descriptor");
+    write_manifest(&duplicate, &releasing).expect("duplicate releasing manifest");
+
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("duplicate inventory");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].kind,
+        signalbox_runner_wire::LeakFactKind::Unreconciled
+    );
+    assert_eq!(facts[0].locator, prepared.manifest.relative_path);
+    assert_eq!(facts[0].entry_digest, prepared.manifest_digest);
+    leaks::pages(PositiveU64::try_new(1).expect("registration"), &facts)
+        .expect("duplicate observations form a canonical report");
+}
+
+#[tokio::test]
 async fn release_requires_the_provisioning_runner_and_exact_manifest() {
     let (_parent, mut state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
