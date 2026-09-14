@@ -1,8 +1,9 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { AttentionSessions } from './AttentionSurface'
+import { type CommandContext, invokeCommand } from './commands'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import { enumLabel } from './labels'
 import {
@@ -20,6 +21,7 @@ import {
   renameNeedsReadback,
   renameSession,
   retainedRename,
+  suggestSessionTitle,
 } from './session-metadata'
 import { HttpSessionTimelineSource } from './session-timeline/model'
 import { actions, useAppDispatch, useAppSelector } from './state'
@@ -101,16 +103,45 @@ const SessionTitle = ({
 const SessionMetadata = ({
   summary,
   canRename,
+  titleGenerationAvailable,
   catalogUpdatedAt,
   onRename,
+  selected,
+  commandContext,
+  onSuggestCommand,
 }: {
   summary: SessionSummary
   canRename: boolean
+  titleGenerationAvailable: boolean
   catalogUpdatedAt: number
   onRename: () => void
+  selected: boolean
+  commandContext: CommandContext
+  onSuggestCommand: (command: { run: () => void } | null) => void
 }) => {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
+  const [suggesting, setSuggesting] = useState(false)
+  const suggestionKey = ['production', 'session-title-suggestion', summary.session_id]
+  const suggestionPending = useIsMutating({ mutationKey: suggestionKey, exact: true }) > 0
+  const suggestionMutation = useMutation({
+    mutationKey: suggestionKey,
+    mutationFn: suggestSessionTitle,
+    retry: false,
+  })
+  const [suggestion, setSuggestion] = useState<string | null>(null)
+  const suggestionRequest = useRef<{ dismissed: boolean } | null>(null)
+  const suggestButton = useRef<HTMLButtonElement>(null)
+  const acceptButton = useRef<HTMLButtonElement>(null)
+  const cancelButton = useRef<HTMLButtonElement>(null)
+  const returnToSuggestion = useRef(false)
+  useEffect(
+    () => () => {
+      if (suggestionRequest.current) suggestionRequest.current.dismissed = true
+      suggestionRequest.current = null
+    },
+    [],
+  )
   const [title, setTitle] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -120,11 +151,17 @@ const SessionMetadata = ({
   const returnRenameFocus = useRef(false)
   useEffect(() => {
     if (editing) titleInput.current?.focus()
-    else if (returnRenameFocus.current) {
+    else if (suggestion) acceptButton.current?.focus()
+    else if (suggesting) cancelButton.current?.focus()
+    else if (returnRenameFocus.current && error === null) {
       returnRenameFocus.current = false
-      renameButton.current?.focus()
+      const target =
+        returnToSuggestion.current && suggestionRequest.current === null
+          ? suggestButton
+          : renameButton
+      target.current?.focus()
     }
-  }, [editing])
+  }, [editing, suggestion, suggesting, error])
   useEffect(() => {
     if (catalogUpdatedAt && editing && intent.current && !retainedRename(summary.session_id)) {
       intent.current = null
@@ -141,8 +178,61 @@ const SessionMetadata = ({
     : undefined
   const close = () => {
     returnRenameFocus.current = true
+    if (suggestionRequest.current) suggestionRequest.current.dismissed = true
+    setSuggesting(false)
+    setSuggestion(null)
+    setError(null)
     setEditing(false)
   }
+  const suggest = async () => {
+    if (queryClient.isMutating({ mutationKey: suggestionKey, exact: true }) > 0) return
+    const request = { dismissed: false }
+    suggestionRequest.current = request
+    returnToSuggestion.current = true
+    setError(null)
+    setSuggesting(true)
+    try {
+      const result = await suggestionMutation.mutateAsync(summary.session_id)
+      if (suggestionRequest.current !== request || request.dismissed) return
+      setTitle(result.title)
+      setSuggestion(result.title)
+    } catch (failure) {
+      if (request.dismissed) return
+      setError(
+        failure instanceof Error ? failure.message : 'A name could not be suggested. Try again.',
+      )
+    } finally {
+      if (suggestionRequest.current === request) {
+        suggestionRequest.current = null
+        setSuggesting(false)
+      }
+    }
+  }
+  const beginSuggestion = () => {
+    onRename()
+    intent.current = retainedRename(summary.session_id)
+    if (intent.current) {
+      returnToSuggestion.current = true
+      setTitle(intent.current.title)
+      setError(
+        renameNeedsReadback(summary.session_id)
+          ? 'Rename acknowledged. Waiting for the current title. Save retries the same request.'
+          : 'A previous rename is unconfirmed. Save retries that title.',
+      )
+      setEditing(true)
+    } else void suggest()
+  }
+  const canSuggest =
+    titleGenerationAvailable && !editing && !suggestionPending && suggestion === null && canRename
+  const suggestionAction = useRef(beginSuggestion)
+  useEffect(() => {
+    suggestionAction.current = beginSuggestion
+  })
+  useEffect(() => {
+    if (!selected) return
+    onSuggestCommand(canSuggest ? { run: () => suggestionAction.current() } : null)
+    return () => onSuggestCommand(null)
+  }, [selected, canSuggest, onSuggestCommand])
   const save = async (event: FormEvent) => {
     event.preventDefault()
     if (saving || title.length === 0) return
@@ -181,6 +271,7 @@ const SessionMetadata = ({
         aria-label={`Rename session ${summary.session_id}`}
         onClick={() => {
           onRename()
+          returnToSuggestion.current = false
           intent.current = retainedRename(summary.session_id)
           setTitle(
             intent.current?.title ?? (summary.title_truncated ? '' : (summary.title_summary ?? '')),
@@ -194,11 +285,25 @@ const SessionMetadata = ({
           )
           setEditing(true)
         }}
-        disabled={editing || !canRename}
+        disabled={editing || suggesting || suggestion !== null || !canRename}
       >
         Rename
       </button>
-      {editing && (
+      <button
+        type="button"
+        ref={suggestButton}
+        aria-label={`Suggest a name for session ${summary.session_id}`}
+        onClick={() =>
+          invokeCommand('session.title.suggest', {
+            ...commandContext,
+            suggestSessionTitle: canSuggest ? beginSuggestion : undefined,
+          })
+        }
+        disabled={!canSuggest}
+      >
+        Suggest a name
+      </button>
+      {(editing || suggesting || suggestion !== null || error !== null) && (
         <form
           className="catalog-rename"
           onSubmit={save}
@@ -209,21 +314,40 @@ const SessionMetadata = ({
             if (!saving) close()
           }}
         >
-          <label>
-            Session title
-            <input
-              ref={titleInput}
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              disabled={saving}
-              readOnly={intent.current !== null}
-              required
-            />
-          </label>
-          <button type="submit" disabled={saving || title.length === 0}>
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-          <button type="button" disabled={saving} onClick={close}>
+          {suggesting ? (
+            <p role="status">Suggesting a name…</p>
+          ) : suggestion && !editing ? (
+            <p role="status" className="catalog-suggested-title">
+              {suggestion}
+            </p>
+          ) : editing ? (
+            <label>
+              Session title
+              <input
+                ref={titleInput}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                disabled={saving}
+                readOnly={intent.current !== null}
+                required
+              />
+            </label>
+          ) : null}
+          {(editing || suggestion !== null) && (
+            <button ref={acceptButton} type="submit" disabled={saving || title.length === 0}>
+              {saving ? 'Saving…' : suggestion && !editing ? 'Accept' : 'Save'}
+            </button>
+          )}
+          {suggestion && !editing && (
+            <button
+              type="button"
+              disabled={saving || intent.current !== null}
+              onClick={() => setEditing(true)}
+            >
+              Edit
+            </button>
+          )}
+          <button ref={cancelButton} type="button" disabled={saving} onClick={close}>
             Cancel
           </button>
           {error && <p role="alert">{error}</p>}
@@ -234,6 +358,8 @@ const SessionMetadata = ({
 }
 
 export function SessionCatalogSurface({
+  commandContext,
+  onSuggestCommand,
   returnSessionId,
   onReturnFocusConsumed,
   needsAttention,
@@ -248,6 +374,8 @@ export function SessionCatalogSurface({
   onStateChange,
   onTimelineIds,
 }: {
+  commandContext: CommandContext
+  onSuggestCommand: (command: { run: () => void } | null) => void
   returnSessionId?: string
   onReturnFocusConsumed: () => void
   needsAttention: boolean
@@ -267,6 +395,7 @@ export function SessionCatalogSurface({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
+    refetchOnWindowFocus: 'always',
   })
   const searchAvailable = bootstrap.data?.capabilities.bounded_lexical_search === true
 
@@ -648,6 +777,9 @@ export function SessionCatalogSurface({
                       <ArrowRight aria-hidden="true" />
                     </button>
                     <SessionMetadata
+                      commandContext={commandContext}
+                      onSuggestCommand={onSuggestCommand}
+                      selected={keyboardSelection === summary.session_id}
                       summary={summary}
                       onRename={() => {
                         renameSelection.current =
@@ -656,6 +788,9 @@ export function SessionCatalogSurface({
                       }}
                       catalogUpdatedAt={sessions.dataUpdatedAt}
                       canRename={bootstrap.data?.capabilities.same_origin_json_mutations === true}
+                      titleGenerationAvailable={
+                        bootstrap.data?.capabilities.session_title_generation === true
+                      }
                     />
                   </li>
                 ))}

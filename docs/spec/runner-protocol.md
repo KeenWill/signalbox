@@ -168,9 +168,10 @@ until acknowledged; the runner keeps serving.
 
 ## Workspace release and leak reporting
 
-Live release outcomes require the caller's current connection epoch in the
-storage transaction, including equal replay. Authenticated Resume reconciles
-retained completion or failure before opening the next epoch.
+Live provisioning failures and release outcomes require the caller's current
+connection epoch in the storage transaction, including equal replay.
+Authenticated Resume reconciles retained completion or failure before opening
+the next epoch.
 
 The daemon issues cleanup for a retired manifest only to its connected owner,
 after its leases and results settle. Plain-directory placements have no manifest
@@ -200,19 +201,20 @@ outstanding, cleanup-failed, or unowned release.
 Before accepting new provisioning or executing tools, startup reports ready and
 active manifests and unknown entries in bounded, digest-correlated pages.
 Unknown entries include direct root children other than the enrollment, journal
-and active-workspace documents and the managed `sessions/` and `trash/` trees.
-Scanning waits for canceled staging cleanup to finish; successfully removed
-unpublished workspaces produce no leak fact. Provisioning waits until every
-startup page is acknowledged. The daemon reconciles exact retained ready facts,
-including the reconstructed ready manifest of a current initial placement and
-the retained source of an abandoned initial placement. An abandoned workspace
-whose owner was lost keeps its retired-present diagnostic. A live page's
-transaction validates the physical connection epoch before storage or equal
-replay. Authenticated Resume reconciles its retained page before opening an
-epoch. Unresolved diagnostics are stored before acknowledging each page. The
-final page verifies strict ordering and the complete digest over all retained
-facts. Reports remain visible without a resumable session and authorize no
-deletion.
+and active-workspace documents and the managed `sessions/` and `trash/` trees. A
+complete report removes report-derived diagnostics absent from its retained
+facts; independent loss and release outcomes remain retained. Scanning waits for
+canceled staging cleanup to finish; successfully removed unpublished workspaces
+produce no leak fact. Provisioning waits until every startup page is
+acknowledged. The daemon reconciles exact retained ready facts, including the
+reconstructed ready manifest of a current initial placement and the retained
+source of an abandoned initial placement. An abandoned workspace whose owner was
+lost keeps its retired-present diagnostic. A live page's transaction validates
+the physical connection epoch before storage or equal replay. Authenticated
+Resume reconciles its retained page before opening an epoch. Unresolved
+diagnostics are stored before acknowledging each page. The final page verifies
+strict ordering and the complete digest over all retained facts. Reports remain
+visible without a resumable session and authorize no deletion.
 
 ## Boundary contracts
 
