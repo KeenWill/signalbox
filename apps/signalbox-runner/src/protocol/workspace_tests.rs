@@ -244,6 +244,63 @@ async fn restart_rejects_a_changed_repository_mapping_before_cloning() {
 }
 
 #[tokio::test]
+async fn restart_rejects_a_changed_repository_mapping_after_ready() {
+    use signalbox_runner_wire::{FailureCategory, clone_url_digest};
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let original_url = "https://github.com/KeenWill/signalbox.git";
+    let changed_url = "https://github.com/KeenWill/changed-repository.git";
+    let original = configuration();
+    let changed = crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", "")
+            .replace(original_url, changed_url),
+    )
+    .expect("changed anonymous mapping");
+    let mut state = enrolled_with_configuration(&directory, &original);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let request = provision(&receipt);
+    state
+        .record_provision(request.clone(), clone_url_digest(original_url))
+        .expect("journal before workspace preparation");
+    let ready = prepared_repository(&state, request.clone()).await;
+    state
+        .record_workspace_ready(ready)
+        .expect("retained ready receipt");
+    drop(state);
+
+    let root = directory.path().join("state");
+    let mut state = RunnerStateRoot::open(&root).expect("restart with retained ready receipt");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt).with_configuration(changed);
+    let mut hub = BufReader::new(hub);
+    runner
+        .ensure_workspace(&mut state)
+        .expect("replace the stale ready receipt with a conflict");
+    runner
+        .send_retained_workspace(&state)
+        .await
+        .expect("send retained mapping conflict");
+    let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("failure frame")
+    else {
+        panic!("changed mapping is a terminal operation failure")
+    };
+    assert_eq!(
+        failed.failure.correlation,
+        OperationCorrelation::Provision(request.correlation)
+    );
+    assert_eq!(failed.failure.category, FailureCategory::WorkspaceConflict);
+    assert_eq!(failed.failure.detail.code.as_str(), "manifest-conflict");
+    assert!(
+        state
+            .retained_provision()
+            .is_some_and(|(_, ready)| ready.is_none())
+    );
+    drop(state);
+    let reopened = RunnerStateRoot::open(&root).expect("restart retains the conflict");
+    assert_eq!(reopened.retained_provision_failure(), Some(&failed.failure));
+}
+
+#[tokio::test]
 async fn anonymous_clone_failure_is_retained_while_the_runner_keeps_serving() {
     failed_anonymous_clone(false).await;
 }
