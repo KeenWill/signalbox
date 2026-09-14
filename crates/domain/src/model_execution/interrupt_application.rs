@@ -337,9 +337,6 @@ pub(crate) fn apply_interrupt_to_retryable_runner_tool_recovery_wait(
     else {
         return Err(ModelCallClosureError::AttemptStateMismatch);
     };
-    let crate::ToolBatchPhase::Executing { turn_attempt } = batch.phase() else {
-        return Err(ModelCallClosureError::AttemptStateMismatch);
-    };
     let stopped_attempt =
         batch
             .requests()
@@ -357,17 +354,32 @@ pub(crate) fn apply_interrupt_to_retryable_runner_tool_recovery_wait(
     let Some(stopped_attempt) = stopped_attempt else {
         return Err(ModelCallClosureError::AttemptStateMismatch);
     };
+    let closed_retry = result_projection.entries().iter().any(|entry| {
+        entry.payload()
+            == &SemanticTranscriptEntryPayload::ToolClosed {
+                request: stopped_attempt.request(),
+            }
+    });
+    let turn_attempt = match batch.phase() {
+        crate::ToolBatchPhase::Executing { turn_attempt } => turn_attempt,
+        crate::ToolBatchPhase::AwaitingRecovery { attempt }
+            if attempt == *interrupted_tool_attempt && closed_retry =>
+        {
+            stopped_attempt.issuing_attempt()
+        }
+        _ => return Err(ModelCallClosureError::AttemptStateMismatch),
+    };
     if batch.session() != active_turn.session()
         || batch.turn() != active_turn.turn()
         || stopped_attempt.session() != active_turn.session()
         || stopped_attempt.turn() != active_turn.turn()
         || stopped_attempt.issuing_attempt() != turn_attempt
-        || !matches!(
+        || !(matches!(
             stopped_attempt.end(),
             crate::ToolAttemptEnd::KnownFailed { error }
                 if error.kind() == crate::ToolExecutionErrorKind::CrashLost
                     && error.detail().is_none()
-        )
+        ) || (closed_retry && stopped_attempt.end() == &crate::ToolAttemptEnd::Ambiguous))
         || interrupt.session() != active_turn.session()
         || proof.predecessor() != active_turn.turn()
         || interrupt.successor() == active_turn.turn()
@@ -385,14 +397,14 @@ pub(crate) fn apply_interrupt_to_retryable_runner_tool_recovery_wait(
         || result_projection.producing_call() != batch.producing_call()
         || result_projection.source_frontier() != source_snapshot.frontier().snapshot()
         || result_projection.snapshot().frontier().owning_session() != active_turn.session()
-        || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
         || !source_snapshot.is_semantic_prefix_of(result_projection.snapshot())
-        || !result_projection.entries().iter().any(|entry| {
-            entry.payload()
-                == &SemanticTranscriptEntryPayload::ToolExecutionResult {
-                    attempt: *interrupted_tool_attempt,
-                }
-        })
+        || !(closed_retry
+            || result_projection.entries().iter().any(|entry| {
+                entry.payload()
+                    == &SemanticTranscriptEntryPayload::ToolExecutionResult {
+                        attempt: *interrupted_tool_attempt,
+                    }
+            }))
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
@@ -437,7 +449,9 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
             applied_interrupt.is_none()
                 && matches!(
                     disposition,
-                    UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost
+                    UnstoppedAttemptDisposition::Ambiguous
+                        | UnstoppedAttemptDisposition::Lost
+                        | UnstoppedAttemptDisposition::YieldedToDurableWait
                 )
         }
         AttemptEnd::AfterCancellation { cause, disposition } => {
@@ -520,7 +534,9 @@ pub(crate) fn apply_automatic_tool_reconciliation(
             applied_interrupt.is_none()
                 && matches!(
                     disposition,
-                    UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost
+                    UnstoppedAttemptDisposition::Ambiguous
+                        | UnstoppedAttemptDisposition::Lost
+                        | UnstoppedAttemptDisposition::YieldedToDurableWait
                 )
         }
         AttemptEnd::AfterCancellation { cause, disposition } => {

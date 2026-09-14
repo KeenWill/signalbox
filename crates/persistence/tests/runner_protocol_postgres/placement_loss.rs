@@ -256,7 +256,7 @@ async fn placement_loss_retires_prepared_judge_before_resuming_batch() -> Result
     Ok(())
 }
 
-fn model_repository(
+pub(super) fn model_repository(
     pool: &PgPool,
 ) -> signalbox_persistence::model_execution::PostgresModelCallRepository {
     let targets = signalbox_domain::ModelTargetCatalog::try_from_definitions([
@@ -969,3 +969,18 @@ async fn placement_loss_uses_current_registration_for_an_epoch_without_retained_
 }
 #[path = "staged_replacement.rs"]
 mod staged_replacement;
+
+pub(crate) async fn completed_pinned_turn(
+    pool: &PgPool,
+) -> Result<
+    (
+        SessionId,
+        TurnId,
+        RunnerProtocolStore,
+        signalbox_persistence::runner_protocol::RunnerConnectionSnapshot,
+    ),
+    Box<dyn Error>,
+> {
+    let (batch, _) = staged_replacement::completed_pinned_batch(pool).await?;
+    Ok((batch.session, batch.turn, batch.store, batch.connection))
+}

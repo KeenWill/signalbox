@@ -566,7 +566,7 @@ pub(crate) const SUBMIT_INPUT_RUNNER_RECOVERY_ATTEMPT: &str =
          ON placement_head.session_id = lifecycle.session_id
        JOIN runner_session_placement_record AS placement
          ON placement.session_id = placement_head.session_id
-        AND placement.event_ordinal = placement_head.event_ordinal
+        AND placement.event_ordinal = runner_recovery_loss_ordinal(lifecycle.session_id, lifecycle.turn_id, placement_head.event_ordinal)
        JOIN tool_attempt
          ON tool_attempt.attempt_id = lifecycle.runner_recovery_tool_attempt_id
         AND tool_attempt.turn_id = lifecycle.turn_id
@@ -1174,3 +1174,13 @@ pub(crate) const RUNNER_REPLACEMENT_TERMINAL_BATCH: &str = "SELECT stage.command
           )) FOR UPDATE OF stage";
 
 pub(crate) const MODEL_FRONTIER_WRITE_IDENTITY: &str = "SELECT pg_advisory_xact_lock($1)";
+
+// Runner takeover follows the session scheduler and retains the exact batch and attempt.
+pub(crate) const RUNNER_TAKEOVER_WAIT: &str = "SELECT * FROM turn_lifecycle
+    WHERE session_id = $1 AND state_kind = 'active'
+      AND active_phase_kind = 'awaiting_runner_recovery'
+      AND NOT delegation_runtime_terminal FOR UPDATE";
+pub(crate) const RUNNER_TAKEOVER_BATCH: &str = "SELECT producing_model_call_id
+    FROM tool_round WHERE producing_model_call_id = $1 FOR UPDATE";
+pub(crate) const RUNNER_TAKEOVER_ATTEMPT: &str = "SELECT * FROM tool_attempt
+    WHERE attempt_id = $1 FOR UPDATE";

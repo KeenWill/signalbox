@@ -622,8 +622,6 @@ impl PostgresAutomaticReconciliationRepository {
                         )
                     })
                     .collect();
-                let identities = AmbiguousModelCallTurnIdentities::new(terminal_frontier)
-                    .with_pending_steering_reclassifications(pending);
                 let batch = load_recovery_batch_by_attempt(
                     &mut transaction,
                     claimed.session(),
@@ -665,6 +663,16 @@ impl PostgresAutomaticReconciliationRepository {
                             "tool recovery result projection",
                         )
                     })?;
+                let projection = crate::tool_loop::append_terminal_takeover_boundaries(
+                    &mut transaction,
+                    projection,
+                )
+                .await
+                .map_err(AutomaticReconciliationRepositoryError::Tool)?;
+                let identities = AmbiguousModelCallTurnIdentities::new(
+                    projection.snapshot().frontier().snapshot(),
+                )
+                .with_pending_steering_reclassifications(pending);
                 let reconciliation = match delegated {
                     Some(recovery) => recovery.active.apply_automatic_tool_reconciliation(
                         wait,

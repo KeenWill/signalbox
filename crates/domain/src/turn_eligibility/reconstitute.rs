@@ -1656,6 +1656,7 @@ fn reconstitute_inner(
                                 &[
                                     UnstoppedAttemptDisposition::Ambiguous,
                                     UnstoppedAttemptDisposition::Lost,
+                                    UnstoppedAttemptDisposition::YieldedToDurableWait,
                                 ],
                                 &[
                                     CancellationStopDisposition::Ambiguous,

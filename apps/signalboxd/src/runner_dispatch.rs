@@ -17,6 +17,8 @@ pub struct RunnerDispatchService {
     pub(crate) store: RunnerProtocolStore,
     permit: Arc<Semaphore>,
     admission: Arc<Mutex<()>>,
+    recovery_worker: Arc<Semaphore>,
+    tool_dispatch_gate: signalbox_application::InProcessToolDispatchGate,
     changes: watch::Sender<()>,
 }
 
@@ -27,8 +29,15 @@ impl RunnerDispatchService {
             store,
             permit: Arc::new(Semaphore::new(1)),
             admission: Arc::new(Mutex::new(())),
+            recovery_worker: Arc::new(Semaphore::new(1)),
+            tool_dispatch_gate: signalbox_application::InProcessToolDispatchGate::default(),
             changes,
         }
+    }
+
+    /// Shares retry/stop ordering with the daemon's ordinary tool and input paths.
+    pub fn tool_dispatch_gate(&self) -> signalbox_application::InProcessToolDispatchGate {
+        self.tool_dispatch_gate.clone()
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<()> {
@@ -71,6 +80,80 @@ impl RunnerDispatchService {
         .await
     }
 
+    pub(crate) fn start_recovery_retry(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: signalbox_persistence::runner_protocol::RunnerConnectionEpoch,
+    ) {
+        let Ok(worker) = Arc::clone(&self.recovery_worker).try_acquire_owned() else {
+            return;
+        };
+        let service = self.clone();
+        tokio::spawn(async move {
+            let _worker = worker;
+            let work = async {
+                let Some(source) = service
+                    .store
+                    .pending_runner_recovery_source(enrollment)
+                    .await?
+                else {
+                    return Ok(());
+                };
+                let turn = source.correlation().dispatch.turn();
+                let successor_generation =
+                    source
+                        .generation()
+                        .checked_next()
+                        .ok_or(RunnerProtocolStoreError::Domain(
+                            signalbox_domain::RunnerDomainError::GenerationExhausted,
+                        ))?;
+                let _turn_permit = service.tool_dispatch_gate.acquire(turn).await;
+                let _permit = Arc::clone(&service.permit)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        RunnerProtocolStoreError::Domain(
+                            signalbox_domain::RunnerDomainError::InvalidState,
+                        )
+                    })?;
+                let mut changes = service.subscribe();
+                let offered = {
+                    let _admission = service.lock_admission().await;
+                    service
+                        .store
+                        .offer_runner_recovery_retry(enrollment, epoch, turn)
+                        .await
+                };
+                let lease = match offered {
+                    Ok(Some(lease)) => lease,
+                    Ok(None) => return Ok(()),
+                    Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => loop {
+                        match service
+                            .store
+                            .load_lease(source.correlation().lease, successor_generation)
+                            .await
+                        {
+                            Ok(Some(lease)) => break lease,
+                            Ok(None) => return Err(error),
+                            Err(_) => {
+                                let _ = changes.changed().await;
+                            }
+                        }
+                    },
+                    Err(error) => return Err(error),
+                };
+                service.changed();
+                service.wait_for_lease(lease, changes).await.map(|_| ())
+            };
+            tokio::select! {
+                result = work => if let Err(error) = result {
+                    tracing::error!(failure = ?error, "runner recovery retry failed");
+                },
+                () = service.store.closed() => {}
+            }
+        });
+    }
+
     async fn execute_admitted(
         &self,
         authority: &ToolDispatchAuthority,
@@ -82,7 +165,7 @@ impl RunnerDispatchService {
                 .offer_tool_dispatch(authority, RunnerLeaseId::from_uuid(uuid::Uuid::now_v7()))
                 .await
         };
-        let mut lease = match offered {
+        let lease = match offered {
             Ok(None) => return Ok(RunnerDispatchOutcome::Daemon),
             Ok(Some(lease)) => lease,
             Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => loop {
@@ -101,6 +184,14 @@ impl RunnerDispatchService {
             Err(error) => return Err(error),
         };
         self.changed();
+        self.wait_for_lease(lease, changes).await
+    }
+
+    async fn wait_for_lease(
+        &self,
+        mut lease: signalbox_domain::RunnerLease,
+        mut changes: watch::Receiver<()>,
+    ) -> Result<RunnerDispatchOutcome, RunnerProtocolStoreError> {
         loop {
             if matches!(
                 lease.state(),
@@ -119,11 +210,7 @@ impl RunnerDispatchService {
             let _ = changes.changed().await;
             // The issued lease remains authority during a database outage; an
             // infrastructure error cannot be reported as executor evidence.
-            if let Ok(Some(current)) = self
-                .store
-                .load_attempt_lease(authority.correlation().attempt())
-                .await
-            {
+            if let Ok(Some(current)) = self.store.load_attempt_lease(lease.attempt()).await {
                 lease = current;
             }
         }

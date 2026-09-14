@@ -357,14 +357,16 @@ impl SessionRunnerPlacement {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
         let dispatch = validate_dispatch(self, enrollment, registration, grant, &lost.tool)?;
+        let same_placement = lost.runner == dispatch.runner
+            && lost.registration_revision == dispatch.registration_revision
+            && lost.placement_revision == dispatch.placement_revision
+            && lost.working_directory == dispatch.working_directory
+            && lost.sandbox == dispatch.sandbox
+            && lost.credential_authorization == dispatch.credential_authorization;
+        let successor_placement = lost.placement_revision < dispatch.placement_revision;
         if lost.dispatch.session() != self.session
-            || lost.runner != dispatch.runner
-            || lost.registration_revision != dispatch.registration_revision
-            || lost.placement_revision != dispatch.placement_revision
-            || lost.working_directory != dispatch.working_directory
-            || lost.sandbox != dispatch.sandbox
             || lost.effect != dispatch.effect
-            || lost.credential_authorization != dispatch.credential_authorization
+            || !(same_placement || successor_placement)
         {
             return Err(RunnerDomainError::CorrelationMismatch);
         }
@@ -394,15 +396,15 @@ impl SessionRunnerPlacement {
         Ok(RunnerLease::offer_validated(ValidatedRunnerLeaseOffer {
             lease: lost.lease,
             dispatch: attempt,
-            runner: lost.runner,
-            registration_revision: lost.registration_revision,
-            placement_revision: lost.placement_revision,
-            working_directory: lost.working_directory,
-            sandbox: lost.sandbox,
+            runner: dispatch.runner,
+            registration_revision: dispatch.registration_revision,
+            placement_revision: dispatch.placement_revision,
+            working_directory: dispatch.working_directory,
+            sandbox: dispatch.sandbox,
             arguments,
             tool: lost.tool,
             effect: lost.effect,
-            credential_authorization: lost.credential_authorization,
+            credential_authorization: dispatch.credential_authorization,
             generation: retry.generation,
         }))
     }

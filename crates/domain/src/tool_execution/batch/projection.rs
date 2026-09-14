@@ -228,6 +228,56 @@ impl ToolBatch {
         )
     }
 
+    /// Closes a takeover's pending retry while retaining its terminal physical history.
+    pub fn prepare_runner_retry_cancellation_projection(
+        &self,
+        attempt: crate::ToolAttemptId,
+        effect: crate::RunnerToolEffectClass,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: crate::ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        let stopped = self
+            .attempts
+            .values()
+            .find_map(|candidate| match candidate {
+                ReconstitutedToolAttempt::Ended(ended) if ended.attempt() == attempt => Some(ended),
+                _ => None,
+            })
+            .ok_or(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            })?;
+        let known_loss = matches!(stopped.end(), ToolAttemptEnd::KnownFailed { error }
+            if error.kind() == crate::ToolExecutionErrorKind::CrashLost && error.detail().is_none());
+        let effect_matches = matches!(
+            (effect, stopped.effect_class()),
+            (
+                crate::RunnerToolEffectClass::Pure,
+                crate::ToolEffectClass::EffectFree
+            ) | (
+                crate::RunnerToolEffectClass::Idempotent
+                    | crate::RunnerToolEffectClass::SideEffecting,
+                crate::ToolEffectClass::ExternalEffect
+            )
+        );
+        if !effect_matches
+            || !(known_loss
+                || (effect == crate::RunnerToolEffectClass::Idempotent
+                    && stopped.end() == &ToolAttemptEnd::Ambiguous))
+            || !(matches!(self.phase, ToolBatchPhase::Executing { .. })
+                || matches!(self.phase, ToolBatchPhase::AwaitingRecovery { attempt: waiting } if waiting == attempt))
+        {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
+        }
+        let mut projection_batch = self.clone();
+        projection_batch.attempts.remove(&stopped.request());
+        projection_batch.phase = ToolBatchPhase::Executing {
+            turn_attempt: stopped.issuing_attempt(),
+        };
+        projection_batch.prepare_cancellation_projection(entry_ids, result_frontier)
+    }
+
     /// Builds interrupt closure for foreground child waits, retaining delivered
     /// results by await request and closing unresolved requests with the parent turn.
     pub fn prepare_delegation_cancellation_projection(

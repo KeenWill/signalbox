@@ -897,6 +897,11 @@ impl ActiveTurnSchedulingReconstitutionInput {
         ended_attempt: TurnAttemptId,
         wait: AwaitingToolRecovery,
     ) -> Self;
+    pub const fn awaiting_tool_recovery_after_runner_yield(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: AwaitingToolRecovery,
+    ) -> Self;
     pub const fn awaiting_tool_recovery_after_restart(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,

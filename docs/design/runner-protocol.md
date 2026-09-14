@@ -2,8 +2,8 @@
 
 This design is not built; it extends
 [runner protocol and placement](../spec/runner-protocol.md) with concurrent
-enrollment and active-turn replacement, healthy-session relocation, workspaces,
-sandboxes, the egress broker, and forced Git configuration.
+enrollment, healthy-session relocation, workspaces, sandboxes, the egress
+broker, and forced Git configuration.
 
 ## Goal
 
@@ -20,11 +20,6 @@ defeat.
 ### Successor enrollment, promotion, and replacement
 
 Several runners are enrolled with one daemon at once.
-
-Pre-continuation takeover retains the pending relocation instead of appending
-the entry or advancing the frontier. Continuation or batch terminalization
-appends that entry exactly once after all batch results and before the next
-model call or terminal marker.
 
 ### Healthy-session relocation
 

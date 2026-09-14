@@ -84,6 +84,7 @@ mod recovery_commands;
 mod recovery_provisioning;
 mod runner_recovery;
 mod store_load;
+mod takeover;
 
 use fixtures::*;
 use lease::*;

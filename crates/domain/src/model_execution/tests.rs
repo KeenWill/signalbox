@@ -568,6 +568,26 @@ fn reconstitution_input_with_calls(
     )
 }
 
+#[test]
+fn unpinned_continuation_requires_a_relocation_entry() {
+    let execution = active_execution();
+    let input = reconstitution_input_with_calls(&execution, Vec::new()).with_continuation_snapshot(
+        ResolvedContextFrontierReconstitutionInput::new(
+            execution.session(),
+            // A distinct snapshot identity carries exactly the starting membership.
+            context_frontier_id(0x7a20),
+            execution.starting_snapshot.ordered_entries().collect(),
+        ),
+    );
+    assert_eq!(
+        input
+            .reconstitute()
+            .expect_err("an empty suffix cannot represent runner relocation")
+            .failure(),
+        ModelCallExecutionReconstitutionFailure::PinnedTargetMissing
+    );
+}
+
 fn correlated_observation(
     execution: &ModelCallExecution,
     observation: ModelCallTerminalObservation,

@@ -181,7 +181,7 @@ impl RunnerProtocolStore {
         Ok(lease)
     }
 
-    async fn attempt_lease_in(
+    pub(super) async fn attempt_lease_in(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         attempt: ToolAttemptId,
@@ -364,6 +364,7 @@ impl RunnerProtocolStore {
             .await
             .map_err(tool_error)?;
         append_lease_event_in(transaction, &completed).await?;
+        takeover::finish_recovery_retry_in(transaction, &completed).await?;
         Ok(completed)
     }
 }

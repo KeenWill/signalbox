@@ -541,6 +541,25 @@ impl ActiveTurnSchedulingReconstitutionInput {
         }
     }
 
+    /// Supplies a retry ambiguity whose issuing turn attempt already yielded to runner recovery.
+    pub const fn awaiting_tool_recovery_after_runner_yield(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        wait: crate::AwaitingToolRecovery,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: Some(ended_attempt),
+            state: StoredActiveTurnPhase::AwaitingToolRecovery {
+                wait,
+                attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::YieldedToDurableWait,
+                ),
+            },
+            executing_tool_batch: None,
+        }
+    }
+
     /// Supplies an evidence-bearing crash-lost ambiguous tool wait.
     pub const fn awaiting_tool_recovery_after_restart(
         owning_turn: TurnId,

@@ -53,6 +53,7 @@ pub struct ToolBatchReconstitutionInput {
     attempts: Vec<ReconstitutedToolAttempt>,
     retired_attempts: Vec<ToolAttemptId>,
     runner_authorized_attempts: Vec<ToolAttemptId>,
+    runner_recovery_predecessors: Vec<TurnAttemptId>,
     phase: ToolBatchPhaseReconstitutionInput,
 }
 
@@ -79,6 +80,7 @@ impl ToolBatchReconstitutionInput {
             attempts,
             retired_attempts: Vec::new(),
             runner_authorized_attempts: Vec::new(),
+            runner_recovery_predecessors: Vec::new(),
             phase,
         }
     }
@@ -95,6 +97,14 @@ impl ToolBatchReconstitutionInput {
         runner_authorized_attempts: Vec<ToolAttemptId>,
     ) -> Self {
         self.runner_authorized_attempts = runner_authorized_attempts;
+        self
+    }
+
+    /// Supplies the yielded issuing attempt retained by a checked runner takeover.
+    /// Its attempts form a proposal-order prefix; later work belongs to the
+    /// current turn attempt.
+    pub fn with_runner_recovery_predecessor(mut self, predecessor: TurnAttemptId) -> Self {
+        self.runner_recovery_predecessors.push(predecessor);
         self
     }
 
@@ -253,7 +263,7 @@ fn reconstitute_batch(
     });
     let expected_issuing_attempt = match input.phase {
         ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
-            if !has_child_wait_attempt =>
+            if !has_child_wait_attempt && input.runner_recovery_predecessors.is_empty() =>
         {
             Some(turn_attempt)
         }
@@ -305,7 +315,12 @@ fn reconstitute_batch(
         if is_live {
             live_attempt_count += 1;
         }
-        if expected_issuing_attempt.is_some_and(|expected| issuing_attempt != expected) {
+        if expected_issuing_attempt.is_some_and(|expected| issuing_attempt != expected)
+            && (is_live
+                || !input
+                    .runner_recovery_predecessors
+                    .contains(&issuing_attempt))
+        {
             return Err(fail(
                 input,
                 ToolBatchReconstitutionFailure::AttemptAuthorizationMismatch,
@@ -418,86 +433,108 @@ fn reconstitute_batch(
             ReconstitutedToolAttempt::Current(_) => None,
         })
         .collect::<Vec<_>>();
-    let phase =
-        match input.phase {
-            ToolBatchPhaseReconstitutionInput::AwaitingApproval { request }
-                if earliest_undecided == Some(request) && attempts.is_empty() =>
-            {
-                ToolBatchPhase::AwaitingApproval { request }
-            }
-            ToolBatchPhaseReconstitutionInput::AwaitingApproval { .. } => {
-                return Err(fail(
-                    input,
-                    ToolBatchReconstitutionFailure::ApprovalPhaseMismatch,
-                ));
-            }
-            ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
-                if earliest_undecided.is_none() && ambiguous_attempts.is_empty() =>
-            {
-                let child_wait_position = child_waits.last().and_then(|(request, _, _)| {
-                    requests
-                        .iter()
-                        .position(|candidate| candidate.id() == *request)
-                });
-                if attempts.iter().any(|(request, attempt)| {
-                    let (_, _, _, _, issuing_attempt, live) = attempt_facts(attempt);
-                    let request_position = requests
-                        .iter()
-                        .position(|candidate| candidate.id() == *request);
-                    live && issuing_attempt != turn_attempt
+    let phase = match input.phase {
+        ToolBatchPhaseReconstitutionInput::AwaitingApproval { request }
+            if earliest_undecided == Some(request) && attempts.is_empty() =>
+        {
+            ToolBatchPhase::AwaitingApproval { request }
+        }
+        ToolBatchPhaseReconstitutionInput::AwaitingApproval { .. } => {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::ApprovalPhaseMismatch,
+            ));
+        }
+        ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
+            if earliest_undecided.is_none() && ambiguous_attempts.is_empty() =>
+        {
+            let child_wait_position = child_waits.last().and_then(|(request, _, _)| {
+                requests
+                    .iter()
+                    .position(|candidate| candidate.id() == *request)
+            });
+            let mut successor_seen = false;
+            let mut recovery_predecessors_seen = BTreeSet::new();
+            for request in &requests {
+                let Some(attempt) = attempts.get(&request.id()) else {
+                    continue;
+                };
+                let (_, _, _, _, issuing_attempt, live) = attempt_facts(attempt);
+                let request_position = requests
+                    .iter()
+                    .position(|candidate| candidate.id() == request.id());
+                let retained_recovery = input
+                    .runner_recovery_predecessors
+                    .contains(&issuing_attempt)
+                    && issuing_attempt != turn_attempt
+                    && !successor_seen
+                    && !live;
+                if retained_recovery {
+                    recovery_predecessors_seen.insert(issuing_attempt);
+                }
+                successor_seen |= issuing_attempt == turn_attempt;
+                if !retained_recovery
+                    && (live && issuing_attempt != turn_attempt
                         || child_wait_position.is_none() && issuing_attempt != turn_attempt
                         || child_wait_position.zip(request_position).is_some_and(
                             |(wait, request)| request > wait && issuing_attempt != turn_attempt,
-                        )
-                }) {
+                        ))
+                {
                     return Err(fail(
                         input,
                         ToolBatchReconstitutionFailure::ExecutionPhaseMismatch,
                     ));
                 }
-                ToolBatchPhase::Executing { turn_attempt }
             }
-            ToolBatchPhaseReconstitutionInput::Executing { .. } => {
+            if recovery_predecessors_seen.len() != input.runner_recovery_predecessors.len() {
                 return Err(fail(
                     input,
                     ToolBatchReconstitutionFailure::ExecutionPhaseMismatch,
                 ));
             }
-            ToolBatchPhaseReconstitutionInput::AwaitingRecovery { attempt }
-                if earliest_undecided.is_none()
-                    && live_attempt_count == 0
-                    && ambiguous_attempts == [attempt] =>
-            {
-                ToolBatchPhase::AwaitingRecovery { attempt }
-            }
-            ToolBatchPhaseReconstitutionInput::AwaitingRecovery { .. } => {
-                return Err(fail(
-                    input,
-                    ToolBatchReconstitutionFailure::RecoveryPhaseMismatch,
-                ));
-            }
-            ToolBatchPhaseReconstitutionInput::AwaitingChild {
+            ToolBatchPhase::Executing { turn_attempt }
+        }
+        ToolBatchPhaseReconstitutionInput::Executing { .. } => {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::ExecutionPhaseMismatch,
+            ));
+        }
+        ToolBatchPhaseReconstitutionInput::AwaitingRecovery { attempt }
+            if earliest_undecided.is_none()
+                && live_attempt_count == 0
+                && ambiguous_attempts == [attempt] =>
+        {
+            ToolBatchPhase::AwaitingRecovery { attempt }
+        }
+        ToolBatchPhaseReconstitutionInput::AwaitingRecovery { .. } => {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::RecoveryPhaseMismatch,
+            ));
+        }
+        ToolBatchPhaseReconstitutionInput::AwaitingChild {
+            request,
+            spawning_request,
+            child,
+        } if earliest_undecided.is_none()
+            && live_attempt_count == 0
+            && ambiguous_attempts.is_empty()
+            && child_waits.last() == Some(&(request, spawning_request, child)) =>
+        {
+            ToolBatchPhase::AwaitingChild {
                 request,
                 spawning_request,
                 child,
-            } if earliest_undecided.is_none()
-                && live_attempt_count == 0
-                && ambiguous_attempts.is_empty()
-                && child_waits.last() == Some(&(request, spawning_request, child)) =>
-            {
-                ToolBatchPhase::AwaitingChild {
-                    request,
-                    spawning_request,
-                    child,
-                }
             }
-            ToolBatchPhaseReconstitutionInput::AwaitingChild { .. } => {
-                return Err(fail(
-                    input,
-                    ToolBatchReconstitutionFailure::ChildWaitPhaseMismatch,
-                ));
-            }
-        };
+        }
+        ToolBatchPhaseReconstitutionInput::AwaitingChild { .. } => {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::ChildWaitPhaseMismatch,
+            ));
+        }
+    };
     let runner_issuance = attempt_ids
         .iter()
         .chain(&retired_attempts)

@@ -1380,6 +1380,74 @@ fn unclaimed_side_effecting_loss_is_releasable() {
 }
 
 #[test]
+fn proof_backed_retry_uses_the_successor_placement_and_retains_the_attempt() {
+    for name in ["inspect", "sync", "deploy"] {
+        let (_, placement, grant, batch, lease) = offered_from_batch(name);
+        let predecessor = lease.correlation();
+        let proof = no_execution_proof(&lease);
+        let loss = lease
+            .lose_unclaimed(&proof)
+            .expect("the offer never executed");
+        let (_, authorization) = loss
+            .retry()
+            .expect("proof permits retry")
+            .prepare_unclaimed_attempt(batch)
+            .expect("the owning batch reauthorizes")
+            .into_parts();
+        let successor = registration_for(runner_id(REPLACEMENT_RUNNER));
+        let mut request = placement.request().clone();
+        request.selector = RunnerSelector::Identity(successor.runner());
+        let replacement = placement
+            .mark_runner_lost()
+            .expect("the predecessor is lost")
+            .replace_lost_runner(
+                request,
+                &successor,
+                directory("/workspace/successor"),
+                None,
+                grant,
+            )
+            .expect("the successor replaces the lost placement");
+        let retry = replacement
+            .placement
+            .offer_retry(
+                &enrollment_for_registration(&successor),
+                &successor,
+                replacement.grant.as_ref(),
+                loss,
+                authorization,
+            )
+            .expect("retry authority crosses the checked placement revision");
+        assert_eq!(retry.correlation().dispatch, predecessor.dispatch);
+        assert_eq!(retry.correlation().lease, predecessor.lease);
+        assert_eq!(retry.correlation().runner, successor.runner());
+        assert_eq!(
+            retry.generation(),
+            predecessor.generation.checked_next().unwrap()
+        );
+        assert_eq!(
+            retry.correlation().placement_revision,
+            replacement.placement.revision()
+        );
+        assert_eq!(
+            retry.correlation().working_directory,
+            directory("/workspace/successor")
+        );
+    }
+}
+
+#[test]
+fn exhausted_lease_generation_cannot_authorize_a_retry() {
+    let (_, _, _, _, mut lease) = offered_from_batch("inspect");
+    lease.generation = RunnerGeneration::try_from_u64(u64::MAX).expect("the maximum is positive");
+    let proof = no_execution_proof(&lease);
+    assert_eq!(
+        lease.lose_unclaimed(&proof),
+        Err(RunnerDomainError::GenerationExhausted)
+    );
+}
+
+#[test]
 fn unclaimed_retry_preparation_is_single_use_across_batch_copies() {
     let (_, _, _, batch, lease) = offered_from_batch("deploy");
     let retained_batch = batch.clone();
