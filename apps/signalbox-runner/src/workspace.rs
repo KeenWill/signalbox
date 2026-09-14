@@ -220,9 +220,24 @@ impl RunnerWorkspaceStore {
         }
     }
 
+    pub(crate) fn authenticate_ready(
+        &self,
+        ready: &signalbox_runner_wire::WorkspaceReady,
+    ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
+        self.authenticate(ready, ManifestLifecycle::Ready)
+    }
+
     pub(crate) fn authenticate_active(
         &self,
         ready: &signalbox_runner_wire::WorkspaceReady,
+    ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
+        self.authenticate(ready, ManifestLifecycle::Active)
+    }
+
+    fn authenticate(
+        &self,
+        ready: &signalbox_runner_wire::WorkspaceReady,
+        lifecycle: ManifestLifecycle,
     ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
         validate_root_directory(&self.canonical_root, &self.root)
             .map_err(RunnerWorkspaceError::Io)?;
@@ -233,13 +248,14 @@ impl RunnerWorkspaceStore {
             .map_err(RunnerWorkspaceError::Io)?;
         let placement = open_directory(&session, &expected.placement_revision.get().to_string())
             .map_err(RunnerWorkspaceError::Io)?;
-        let mut manifest = read_manifest(&placement)?;
-        if manifest.lifecycle != ManifestLifecycle::Active {
+        let manifest = read_manifest(&placement)?;
+        if manifest.lifecycle != lifecycle {
             return Err(RunnerWorkspaceError::ManifestConflict);
         }
-        manifest.lifecycle = ManifestLifecycle::Ready;
-        if manifest != *expected
-            || workspace_manifest_digest(&manifest)
+        let mut ready_manifest = manifest.clone();
+        ready_manifest.lifecycle = ManifestLifecycle::Ready;
+        if ready_manifest != *expected
+            || workspace_manifest_digest(&ready_manifest)
                 .map_err(|_| RunnerWorkspaceError::CorruptManifest)?
                 != ready.ready.manifest_digest
         {

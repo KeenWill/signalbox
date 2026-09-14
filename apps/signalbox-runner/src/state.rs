@@ -551,7 +551,7 @@ impl RunnerStateRoot {
         configuration: &crate::RunnerConfiguration,
     ) -> Result<(), crate::WorkspaceProvisionError> {
         use crate::WorkspaceProvisionError;
-        if let Some((request, Some(_))) = self.journal.provision() {
+        let pending_ready = if let Some((request, Some(ready))) = self.journal.provision() {
             let checked = crate::workspace::provision::CheckedProvision::check(
                 configuration,
                 request.clone(),
@@ -562,10 +562,18 @@ impl RunnerStateRoot {
             {
                 return Err(WorkspaceProvisionError::ManifestConflict);
             }
-        }
+            Some(ready)
+        } else {
+            None
+        };
         let store = self
             .workspace_store()
             .map_err(|_| WorkspaceProvisionError::Storage)?;
+        if let Some(ready) = pending_ready {
+            store
+                .authenticate_ready(ready)
+                .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
+        }
         for active in self.active_workspaces.records.values() {
             if self.journal.release().is_some_and(|(release, _)| {
                 release.manifest_id == active.ready.ready.manifest.manifest_id
