@@ -497,6 +497,46 @@ fn accepted_release_restarts_after_trash_manifest_was_deleted() {
 }
 
 #[test]
+fn startup_inventory_preserves_trashed_manifest_correlation() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = store
+        .prepare_private_root(&request(RUNNER))
+        .expect("private workspace");
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let placement = File::open(placement_path).expect("placement descriptor");
+    let mut releasing = read_manifest(&placement).expect("ready manifest");
+    releasing.lifecycle = ManifestLifecycle::Releasing;
+    write_manifest(&placement, &releasing).expect("releasing manifest");
+    drop(placement);
+
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    fs::rename(
+        placement_path,
+        trash.join(prepared.manifest.manifest_id.to_string()),
+    )
+    .expect("simulate committed release rename");
+
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("descriptor inventory");
+    assert_eq!(facts.len(), 1);
+    let fact = &facts[0];
+    assert_eq!(fact.kind, signalbox_runner_wire::LeakFactKind::Unreconciled);
+    assert_eq!(fact.locator, prepared.manifest.relative_path);
+    assert_eq!(fact.entry_digest, prepared.manifest_digest);
+    assert_eq!(fact.session, Some(prepared.manifest.session));
+    assert_eq!(
+        fact.placement_revision,
+        Some(prepared.manifest.placement_revision)
+    );
+}
+
+#[test]
 fn release_requires_the_provisioning_runner_and_exact_manifest() {
     let (_parent, mut state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
