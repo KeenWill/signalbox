@@ -480,7 +480,14 @@ async fn startup_inventory_preserves_releasing_manifest_before_and_after_rename(
         trash.join(prepared.manifest.manifest_id.to_string()),
     )
     .expect("simulate committed release rename");
-    fs::remove_dir_all(
+    fs::remove_file(
+        trash
+            .join(prepared.manifest.manifest_id.to_string())
+            .join(REPOSITORY_WORKSPACE_DIRECTORY)
+            .join("prepared"),
+    )
+    .expect("simulate partial recursive deletion of repository contents");
+    fs::remove_dir(
         trash
             .join(prepared.manifest.manifest_id.to_string())
             .join(REPOSITORY_WORKSPACE_DIRECTORY),
