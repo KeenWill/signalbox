@@ -29,6 +29,11 @@ reconciles the retained lease phase and terminal result against durable daemon
 state. Workspace reconciliation and sandbox supervision are listed under
 Planned.
 
+The daemon admits authenticated runner recovery after migrations and before the
+generic startup scan or blob checks. Ordinary enrollment waits until the process
+socket is bound and startup enables scheduling; sequencing is owned by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md).
+
 The three process-wire creation commands retain optional runner placement and
 initialize its unpinned status in the creation transaction. Creation validates
 the request against the active registration without pinning or issuing a grant
@@ -205,9 +210,12 @@ runner holds one global execution permit, so tools of different sessions never
 execute concurrently on it. A combined-locus tool runs on the session's attached
 runner when that runner advertises it and otherwise runs on the daemon. An
 unpinned placement that the connected runner cannot satisfy, or a placement lost
-before its first pin, retains daemon fallback. A lost lease releases the global
-dispatch permit; the tool loop accepts the recovery wait only after rereading
-the exact lost lease and its issuing turn attempt's durable yield.
+before its first pin, retains daemon fallback. Caller cancellation retains the
+global dispatch permit until the durable lease completes or becomes lost.
+Closing the incarnation's database pool ends its local dispatch waiters. A lost
+lease releases the global dispatch permit; the tool loop accepts the recovery
+wait only after rereading the exact lost lease and its issuing turn attempt's
+durable yield.
 
 The daemon sends `lease_offer` with the complete lease correlation and the
 immutable dispatch payload. The runner admits the exact tool, sandbox profile,
@@ -362,8 +370,6 @@ release dispatch.
 - Failure spooling and workspace, failure, and leak reconnect-inventory
   reconciliation over the wire:
   [runner protocol design](../design/runner-protocol.md).
-- Recovery-only startup before the generic scan:
-  [turn lifecycle design](../design/turn-lifecycle-and-scheduling.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:

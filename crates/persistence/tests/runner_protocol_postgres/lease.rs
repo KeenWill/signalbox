@@ -107,6 +107,30 @@ pub(crate) async fn insert_lease_generation_direct(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn startup_waits_only_for_claimed_execution() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+
+    assert!(
+        !store.has_unsettled_execution().await?,
+        "an offered lease grants no execution authority"
+    );
+
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact offered lease correlation prepares its claim");
+    store.store_lease(&claimed).await?;
+
+    assert!(
+        store.has_unsettled_execution().await?,
+        "claimed execution must keep startup recovery waiting"
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn current_registration_gates_new_leases() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, expected_enrollment, _registration, pin) = stored_pin_fixture(&pool).await?;

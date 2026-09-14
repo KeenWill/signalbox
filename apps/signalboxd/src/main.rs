@@ -581,6 +581,36 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
     error
 }
 
+fn runner_startup_failure(
+    error: &signalbox_persistence::runner_protocol::RunnerProtocolStoreError,
+) -> HubRuntimeError {
+    use signalbox_persistence::runner_protocol::RunnerProtocolStoreError;
+
+    let mut failure = erase_startup_scan_cause(
+        match error {
+            RunnerProtocolStoreError::CommitAmbiguous(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            RunnerProtocolStoreError::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            RunnerProtocolStoreError::Database(_)
+            | RunnerProtocolStoreError::Domain(_)
+            | RunnerProtocolStoreError::EnrollmentRequest(_) => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                }
+            }
+        },
+        "runner_connection_reconciliation_failed",
+        None,
+        None,
+    );
+    failure.database_failure = matches!(
+        error,
+        RunnerProtocolStoreError::Database(_) | RunnerProtocolStoreError::CommitAmbiguous(_)
+    );
+    failure
+}
+
 fn erase_startup_database_cause(
     phase: RuntimePhase,
     cause: SanitizedStartupCause<'_>,
@@ -1123,6 +1153,31 @@ fn runner_lifecycle_failure_class(cause: RunnerRegistrationFailureCause) -> Oper
     }
 }
 
+fn runner_listener_startup_failure(error: &RunnerProtocolRuntimeError) -> HubRuntimeError {
+    let database_failure = match error {
+        RunnerProtocolRuntimeError::Lifecycle(error) => matches!(
+            error.cause(),
+            RunnerRegistrationFailureCause::Database
+                | RunnerRegistrationFailureCause::CommitAmbiguous
+        ),
+        RunnerProtocolRuntimeError::ConnectionDrainTimeout {
+            initiating: Some(error),
+            ..
+        } => {
+            return runner_listener_startup_failure(error);
+        }
+        _ => false,
+    };
+    let mut failure = erase_startup_scan_cause(
+        runner_runtime_failure_class(error),
+        "runner_recovery_listener_stopped",
+        None,
+        None,
+    );
+    failure.database_failure = database_failure;
+    failure
+}
+
 fn report_runner_runtime_failure(error: &RunnerProtocolRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
@@ -1323,6 +1378,36 @@ async fn shutdown_requested(signals: &mut std::io::Result<TerminationSignals>) -
     match signals {
         Ok(signals) => signals.recv().await,
         Err(_) => true,
+    }
+}
+
+async fn await_runner_reconciliation(
+    reconciliation: impl Future<Output = Result<(), HubRuntimeError>>,
+    runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
+    runner_shutdown: &watch::Sender<bool>,
+    shutdown: impl Future<Output = bool>,
+) -> Result<Option<RuntimeStopCause>, HubRuntimeError> {
+    select! {
+        biased;
+        listener_failed = shutdown => {
+            let _ = runner_shutdown.send(true);
+            Ok(Some(if listener_failed {
+                RuntimeStopCause::SignalListenerFailed
+            } else {
+                RuntimeStopCause::Requested
+            }))
+        }
+        result = reconciliation => result.map(|()| None),
+        stopped = runtime_tasks.join_next() => {
+            if let Some(Ok(RuntimeTaskExit::Runner(Err(error)))) = stopped {
+                report_runner_runtime_failure(&error);
+                return Err(runner_listener_startup_failure(&error));
+            }
+            Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("runner_recovery_listener_stopped"),
+            ))
+        }
     }
 }
 
@@ -1800,6 +1885,124 @@ async fn run_hub_incarnation(
             return Ok(ShutdownOutcome::GuardLost);
         }
     }
+    let scheduler_pool = pool.clone();
+    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
+        sweep,
+        reconciliation_sweep_interval,
+        nudge_buffer_capacity,
+    );
+    let runner_service = match PostgresRunnerRegistrationService::local(pool.clone()) {
+        Ok(service) => service
+            .with_eligibility_nudge(eligibility_nudge.clone())
+            .with_recovery_only(),
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("runner_catalog_construction_failed"),
+            );
+            return startup_failure_after_close(failure, database.close().await);
+        }
+    };
+    let prior_connections = match await_while_guarded(
+        &mut database,
+        runner_service
+            .recovery_store()
+            .load_nonterminal_connection_heads(),
+    )
+    .await
+    {
+        GuardedAwait::Completed(Ok(connections)) => connections,
+        GuardedAwait::Completed(Err(_)) => {
+            return startup_failure_after_close(
+                erase_startup_database_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("runner_connection_inventory_failed"),
+                ),
+                database.close().await,
+            );
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    };
+    let runner_listener = match LocalProcessListener::bind(configuration.runner_socket_path()) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Socket(&error),
+            );
+            return startup_failure_after_close(failure, database.close().await);
+        }
+    };
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service.clone());
+    let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
+    let runner_pool = pool.clone();
+    let mut runtime_tasks = JoinSet::new();
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::Runner(tokio::select! {
+            result = runner_runtime.run(runner_shutdown_receiver) => result,
+            () = runner_pool.close_event() => Ok(()),
+        })
+    });
+    let mut termination_signals = TerminationSignals::new();
+    let runner_reconciliation = await_runner_reconciliation(
+        async {
+            runner_service
+                .reconcile_startup(prior_connections)
+                .await
+                .map(|_| ())
+                .map_err(|error| runner_startup_failure(&error))
+        },
+        &mut runtime_tasks,
+        &runner_shutdown,
+        shutdown_requested(&mut termination_signals),
+    );
+    match await_while_guarded(&mut database, runner_reconciliation).await {
+        GuardedAwait::Completed(Ok(None)) => {}
+        GuardedAwait::Completed(Ok(Some(cause))) => {
+            let drain = drain_runtime_tasks(
+                &mut runtime_tasks,
+                std::future::pending(),
+                async {
+                    if shutdown_requested(&mut termination_signals).await {
+                        tracing::error!("termination signal listener failed during shutdown");
+                    }
+                },
+                shutdown_grace_window,
+            );
+            let (drain, completion) = match await_while_guarded(&mut database, drain).await {
+                GuardedAwait::Completed(result) => result,
+                GuardedAwait::GuardLost => {
+                    (RuntimeDrainOutcome::GuardLost, RuntimeTaskCompletion::Clean)
+                }
+            };
+            runtime_tasks.shutdown().await;
+            let mut outcome =
+                completed_runtime_outcome(combine_runtime_stop_cause(cause, completion), drain);
+            if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
+                outcome = ShutdownOutcome::GuardLost;
+            }
+            if outcome == ShutdownOutcome::GuardLost {
+                let _ = database.close().await;
+            } else if should_close_pool(&Ok(outcome))
+                && let Err(error) = database.close().await
+            {
+                report_database_close_failure(&error);
+                outcome = database_close_failure_outcome(outcome);
+            }
+            return Ok(outcome);
+        }
+        GuardedAwait::Completed(Err(error)) => {
+            return startup_failure_after_close(error, database.close().await);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
     let reload_repository =
         signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
             pool.clone(),
@@ -2025,13 +2228,6 @@ async fn run_hub_incarnation(
     } else {
         None
     };
-    let scheduler_pool = pool.clone();
-    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
-        sweep,
-        reconciliation_sweep_interval,
-        nudge_buffer_capacity,
-    );
     let approval_wait_wakeups = signalboxd::ApprovalWaitWakeups::new(
         signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.clone()),
         eligibility_nudge.clone(),
@@ -2114,16 +2310,6 @@ async fn run_hub_incarnation(
     let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
-    let runner_service = match PostgresRunnerRegistrationService::local(pool.clone()) {
-        Ok(service) => service,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("runner_catalog_construction_failed"),
-            );
-            return startup_failure_after_close(failure, database.close().await);
-        }
-    };
     let runner_dispatch = runner_service.dispatch_service();
     tool_executor = tool_executor.with_runner_dispatch(runner_dispatch.clone());
     let scan_runner_service = runner_service.clone();
@@ -2165,15 +2351,6 @@ async fn run_hub_incarnation(
             })
         },
         async move {
-            scan_runner_service
-                .mark_orphaned_connections_lost()
-                .await
-                .map_err(|_| {
-                    erase_startup_database_cause(
-                        RuntimePhase::StartupScan,
-                        SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
-                    )
-                })?;
             let outcome = scan_supervision
                 .scan_and_park_startup_sessions(
                     PostgresStartupScanRepository::new(scan_pool.clone()),
@@ -2363,19 +2540,6 @@ async fn run_hub_incarnation(
     } else {
         None
     };
-    let runner_listener = match LocalProcessListener::bind(configuration.runner_socket_path()) {
-        Ok(listener) => listener,
-        Err(error) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::SocketBinding,
-                SanitizedStartupCause::Socket(&error),
-            );
-            drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            return startup_failure_after_close(failure, database.close().await);
-        }
-    };
     let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
         Ok(listener) => listener,
         Err(error) => {
@@ -2383,7 +2547,6 @@ async fn run_hub_incarnation(
                 RuntimePhase::SocketBinding,
                 SanitizedStartupCause::Socket(&error),
             );
-            let _ = runner_listener.cleanup();
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
@@ -2401,7 +2564,6 @@ async fn run_hub_incarnation(
                 SanitizedStartupCause::Static("insufficient_snapshot_reader_pool_capacity"),
             );
             let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             return startup_failure_after_close(failure, database.close().await);
@@ -2417,7 +2579,6 @@ async fn run_hub_incarnation(
                         SanitizedStartupCause::Static("web_blob_worker_path_failed"),
                     );
                     let _ = listener.cleanup();
-                    let _ = runner_listener.cleanup();
                     drop(blob_executor);
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
@@ -2438,7 +2599,6 @@ async fn run_hub_incarnation(
                         SanitizedStartupCause::Static("web_blob_runtime_construction_failed"),
                     );
                     let _ = listener.cleanup();
-                    let _ = runner_listener.cleanup();
                     drop(blob_executor);
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
@@ -2466,7 +2626,6 @@ async fn run_hub_incarnation(
                 SanitizedStartupCause::Static("web_http_listener_bind_failed"),
             );
             let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
             drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
@@ -2477,7 +2636,6 @@ async fn run_hub_incarnation(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
-    let runner_service = runner_service.with_eligibility_nudge(eligibility_nudge.clone());
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
         scheduler_pool.clone(),
@@ -2540,7 +2698,6 @@ async fn run_hub_incarnation(
                     SanitizedStartupCause::Static("repository_watch_startup_failed"),
                 );
                 let _ = listener.cleanup();
-                let _ = runner_listener.cleanup();
                 drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
@@ -2548,7 +2705,6 @@ async fn run_hub_incarnation(
             }
             GuardedAwait::GuardLost => {
                 let _ = listener.cleanup();
-                let _ = runner_listener.cleanup();
                 if let Some(registry) = blob_store_registry.as_ref() {
                     registry.disarm_staging_sweep();
                 }
@@ -2611,7 +2767,6 @@ async fn run_hub_incarnation(
                 runtime.with_repository_watch(workflow_repository_watch),
             )
         });
-    let mut termination_signals = TerminationSignals::new();
     let (guard_ready, guarded_startup) = oneshot::channel();
     let mut guard_loss = Box::pin(monitor_runtime_guard(&mut database, guard_ready));
     let mut repository_watch_worker = None;
@@ -2662,7 +2817,6 @@ async fn run_hub_incarnation(
             let _ = worker.await;
         }
         let _ = listener.cleanup();
-        let _ = runner_listener.cleanup();
         drop(tool_executor);
         drop(blob_store_registry);
         let closed = database.close().await;
@@ -2730,7 +2884,6 @@ async fn run_hub_incarnation(
                 let _ = worker.await;
             }
             let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
             drop(tool_executor);
             drop(blob_store_registry);
             return startup_failure_after_close(failure, database.close().await);
@@ -2773,7 +2926,6 @@ async fn run_hub_incarnation(
     let runner_recovery = runner_service
         .recovery_store()
         .with_recovery_notifications(process_runtime.runner_recovery_notifications());
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let session_supervision = execution_supervisor.recovery_reporter();
@@ -2943,7 +3095,6 @@ async fn run_hub_incarnation(
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
-    let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
@@ -2951,7 +3102,6 @@ async fn run_hub_incarnation(
     let web_http_runtime = web_http_runtime.with_session_title_tasks(title_tasks);
     // Bound title work even when its credential profile has no invocation limit.
     let title_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TITLE_TASKS));
-    let mut runtime_tasks = JoinSet::new();
     let supervision_pool = pool.clone();
     let supervision_nudge = eligibility_nudge.clone();
     let mut supervision_shutdown = process_shutdown.subscribe();
@@ -2965,6 +3115,29 @@ async fn run_hub_incarnation(
                 if guarded_admission.await.is_err() {
                     return RuntimeStopCause::GuardLost;
                 }
+                if let Some(completed) = runtime_tasks.try_join_next() {
+                    return match completed {
+                        Ok(RuntimeTaskExit::Runner(Err(error))) => {
+                            report_runner_runtime_failure(&error);
+                            RuntimeStopCause::RuntimeFailed
+                        }
+                        Ok(RuntimeTaskExit::Runner(Ok(()))) => {
+                            report_runtime_task_defect(
+                                RuntimeTaskDefect::RunnerCompletedBeforeShutdown,
+                            );
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                        Err(error) => {
+                            report_runtime_task_defect(joined_task_defect(&error));
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                        Ok(_) => {
+                            report_runtime_task_defect(RuntimeTaskDefect::TaskSetEmpty);
+                            RuntimeStopCause::RuntimeDefect
+                        }
+                    };
+                }
+                runner_service.enable_ordinary_enrollment();
                 runtime_tasks.spawn(async move {
                     select! {
                         () = session_supervision.park_failed_sessions(supervision_pool, supervision_nudge) => {},
@@ -3006,9 +3179,6 @@ async fn run_hub_incarnation(
                 }
                 runtime_tasks.spawn(async move {
                     RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
-                });
-                runtime_tasks.spawn(async move {
-                    RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
                 });
                 runtime_tasks.spawn(async move {
                     RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
@@ -4397,6 +4567,47 @@ mod tests {
     }
 
     #[test]
+    fn runner_startup_recovery_retries_database_failures_and_stops_on_corruption() {
+        use signalbox_persistence::runner_protocol::{
+            RunnerProtocolCorruption, RunnerProtocolStoreError,
+        };
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        for (failure, expected_class, retry) in [
+            (
+                RunnerProtocolStoreError::Database(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                true,
+            ),
+            (
+                RunnerProtocolStoreError::CommitAmbiguous(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                true,
+            ),
+            (
+                RunnerProtocolStoreError::Corruption(
+                    RunnerProtocolCorruption::MissingCanonicalLease,
+                ),
+                OperatorFailureClass::FailClosedCorruption,
+                false,
+            ),
+        ] {
+            let error = super::runner_startup_failure(&failure);
+            assert_eq!(error.failure_class, expected_class);
+            assert_eq!(
+                matches!(
+                    super::recovery_incarnation_outcome(Err(error), true),
+                    GuardedIncarnationOutcome::Reacquire
+                ),
+                retry
+            );
+        }
+    }
+
+    #[test]
     fn reload_recovery_reacquires_only_database_failures() {
         use signalbox_persistence::reload_configuration::ReloadRepositoryError;
         use signalboxd::guard_recovery::GuardedIncarnationOutcome;
@@ -5648,6 +5859,101 @@ mod tests {
             ),
             RuntimeStopCause::ExecutionFailed
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_reacquires_after_a_runner_listener_database_failure() {
+        use signalbox_runner_wire::{Advertisement, CanonicalUuid, DIGEST_VERSION, Enroll};
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        use signalboxd::runner_protocol_runtime::{
+            PostgresRunnerRegistrationService, RunnerProtocolRuntimeError,
+            RunnerRegistrationService as _,
+        };
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .unwrap();
+        pool.close().await;
+        let service = PostgresRunnerRegistrationService::local(pool).unwrap();
+        let failure = service
+            .enroll(Enroll {
+                request_id: CanonicalUuid::from_uuid(uuid::Uuid::now_v7()),
+                digest_version: DIGEST_VERSION,
+                advertisement: Advertisement {
+                    default_working_directory: None,
+                    capability_classes: Vec::new(),
+                    tools: Vec::new(),
+                    workspace_capabilities: Vec::new(),
+                    sandbox_profiles: Vec::new(),
+                    credential_profiles: Vec::new(),
+                    repositories: Vec::new(),
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.cause(), RunnerRegistrationFailureCause::Database);
+        let mut runtime_tasks = JoinSet::new();
+        runtime_tasks.spawn(async move {
+            RuntimeTaskExit::Runner(Err(RunnerProtocolRuntimeError::Lifecycle(failure)))
+        });
+        let (runner_shutdown, _shutdown_receiver) = tokio::sync::watch::channel(false);
+        let error = super::await_runner_reconciliation(
+            pending(),
+            &mut runtime_tasks,
+            &runner_shutdown,
+            pending(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                super::recovery_incarnation_outcome(Err(error), true),
+                GuardedIncarnationOutcome::Reacquire
+            ),
+            "listener database failure must retry guarded recovery"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn termination_stops_startup_while_runner_reconciliation_waits_for_reconnect() {
+        for (listener_failed, expected) in [
+            (false, RuntimeStopCause::Requested),
+            (true, RuntimeStopCause::SignalListenerFailed),
+        ] {
+            let (runner_shutdown, mut stopped) = tokio::sync::watch::channel(false);
+            let mut runtime_tasks = JoinSet::new();
+            runtime_tasks.spawn(async move {
+                stopped.wait_for(|shutdown| *shutdown).await.unwrap();
+                RuntimeTaskExit::Runner(Ok(()))
+            });
+            let (signal, received) = oneshot::channel();
+            let outcome = {
+                let waiting = super::await_runner_reconciliation(
+                    pending(),
+                    &mut runtime_tasks,
+                    &runner_shutdown,
+                    async { received.await.unwrap() },
+                );
+                tokio::pin!(waiting);
+                assert!(timeout(Duration::from_secs(1), &mut waiting).await.is_err());
+                signal.send(listener_failed).unwrap();
+                timeout(Duration::from_secs(1), waiting)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            };
+            assert_eq!(outcome, Some(expected));
+            assert!(matches!(
+                timeout(Duration::from_secs(1), runtime_tasks.join_next())
+                    .await
+                    .unwrap(),
+                Some(Ok(RuntimeTaskExit::Runner(Ok(()))))
+            ));
+            assert!(
+                runtime_tasks.is_empty(),
+                "the early runner task settled its shutdown"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

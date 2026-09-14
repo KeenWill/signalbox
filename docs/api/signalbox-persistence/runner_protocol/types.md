@@ -351,6 +351,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub fn new(pool: sqlx_postgres::PgPool, catalog: signalbox_domain::RunnerCatalog) -> Self;
     #[must_use]
     pub fn with_recovery_notifications(self, notifications: watch::Receiver<()>) -> Self;
+    pub async fn closed(&self);
     pub async fn open_connection(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
@@ -656,6 +657,9 @@ impl runner_protocol::RunnerProtocolStore {
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
 }
 impl runner_protocol::RunnerProtocolStore {
+    pub async fn has_unsettled_execution(
+        &self,
+    ) -> result::Result<bool, runner_protocol::RunnerProtocolStoreError>;
     pub async fn promoted_runner_receipt(
         &self,
         candidate: signalbox_domain::RunnerEnrollmentId,

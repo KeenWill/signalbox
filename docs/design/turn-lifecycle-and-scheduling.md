@@ -5,10 +5,9 @@ This design is not built; it extends
 
 ## Goal
 
-This design adds four capabilities. A turn parks durably while no credential in
+This design adds three capabilities. A turn parks durably while no credential in
 its pool is available and resumes when one is. A runner retry takes over the
-successor placement before continuation, and a restart reconciles retained
-runner work before the generic scan can end it. Activation freezes the session's
+successor placement before continuation. Activation freezes the session's
 instruction eligibility for the turn.
 
 ## Design
@@ -65,15 +64,6 @@ terminal transaction also moves the turn out of the runner-recovery wait when it
 is still parked there: to running with a fresh attempt when the loss interrupted
 no tool attempt, and otherwise to the phase the retained tool attempt justifies.
 
-Recovery-only startup binds the runner socket in recovery-only mode after
-migrations, reconciles retained runner inventory, evidence, and nonterminal
-replacement commands, completes the generic startup scan, binds the process
-socket, and only then enables ordinary runner enrollment and scheduling. The
-generic scan skips runner-owned attempts until that phase has resolved them,
-then classifies only the remaining daemon-owned tenure. With no retained runner
-work the phase completes immediately. Recovery-only admission precedes the blob
-namespace checks that [blob-storage](../spec/blob-storage.md) runs after the
-generic scan, and no recovery frame touches blob state.
 [Configuration and credentials](../spec/configuration-and-credentials.md)
 commits retained OAuth-marker resolution, scratch-home scavenging, prior-process
 capacity-reservation recovery, and the legacy family-to-policy backfill. Those
@@ -99,11 +89,6 @@ path, or process state supplies the pool-availability wait. The active-phase
 vocabulary and its storage discriminators admit a new phase without
 reinterpreting an existing one.
 
-The recovery-only ordering exists so that generic recovery cannot terminalize
-authority that retained runner evidence resolves. The present order, generic
-scan before runner-socket bind, stays compatible with inserting a runner
-reconciliation phase before the scan.
-
 Only the path that prepares the turn's initial model call inside the activation
 transaction records the manifest there. The ordinary path records it after
 activation, and a turn that stops being active first has none. The freeze moves
@@ -127,9 +112,6 @@ than contended, so its wake re-runs the exhaustion decision and a `fail` pool
 terminalizes it through the same failure rows. A stop-turn request against a
 parked turn terminalizes it cancelled through a fresh cancelled successor
 attempt and leaves no wait stored.
-
-A restart with retained runner work resolves every runner-owned attempt before
-the generic scan runs, and the generic scan ends no attempt a runner still owns.
 
 Every activated turn owns exactly one turn-start instruction manifest, written
 in its activation transaction rather than by a post-activation scan.

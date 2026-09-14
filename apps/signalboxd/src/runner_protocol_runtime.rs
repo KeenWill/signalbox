@@ -1,6 +1,17 @@
 //! Hub-side serial registration and lifecycle runtime for the local runner wire.
 
-use std::{error::Error, fmt, future::Future, io, pin::Pin, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    io,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use rustix::process::geteuid;
 use signalbox_application::{EligibilityNudge as _, InProcessEligibilityNudge, ToolCatalog as _};
@@ -38,6 +49,7 @@ use crate::LocalProcessListener;
 use crate::local_socket::LocalSocketError;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const STARTUP_RECONCILIATION_RECHECK: Duration = Duration::from_secs(1);
 const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -193,6 +205,7 @@ pub struct PostgresRunnerRegistrationService {
     allowed_classes: Vec<RunnerCapabilityClass>,
     dispatch: crate::runner_dispatch::RunnerDispatchService,
     eligibility_nudge: Option<InProcessEligibilityNudge>,
+    ordinary_enrollment: Arc<AtomicBool>,
 }
 
 impl PostgresRunnerRegistrationService {
@@ -207,6 +220,7 @@ impl PostgresRunnerRegistrationService {
             dispatch,
             allowed_classes: allowed_classes.into_iter().collect(),
             eligibility_nudge: None,
+            ordinary_enrollment: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -219,6 +233,17 @@ impl PostgresRunnerRegistrationService {
     pub fn with_eligibility_nudge(mut self, nudge: InProcessEligibilityNudge) -> Self {
         self.eligibility_nudge = Some(nudge);
         self
+    }
+
+    /// Restricts admission to authenticated recovery until startup completes.
+    pub fn with_recovery_only(mut self) -> Self {
+        self.ordinary_enrollment = Arc::new(AtomicBool::new(false));
+        self
+    }
+
+    /// Enables ordinary enrollment after the generic scan and process binding.
+    pub fn enable_ordinary_enrollment(&self) {
+        self.ordinary_enrollment.store(true, Ordering::Release);
     }
 
     /// Shares exact runner authority with model and tool boundary transactions.
@@ -234,11 +259,28 @@ impl PostgresRunnerRegistrationService {
         ))
     }
 
-    /// Classifies prior-process nonterminal connections as lost before admission.
-    pub async fn mark_orphaned_connections_lost(
+    /// Reconciles retained authority, then loses only the captured prior-process epochs.
+    pub async fn reconcile_startup(
         &self,
+        connections: Vec<signalbox_persistence::runner_protocol::NonterminalRunnerConnection>,
     ) -> Result<Vec<AppliedRunnerConnectionTransition>, RunnerProtocolStoreError> {
-        let connections = self.store.load_nonterminal_connection_heads().await?;
+        let mut changes = self.dispatch.subscribe();
+        let _admission = loop {
+            self.propagate_pending_connection_losses(None).await?;
+            self.store
+                .resume_runner_replacements()
+                .await
+                .map_err(recovery::store_error)?;
+            let admission = self.dispatch.lock_admission().await;
+            if !self.store.has_unsettled_execution().await? {
+                break admission;
+            }
+            drop(admission);
+            tokio::select! {
+                _ = changes.changed() => {},
+                () = tokio::time::sleep(STARTUP_RECONCILIATION_RECHECK) => {},
+            }
+        };
         let mut transitions = Vec::new();
         for connection in connections {
             let effect = self
@@ -300,7 +342,8 @@ impl PostgresRunnerRegistrationService {
                         .await;
                     self.dispatch.changed();
                     let disposition = disposition?;
-                    if let Some(nudge) = &self.eligibility_nudge
+                    if self.ordinary_enrollment.load(Ordering::Acquire)
+                        && let Some(nudge) = &self.eligibility_nudge
                         && nudge.nudge(*session)
                             == signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity
                     {
@@ -325,6 +368,13 @@ impl PostgresRunnerRegistrationService {
     ) -> Result<RunnerEnrollmentResponse, RunnerRegistrationFailure> {
         let _admission = self.dispatch.lock_admission().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
+        if !self.ordinary_enrollment.load(Ordering::Acquire) {
+            return Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Enroll,
+                correlation,
+                RejectionCode::Unavailable,
+            ));
+        }
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Enroll,
@@ -4092,6 +4142,50 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn empty_recovery_startup_keeps_enrollment_closed_until_enabled() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service =
+            PostgresRunnerRegistrationService::new(store.clone(), []).with_recovery_only();
+        let request = Enroll {
+            request_id: identity(1),
+            digest_version: DIGEST_VERSION,
+            advertisement: empty_advertisement(),
+        };
+        assert_eq!(
+            service
+                .enroll(request.clone())
+                .await
+                .expect_err("recovery-only admission"),
+            RunnerRegistrationFailure::enroll(
+                AvailableCorrelation::Enrollment(request.request_id),
+                RejectionCode::Unavailable,
+            )
+        );
+        assert!(
+            store
+                .load_nonterminal_connection_heads()
+                .await
+                .expect("no admission")
+                .is_empty()
+        );
+        let transitions = tokio::time::timeout(
+            Duration::from_secs(60),
+            service.reconcile_startup(Vec::new()),
+        )
+        .await
+        .expect("empty recovery has no external dependency")
+        .expect("recovery succeeds");
+        assert!(transitions.is_empty());
+        assert!(service.enroll(request.clone()).await.is_err());
+        service.enable_ordinary_enrollment();
+        assert!(matches!(
+            service.enroll(request).await.expect("ordinary enrollment"),
+            RunnerEnrollmentResponse::Active(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn startup_marks_a_prior_process_connection_lost_before_admission() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
@@ -4108,7 +4202,12 @@ mod tests {
         };
 
         let transitions = service
-            .mark_orphaned_connections_lost()
+            .reconcile_startup(
+                store
+                    .load_nonterminal_connection_heads()
+                    .await
+                    .expect("prior connection inventory"),
+            )
             .await
             .expect("startup classifies prior-process connection heads");
         let applied = transitions
@@ -4414,7 +4513,12 @@ mod tests {
             .expect("the stranded cursor inventory loads");
 
         let transitions = service
-            .mark_orphaned_connections_lost()
+            .reconcile_startup(
+                store
+                    .load_nonterminal_connection_heads()
+                    .await
+                    .expect("prior connection inventory"),
+            )
             .await
             .expect("startup resumes every pending loss cursor");
         let placement = store

@@ -12,6 +12,8 @@ mod runner_execution;
 mod runner_fallback;
 #[path = "offline_tool_loop/runner_reconnect.rs"]
 mod runner_reconnect;
+#[path = "offline_tool_loop/runner_startup.rs"]
+mod runner_startup;
 mod support;
 #[path = "offline_tool_loop/workflows.rs"]
 mod workflow_tools;
