@@ -294,6 +294,39 @@ async fn restart_rejects_a_changed_repository_mapping_after_ready() {
 }
 
 #[tokio::test]
+async fn restart_rejects_a_missing_pending_ready_workspace() {
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let config = configuration();
+    let mut state = enrolled_with_configuration(&directory, &config);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let request = provision(&receipt);
+    state
+        .record_provision(request.clone(), configured_clone_url_digest())
+        .expect("journal before workspace preparation");
+    let ready = prepared_repository(&state, request.clone()).await;
+    state
+        .record_workspace_ready(ready.clone())
+        .expect("retained ready receipt");
+    std::fs::remove_dir_all(&ready.working_directory).expect("remove pending workspace fixture");
+    drop(state);
+
+    let root = directory.path().join("state");
+    let reopened = RunnerStateRoot::open(&root).expect("restart with retained ready receipt");
+    assert!(matches!(
+        reopened.authenticate_active_workspaces(&config),
+        Err(crate::WorkspaceProvisionError::ManifestConflict)
+    ));
+    assert_eq!(
+        reopened.retained_provision(),
+        Some((&request, Some(&ready)))
+    );
+    assert_eq!(
+        reopened.retained_provision_clone_url_digest(),
+        Some(&configured_clone_url_digest())
+    );
+}
+
+#[tokio::test]
 async fn anonymous_clone_failure_is_retained_while_the_runner_keeps_serving() {
     failed_anonymous_clone(false).await;
 }
