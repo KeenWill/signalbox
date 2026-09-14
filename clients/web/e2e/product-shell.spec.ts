@@ -1822,11 +1822,8 @@ for (const entry of ['button', 'palette'] as const) {
     await useDeterministicBootstrap(page)
     await useDeterministicImportApi(page)
     let mode: 'empty' | 'failed' | 'ready' = 'empty'
-    await page.route('**/api/imports/**', async (route) => {
-      if (
-        new URL(route.request().url()).pathname.replace(/\/$/, '') !== '/api/imports' ||
-        mode === 'ready'
-      )
+    await page.route('**/api/imports?**', async (route) => {
+      if (new URL(route.request().url()).pathname !== '/api/imports' || mode === 'ready')
         return route.fallback()
       return mode === 'empty'
         ? route.fulfill({ json: { items: [] } })
@@ -1895,10 +1892,8 @@ for (const outcome of ['success', 'rejection'] as const) {
       .fill('00000000-0000-7000-8000-000000000777')
     await page.getByRole('button', { name: 'Resume', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
-    await page.route('**/api/imports/**', (route) =>
-      new URL(route.request().url()).pathname.replace(/\/$/, '') === '/api/imports'
-        ? route.fulfill({ status: 503, body: 'unavailable' })
-        : route.fallback(),
+    await page.route('**/api/imports?**', (route) =>
+      route.fulfill({ status: 503, body: 'unavailable' }),
     )
     await page.reload()
     await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()

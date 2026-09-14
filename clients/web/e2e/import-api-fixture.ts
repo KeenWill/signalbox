@@ -13,7 +13,7 @@ const optionalNumber = (value: string | null): number | undefined =>
 
 export const useDeterministicImportApi = async (page: Page) => {
   const api = new ScenarioImportApi()
-  await page.route('**/api/imports/**', async (route) => {
+  await page.route(/\/api\/imports(?:\/[^?]*)?(?:\?.*)?$/, async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     const segments = url.pathname.split('/').filter(Boolean)
