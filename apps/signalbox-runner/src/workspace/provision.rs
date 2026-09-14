@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, path::Path, process::Stdio};
 
 use signalbox_runner_wire::{
-    Recovery, SandboxProfile, WorkspaceProvision, WorkspaceReady, clone_url_digest,
+    Digest, Recovery, SandboxProfile, WorkspaceProvision, WorkspaceReady, clone_url_digest,
 };
 use tokio::{io::AsyncReadExt as _, process::Command};
 
@@ -56,6 +56,7 @@ impl From<RunnerWorkspaceError> for WorkspaceProvisionError {
 pub(crate) struct CheckedProvision {
     operation: WorkspaceProvision,
     clone_url: String,
+    canonical_clone_url_digest: Digest,
 }
 
 impl CheckedProvision {
@@ -63,6 +64,10 @@ impl CheckedProvision {
     pub(crate) fn with_local_clone_fixture(mut self, path: String) -> Self {
         self.clone_url = path;
         self
+    }
+
+    pub(crate) const fn canonical_clone_url_digest(&self) -> &Digest {
+        &self.canonical_clone_url_digest
     }
 
     pub(crate) fn check(
@@ -102,9 +107,11 @@ impl CheckedProvision {
             }
             None => return Err(WorkspaceProvisionError::RepositoryUnavailable),
         };
+        let canonical_clone_url_digest = clone_url_digest(&clone_url);
         Ok(Self {
             operation,
             clone_url,
+            canonical_clone_url_digest,
         })
     }
 
@@ -113,6 +120,7 @@ impl CheckedProvision {
         store: RunnerWorkspaceStore,
     ) -> Result<WorkspaceReady, WorkspaceProvisionError> {
         let correlation = self.operation.correlation;
+        let canonical_clone_url_digest = self.canonical_clone_url_digest;
         let prepared = match (&correlation.repository, self.clone_url) {
             (Some(repository), clone_url) => {
                 let request = RepositoryWorkspaceRequest::new(
@@ -120,7 +128,7 @@ impl CheckedProvision {
                     correlation.placement_revision,
                     correlation.runner_id,
                     repository.clone(),
-                    clone_url_digest(&clone_url),
+                    canonical_clone_url_digest,
                     correlation.credential_profile.clone(),
                     correlation.sandbox_profile,
                 );

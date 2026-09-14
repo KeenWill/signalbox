@@ -106,7 +106,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
 
     pub(super) fn ensure_workspace(
         &mut self,
-        state: &RunnerStateRoot,
+        state: &mut RunnerStateRoot,
     ) -> Result<(), RunnerConnectionError> {
         if self.workspace.is_some() {
             return Ok(());
@@ -132,7 +132,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         let Some((request, _)) = state.retained_provision() else {
             return Ok(());
         };
-        let checked = self.check_workspace(request.clone())?;
+        let request = request.clone();
+        let pinned_clone_url_digest = state
+            .retained_provision_clone_url_digest()
+            .cloned()
+            .ok_or(RunnerStateError::CorruptState)?;
+        let checked = match self.check_workspace(request) {
+            Ok(checked) => checked,
+            Err(RunnerConnectionError::Workspace(_)) => {
+                self.finish_provision(
+                    state,
+                    Err(crate::WorkspaceProvisionError::ManifestConflict),
+                )?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if checked.canonical_clone_url_digest() != &pinned_clone_url_digest {
+            self.finish_provision(state, Err(crate::WorkspaceProvisionError::ManifestConflict))?;
+            return Ok(());
+        }
         let store = state.workspace_store()?;
         self.workspace = Some(WorkspaceExecution::preparing(tokio::spawn(
             checked.prepare(store),

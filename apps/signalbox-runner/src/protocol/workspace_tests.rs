@@ -13,6 +13,9 @@ fn identity() -> CanonicalUuid {
 fn positive() -> PositiveU64 {
     PositiveU64::try_new(1).expect("initial revision")
 }
+fn configured_clone_url_digest() -> signalbox_runner_wire::Digest {
+    signalbox_runner_wire::clone_url_digest("https://github.com/KeenWill/signalbox.git")
+}
 fn configuration() -> crate::RunnerConfiguration {
     crate::RunnerConfiguration::parse(
         &include_str!("../../../../config/signalbox-runner.example.toml")
@@ -153,6 +156,55 @@ async fn unknown_credential_profile_is_rejected_before_journaling_provision() {
 }
 
 #[tokio::test]
+async fn retained_provision_rejects_a_changed_clone_url_mapping_after_restart() {
+    use signalbox_runner_wire::FailureCategory;
+
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let original = configuration();
+    let mut state = enrolled_with_configuration(&directory, &original);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let request = provision(&receipt);
+    let checked = crate::workspace::provision::CheckedProvision::check(&original, request.clone())
+        .expect("advertised anonymous acquisition");
+    state
+        .record_provision(request, checked.canonical_clone_url_digest().clone())
+        .expect("accepted mapping is pinned before acquisition");
+    drop(state);
+
+    let changed = crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", "")
+            .replace(
+                "https://github.com/KeenWill/signalbox.git",
+                "https://github.com/KeenWill/different.git",
+            ),
+    )
+    .expect("changed repository configuration");
+    let mut state =
+        RunnerStateRoot::open(&directory.path().join("state")).expect("restart retains provision");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt).with_configuration(changed);
+    let mut hub = BufReader::new(hub);
+
+    runner
+        .ensure_workspace(&mut state)
+        .expect("changed mapping becomes a retained refusal");
+    let failure = state
+        .retained_provision_failure()
+        .expect("manifest conflict is retained");
+    assert_eq!(failure.category, FailureCategory::WorkspaceConflict);
+    runner
+        .send_retained_workspace(&state)
+        .await
+        .expect("send retained refusal");
+    assert!(matches!(
+        receive_message(&mut hub).await.expect("operation failure"),
+        Message::OperationFailed(failed)
+            if failed.failure.category == FailureCategory::WorkspaceConflict
+    ));
+}
+
+#[tokio::test]
 async fn anonymous_clone_failure_is_retained_while_the_runner_keeps_serving() {
     failed_anonymous_clone(false).await;
 }
@@ -197,7 +249,10 @@ async fn failed_anonymous_clone(missing_revision: bool) {
         .expect("advertised anonymous acquisition")
         .with_local_clone_fixture(source.to_str().expect("fixture path").to_owned());
     state
-        .record_provision(request.clone())
+        .record_provision(
+            request.clone(),
+            checked.canonical_clone_url_digest().clone(),
+        )
         .expect("durable authorization before clone");
     let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt.clone()).with_configuration(config.clone());
@@ -372,7 +427,9 @@ async fn release_journal_survives_disconnect_and_clears_only_on_exact_acknowledg
     let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt);
     let mut hub = BufReader::new(hub);
-    runner.ensure_workspace(&state).expect("terminal journal");
+    runner
+        .ensure_workspace(&mut state)
+        .expect("terminal journal");
     runner
         .send_retained_workspace(&state)
         .await
@@ -481,13 +538,15 @@ async fn rejected_replacement_after_workspace_ready_is_deleted_and_release_is_se
     let mut runner = connection(stream, receipt.clone());
     let mut hub = BufReader::new(hub);
     state
-        .record_provision(operation.clone())
+        .record_provision(operation.clone(), configured_clone_url_digest())
         .expect("accepted repository operation");
     let ready = prepared_repository(&state, operation).await;
     state
         .record_workspace_ready(ready)
         .expect("retained repository receipt");
-    runner.ensure_workspace(&state).expect("retained workspace");
+    runner
+        .ensure_workspace(&mut state)
+        .expect("retained workspace");
     runner
         .serve_one(&mut state)
         .await
@@ -740,7 +799,7 @@ async fn duplicate_provision_failure_acknowledgement_preserves_a_later_failure()
     let (stream, _hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt.clone());
     state
-        .record_provision(provision(&receipt))
+        .record_provision(provision(&receipt), configured_clone_url_digest())
         .expect("first admitted operation");
     runner
         .finish_provision(
@@ -763,7 +822,7 @@ async fn duplicate_provision_failure_acknowledgement_preserves_a_later_failure()
         .await
         .expect("first acknowledgement");
     state
-        .record_provision(provision(&receipt))
+        .record_provision(provision(&receipt), configured_clone_url_digest())
         .expect("next admitted operation");
     runner
         .finish_provision(
