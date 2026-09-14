@@ -48,10 +48,18 @@ async fn a_replaced_connection_cannot_record_or_replay_workspace_ready()
     provision_with_candidate_capabilities(ProvisionCase::StaleReady).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn changed_registration_cannot_dispatch_a_prior_workspace_authorization()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::RegistrationChanged).await
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProvisionCase {
     Supported,
     Reconnected,
+    RegistrationChanged,
     StaleReady,
     UnbornRepository,
     Unsupported,
@@ -140,6 +148,7 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         ProvisionCase::Supported
             | ProvisionCase::UnbornRepository
             | ProvisionCase::Reconnected
+            | ProvisionCase::RegistrationChanged
             | ProvisionCase::StaleReady
     ) {
         let rejected =
@@ -345,6 +354,69 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         .load_placement(session)
         .await?
         .expect("installed placement");
+    if case == ProvisionCase::RegistrationChanged {
+        let active = store
+            .load_enrollment(candidate.identities().enrollment())
+            .await?
+            .expect("promoted owner");
+        store.register(&active, narrowed_advertisement()).await?;
+        append_runner_registration_loss_projection(&pool, session).await?;
+        let restored = store.register(&active, advertisement()).await?;
+        let retry = signalbox_domain::ReplaceLostRunner {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            revision: None,
+        };
+        assert_eq!(
+            store.replace_lost_runner(retry).await?,
+            RunnerRecoveryOutcome::Pending
+        );
+        let pending = store
+            .replacement_provisioning(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch(),
+            )
+            .await?;
+        assert_eq!(pending.len(), 1);
+        let updated = store
+            .resume_registration(
+                candidate.request(),
+                candidate.identities(),
+                restored.revision(),
+                advertisement().with_default_working_directory(Some(
+                    RunnerWorkingDirectory::try_new("/updated-workspace".to_owned())
+                        .expect("changed directory"),
+                )),
+            )
+            .await?;
+        assert_ne!(
+            updated.registration().revision().get(),
+            pending[0].registration_revision.get()
+        );
+        let next = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert!(
+            store
+                .replacement_provisioning(candidate.identities().enrollment(), next.epoch())
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .replacement_provisioning_authorization(pending[0].authorization)
+                .await?,
+            Some(pending[0].clone())
+        );
+        assert_eq!(
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("live successor")
+                .state(),
+            RunnerConnectionState::Connected
+        );
+    }
     if case == ProvisionCase::UnbornRepository {
         let persisted: (String, Option<String>, String) = sqlx::query_as("SELECT workspace_recovery_kind, workspace_revision, workspace_branch_name FROM runner_session_placement_record WHERE session_id = $1 AND workspace_manifest_id = $2")
             .bind(session.into_uuid()).bind(ready.manifest_id.into_uuid()).fetch_one(&pool).await?;

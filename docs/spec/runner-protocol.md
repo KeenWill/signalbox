@@ -173,7 +173,9 @@ provisioning and release work only for the current connection epoch and
 serializes provisioning and lease delivery on each connection until the
 corresponding durable outcome is acknowledged. Expected acquisition refusals are
 journaled as `operation_failed` and retained through heartbeat and reconnect
-until acknowledged; the runner keeps serving.
+until acknowledged; the runner keeps serving. Provisioning dispatch also
+requires the authorization’s registration revision to match the current
+registration head.
 
 ## Boundary contracts
 
