@@ -21,7 +21,11 @@ impl RunnerProtocolStore {
             JOIN runner_replacement_workspace_ready ready USING (authorization_id)
             JOIN runner_replacement_workspace_release cleanup USING (authorization_id)
             JOIN runner_enrollment enrollment ON enrollment.enrollment_id = operation.registration_enrollment_id
-            WHERE enrollment.enrollment_id = $1 AND enrollment.state_kind <> 'revoked'
+            JOIN runner_connection_authority_head head ON head.enrollment_id = enrollment.enrollment_id
+            LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
+                FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
+            WHERE (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
+                AND enrollment.enrollment_id = $1 AND enrollment.state_kind <> 'revoked'
                 AND operation.session_id = $2 AND operation.placement_revision = $3
                 AND operation.runner_id = $4 AND enrollment.runner_id = $4
                 AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
@@ -67,7 +71,10 @@ impl RunnerProtocolStore {
             JOIN runner_enrollment enrollment ON enrollment.enrollment_id = operation.registration_enrollment_id
             JOIN runner_connection_authority_head head ON head.enrollment_id = enrollment.enrollment_id
             JOIN runner_connection_event event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
-            WHERE enrollment.enrollment_id = $1 AND head.connection_epoch = $2 AND event.state_kind = 'connected'
+            LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
+                FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
+            WHERE (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
+                AND enrollment.enrollment_id = $1 AND head.connection_epoch = $2 AND event.state_kind = 'connected'
                 AND enrollment.state_kind <> 'revoked' AND operation.session_id = $3
                 AND operation.placement_revision = $4 AND operation.runner_id = enrollment.runner_id AND ready.manifest_id = $5
                 AND result.result_kind = 'rejected'
@@ -118,6 +125,7 @@ impl RunnerProtocolStore {
     pub async fn record_replacement_workspace_released(
         &self,
         enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
         session: SessionId,
         revision: RunnerGeneration,
         runner: RunnerId,
@@ -144,14 +152,14 @@ impl RunnerProtocolStore {
             LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
                 FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
             JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
-            WHERE operation.registration_enrollment_id = $1 AND operation.session_id = $2
+            WHERE head.connection_epoch = $6 AND operation.registration_enrollment_id = $1 AND operation.session_id = $2
               AND operation.placement_revision = $3 AND operation.runner_id = $4
               AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
               AND COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch) = head.connection_epoch
               AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
               AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption AS consumption WHERE consumption.authorization_id = operation.authorization_id)")
             .bind(enrollment.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
-            .bind(runner.into_uuid()).bind(manifest.into_uuid()).fetch_optional(&mut *transaction).await?;
+            .bind(runner.into_uuid()).bind(manifest.into_uuid()).bind(Decimal::from(epoch.get())).fetch_optional(&mut *transaction).await?;
         let authorization = authorization.ok_or(RunnerProtocolStoreError::Domain(
             RunnerDomainError::CorrelationMismatch,
         ))?;

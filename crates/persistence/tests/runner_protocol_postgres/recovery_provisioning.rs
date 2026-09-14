@@ -684,26 +684,43 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, false, false).await
+    rejected_staging_releases_ready_workspace(false, None, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(true, false, false).await
+    rejected_staging_releases_ready_workspace(true, None, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, true, false).await
+    rejected_staging_releases_ready_workspace(
+        false,
+        Some(RunnerConnectionTransition::TransportClosed),
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retained_release_authority_is_not_reissued_after_heartbeat_loss()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(
+        false,
+        Some(RunnerConnectionTransition::HeartbeatTimeout),
+        false,
+    )
+    .await
 }
 
 async fn rejected_staging_releases_ready_workspace(
     late_ready: bool,
-    successor_epoch: bool,
+    loss: Option<RunnerConnectionTransition>,
     reconnect_release: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -854,13 +871,6 @@ async fn rejected_staging_releases_ready_workspace(
         vec![ready.clone()]
     );
     if reconnect_release {
-        store
-            .transition_connection(
-                candidate.identities().enrollment(),
-                candidate_connection.epoch(),
-                RunnerConnectionTransition::TransportClosed,
-            )
-            .await?;
         let next = store
             .open_connection(candidate.identities().enrollment())
             .await?;
@@ -889,9 +899,30 @@ async fn rejected_staging_releases_ready_workspace(
                 .await?,
             vec![ready.clone()]
         );
+        assert!(
+            store
+                .record_replacement_workspace_released(
+                    candidate.identities().enrollment(),
+                    candidate_connection.epoch(),
+                    session,
+                    ready.placement_revision,
+                    ready.runner,
+                    ready.manifest_id,
+                )
+                .await
+                .is_err()
+        );
+        let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_released WHERE authorization_id = $1")
+            .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(recorded, 0);
         store
             .record_replacement_workspace_released(
                 candidate.identities().enrollment(),
+                store
+                    .load_connection(candidate.identities().enrollment())
+                    .await?
+                    .expect("release owner connection")
+                    .epoch(),
                 session,
                 ready.placement_revision,
                 ready.runner,
@@ -910,9 +941,27 @@ async fn rejected_staging_releases_ready_workspace(
                 ready.manifest_id,
             )
             .await?;
+        assert!(
+            store
+                .record_replacement_workspace_released(
+                    candidate.identities().enrollment(),
+                    candidate_connection.epoch(),
+                    session,
+                    ready.placement_revision,
+                    ready.runner,
+                    ready.manifest_id,
+                )
+                .await
+                .is_err()
+        );
         store
             .record_replacement_workspace_released(
                 candidate.identities().enrollment(),
+                store
+                    .load_connection(candidate.identities().enrollment())
+                    .await?
+                    .expect("release owner connection")
+                    .epoch(),
                 session,
                 ready.placement_revision,
                 ready.runner,
@@ -936,18 +985,54 @@ async fn rejected_staging_releases_ready_workspace(
             ready.manifest_id,
         )
         .await?;
-    if successor_epoch {
+    if let Some(loss) = loss {
         store
             .transition_connection(
                 candidate.identities().enrollment(),
                 candidate_connection.epoch(),
-                RunnerConnectionTransition::TransportClosed,
+                loss,
             )
             .await?;
+        assert!(
+            store
+                .validate_replacement_workspace_release(
+                    candidate.identities().enrollment(),
+                    session,
+                    ready.placement_revision,
+                    ready.runner,
+                    ready.manifest_id,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("lost head")
+                .epoch(),
+            candidate_connection.epoch()
+        );
         let successor = store
             .open_connection(candidate.identities().enrollment())
             .await?;
         assert_ne!(successor.epoch(), candidate_connection.epoch());
+        assert!(
+            store
+                .reauthorize_replacement_workspace_release(
+                    candidate.identities().enrollment(),
+                    successor.epoch(),
+                    session,
+                    ready.placement_revision,
+                    ready.manifest_id,
+                )
+                .await
+                .is_err()
+        );
+        let reauthorized: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = $1")
+            .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(reauthorized, 0);
+
         assert!(
             store
                 .replacement_workspace_releases(
@@ -961,6 +1046,11 @@ async fn rejected_staging_releases_ready_workspace(
             store
                 .record_replacement_workspace_released(
                     candidate.identities().enrollment(),
+                    store
+                        .load_connection(candidate.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
                     session,
                     ready.placement_revision,
                     ready.runner,
@@ -977,6 +1067,11 @@ async fn rejected_staging_releases_ready_workspace(
         store
             .record_replacement_workspace_released(
                 candidate.identities().enrollment(),
+                store
+                    .load_connection(candidate.identities().enrollment())
+                    .await?
+                    .expect("release owner connection")
+                    .epoch(),
                 session,
                 ready.placement_revision,
                 ready.runner,
@@ -988,6 +1083,11 @@ async fn rejected_staging_releases_ready_workspace(
     store
         .record_replacement_workspace_released(
             candidate.identities().enrollment(),
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("release owner connection")
+                .epoch(),
             session,
             ready.placement_revision,
             ready.runner,
@@ -997,6 +1097,11 @@ async fn rejected_staging_releases_ready_workspace(
     store
         .record_replacement_workspace_released(
             candidate.identities().enrollment(),
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("release owner connection")
+                .epoch(),
             session,
             ready.placement_revision,
             ready.runner,
@@ -1019,5 +1124,5 @@ async fn rejected_staging_releases_ready_workspace(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn reconnect_reauthorizes_release_and_reconciles_completed_replay()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, false, true).await
+    rejected_staging_releases_ready_workspace(false, None, true).await
 }

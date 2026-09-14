@@ -130,6 +130,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn workspace_released_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> Result<signalbox_runner_wire::WorkspaceReleaseRecorded, RunnerRegistrationFailure> {
         let correlation = receipt.correlation;
@@ -150,6 +151,11 @@ impl PostgresRunnerRegistrationService {
         self.store
             .record_replacement_workspace_released(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                    failure(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::CorrelationMismatch,
+                    ))
+                })?,
                 signalbox_domain::SessionId::from_uuid(correlation.session_id.into_uuid()),
                 revision,
                 RunnerId::from_uuid(correlation.runner_id.into_uuid()),

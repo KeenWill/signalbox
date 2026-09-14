@@ -642,6 +642,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn record_replacement_workspace_released(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
         session: signalbox_domain::SessionId,
         revision: signalbox_domain::RunnerGeneration,
         runner: signalbox_domain::RunnerId,

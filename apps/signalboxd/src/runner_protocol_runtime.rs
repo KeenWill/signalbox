@@ -156,6 +156,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn workspace_released(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded>;
     /// Retains a correlated provisioning refusal before acknowledging it.
@@ -851,6 +852,8 @@ impl PostgresRunnerRegistrationService {
             if *phase == signalbox_runner_wire::ReleasePhase::ReleaseCompleted {
                 self.workspace_released_durably(
                     request.enrollment_id,
+                    PositiveU64::try_new(connection.epoch().get())
+                        .map_err(|_| invalid_inventory())?,
                     signalbox_runner_wire::WorkspaceReleased {
                         correlation: release.clone(),
                     },
@@ -1346,9 +1349,10 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn workspace_released(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded> {
-        Box::pin(self.workspace_released_durably(enrollment, receipt))
+        Box::pin(self.workspace_released_durably(enrollment, epoch, receipt))
     }
     fn provisioning_failed(
         &self,
@@ -2205,7 +2209,7 @@ where
                 match frame.message {
                     Message::WorkspaceReleased(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReleased, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.workspace_released(context.enrollment, receipt).await {
+                        match service.workspace_released(context.enrollment, context.epoch, receipt).await {
                             Ok(recorded) => {
                                 if busy_release.as_ref() == Some(&recorded.correlation) { busy_release = None; }
                                 write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?;
@@ -3129,6 +3133,7 @@ mod tests {
         fn workspace_released(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
             receipt: signalbox_runner_wire::WorkspaceReleased,
         ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded> {
             Box::pin(async move {
