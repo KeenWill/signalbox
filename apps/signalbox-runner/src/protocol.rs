@@ -32,6 +32,7 @@ use crate::{
 
 mod leaks;
 mod workspaces;
+pub use workspaces::WorkspaceReleaseWorker;
 
 const SOCKET_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;

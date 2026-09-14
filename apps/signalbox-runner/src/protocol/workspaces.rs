@@ -4,17 +4,41 @@ use super::*;
 use crate::workspace::provision::{CheckedProvision, prepared_receipt};
 use signalbox_runner_wire::{WorkspaceProvision, WorkspaceReady, WorkspaceRecorded};
 
+pub(super) struct WorkspacePreparationWorker {
+    task: tokio::task::JoinHandle<Result<WorkspaceReady, crate::WorkspaceProvisionError>>,
+}
+
+impl Drop for WorkspacePreparationWorker {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// In-flight release work that can move between physical connections.
+#[doc(hidden)]
+pub struct WorkspaceReleaseWorker {
+    task: tokio::task::JoinHandle<(signalbox_runner_wire::ReleaseCorrelation, bool)>,
+}
+
+impl WorkspaceReleaseWorker {
+    pub(super) fn new(
+        task: tokio::task::JoinHandle<(signalbox_runner_wire::ReleaseCorrelation, bool)>,
+    ) -> Self {
+        Self { task }
+    }
+}
+
 pub(super) enum WorkspaceExecution {
-    Preparing(tokio::task::JoinHandle<Result<WorkspaceReady, crate::WorkspaceProvisionError>>),
-    Releasing(tokio::task::JoinHandle<(signalbox_runner_wire::ReleaseCorrelation, bool)>),
+    Preparing(WorkspacePreparationWorker),
+    Releasing(WorkspaceReleaseWorker),
     Ready,
 }
 
-impl Drop for WorkspaceExecution {
-    fn drop(&mut self) {
-        if let Self::Preparing(task) = self {
-            task.abort();
-        }
+impl WorkspaceExecution {
+    pub(super) fn preparing(
+        task: tokio::task::JoinHandle<Result<WorkspaceReady, crate::WorkspaceProvisionError>>,
+    ) -> Self {
+        Self::Preparing(WorkspacePreparationWorker { task })
     }
 }
 
@@ -30,12 +54,12 @@ pub(super) async fn workspace_finished(
     workspace: &mut Option<WorkspaceExecution>,
 ) -> Result<WorkspaceCompletion, RunnerConnectionError> {
     match workspace {
-        Some(WorkspaceExecution::Preparing(task)) => task
+        Some(WorkspaceExecution::Preparing(worker)) => (&mut worker.task)
             .await
             .map_err(|_| RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage))
             .map(|result| WorkspaceCompletion::Ready(Box::new(result))),
-        Some(WorkspaceExecution::Releasing(task)) => {
-            let (correlation, succeeded) = task.await.map_err(|_| {
+        Some(WorkspaceExecution::Releasing(worker)) => {
+            let (correlation, succeeded) = (&mut worker.task).await.map_err(|_| {
                 RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage)
             })?;
             Ok(WorkspaceCompletion::Released {
@@ -48,6 +72,25 @@ pub(super) async fn workspace_finished(
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
+    /// Restores the exact release executor retained across a reconnect.
+    #[doc(hidden)]
+    pub fn restore_workspace_release_worker(&mut self, worker: WorkspaceReleaseWorker) {
+        debug_assert!(self.workspace.is_none());
+        self.workspace = Some(WorkspaceExecution::Releasing(worker));
+    }
+
+    /// Removes an in-flight release executor so reconnect does not duplicate it.
+    #[doc(hidden)]
+    pub fn take_workspace_release_worker(&mut self) -> Option<WorkspaceReleaseWorker> {
+        match self.workspace.take() {
+            Some(WorkspaceExecution::Releasing(worker)) => Some(worker),
+            other => {
+                self.workspace = other;
+                None
+            }
+        }
+    }
+
     pub(super) fn check_workspace(
         &self,
         operation: WorkspaceProvision,
@@ -75,11 +118,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         if state.retained_release().is_some() {
             self.workspace = if let Some(accepted) = state.accepted_release() {
                 let store = state.workspace_store()?;
-                Some(WorkspaceExecution::Releasing(tokio::task::spawn_blocking(
-                    move || {
+                Some(WorkspaceExecution::Releasing(WorkspaceReleaseWorker::new(
+                    tokio::task::spawn_blocking(move || {
                         let correlation = accepted.correlation().clone();
                         (correlation, store.release(&accepted).is_ok())
-                    },
+                    }),
                 )))
             } else {
                 Some(WorkspaceExecution::Ready)
@@ -91,7 +134,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         };
         let checked = self.check_workspace(request.clone())?;
         let store = state.workspace_store()?;
-        self.workspace = Some(WorkspaceExecution::Preparing(tokio::spawn(
+        self.workspace = Some(WorkspaceExecution::preparing(tokio::spawn(
             checked.prepare(store),
         )));
         Ok(())

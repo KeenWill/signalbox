@@ -133,6 +133,8 @@ upon an exact `workspace_recorded` acknowledgement. A repository records a
 commit, a branch and commit, or an `unborn_branch` with its name and no commit
 revision.
 
+An in-flight release keeps the same worker across physical connections.
+
 The runner retains the complete provisioning request and ready receipt in its
 private journal. Restart recomputes the fixed path and authenticates the root
 and manifest, preserving session files. Equal replay retains the manifest
@@ -386,16 +388,17 @@ placement path, which is not a runner placement fact.
 `promote_pending_runner` names the pending enrollment request and atomically
 revokes its lost predecessor and promotes its exact enrollment and registration;
 it changes no session placement. The daemon delivers the promoted `enrolled`
-receipt on the candidate connection; the runner fsyncs its exact promotion and
-equal replay changes nothing. `replace_lost_runner` names a lost session and an
-optional checkout revision, promotes a connected pending successor when needed,
-and installs the successor placement and grant lineage. Successor selection
-follows the enrollment chain to its current pending or active descendant.
-Pre-pin replacement provisions nothing and returns to unpinned at the next
-revision. Replacement behind an active model call or tool batch remains staged
-until its observation or complete-result boundary. Registration-triggered loss
-permits replacement on the same runner after its current registration satisfies
-the retained request; other loss sources require a different runner.
+receipt on the candidate connection before releasing its provisioning slot or
+delivering a lease offer; the runner fsyncs its exact promotion and equal replay
+changes nothing. `replace_lost_runner` names a lost session and an optional
+checkout revision, promotes a connected pending successor when needed, and
+installs the successor placement and grant lineage. Successor selection follows
+the enrollment chain to its current pending or active descendant. Pre-pin
+replacement provisions nothing and returns to unpinned at the next revision.
+Replacement behind an active model call or tool batch remains staged until its
+observation or complete-result boundary. Registration-triggered loss permits
+replacement on the same runner after its current registration satisfies the
+retained request; other loss sources require a different runner.
 
 Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,

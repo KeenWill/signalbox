@@ -16,7 +16,8 @@ pub use configuration::{
 };
 pub use protocol::{
     ConnectionEnd, EnrollmentOutcome, MessageKind, ProtocolViolation, RunnerConnection,
-    RunnerConnectionError, ServeOutcome, SocketConnectError, connect_verified,
+    RunnerConnectionError, ServeOutcome, SocketConnectError, WorkspaceReleaseWorker,
+    connect_verified,
 };
 pub use state::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
