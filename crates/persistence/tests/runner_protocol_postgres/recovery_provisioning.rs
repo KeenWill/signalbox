@@ -445,6 +445,11 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             store
                 .record_workspace_release_outcome(
                     predecessor.identities().enrollment(),
+                    store
+                        .load_connection(predecessor.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
                     &release,
                     None
                 )
@@ -452,7 +457,16 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
                 .is_err()
         );
         store
-            .record_workspace_release_outcome(candidate.identities().enrollment(), &release, None)
+            .record_workspace_release_outcome(
+                candidate.identities().enrollment(),
+                store
+                    .load_connection(candidate.identities().enrollment())
+                    .await?
+                    .expect("release owner connection")
+                    .epoch(),
+                &release,
+                None,
+            )
             .await?;
     }
     if case == ProvisionCase::UnbornRepository {
@@ -804,33 +818,63 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, false, false).await
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Current, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(true, false, false).await
+    rejected_staging_releases_ready_workspace(true, ReleaseEpoch::Current, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, true, false).await
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Lost, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn cleanup_failure_retires_release_and_preserves_exact_detail() -> Result<(), Box<dyn Error>>
 {
-    rejected_staging_releases_ready_workspace(false, false, true).await
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Current, true).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn release_outcomes_reject_a_fenced_connection_before_storage_and_replay()
+-> Result<(), Box<dyn Error>> {
+    for cleanup_failed in [false, true] {
+        rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Fenced, cleanup_failed)
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retained_release_outcomes_reconcile_before_a_new_epoch_opens() -> Result<(), Box<dyn Error>>
+{
+    for cleanup_failed in [false, true] {
+        rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Retained, cleanup_failed)
+            .await?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ReleaseEpoch {
+    Current,
+    Lost,
+    Fenced,
+    Retained,
 }
 
 async fn rejected_staging_releases_ready_workspace(
     late_ready: bool,
-    successor_epoch: bool,
+    release_epoch: ReleaseEpoch,
     cleanup_failed: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -996,7 +1040,63 @@ async fn rejected_staging_releases_ready_workspace(
             .await?,
         vec![release_receipt(&ready, ready.manifest_id)]
     );
-    if successor_epoch {
+    if matches!(release_epoch, ReleaseEpoch::Fenced | ReleaseEpoch::Retained) {
+        let enrollment = candidate.identities().enrollment();
+        let release = release_receipt(&ready, ready.manifest_id);
+        let detail = serde_json::json!({"code":"cleanup_denied", "message":"retained cleanup failure", "payload":{}});
+        let failure = cleanup_failed.then_some(&detail);
+        let original_epoch = candidate_connection.epoch();
+        if matches!(release_epoch, ReleaseEpoch::Retained) {
+            store
+                .reconcile_workspace_release_outcome(enrollment, &release, failure)
+                .await?;
+            assert_eq!(
+                store
+                    .load_connection(enrollment)
+                    .await?
+                    .expect("retained head")
+                    .epoch(),
+                original_epoch
+            );
+        }
+        let successor = store.open_connection(enrollment).await?;
+        assert!(
+            store
+                .record_workspace_release_outcome(enrollment, original_epoch, &release, failure)
+                .await
+                .is_err()
+        );
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_release_outcome WHERE manifest_id = $1",
+        )
+        .bind(ready.manifest_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            recorded,
+            i64::from(matches!(release_epoch, ReleaseEpoch::Retained))
+        );
+        for _ in 0..2 {
+            store
+                .record_workspace_release_outcome(enrollment, successor.epoch(), &release, failure)
+                .await?;
+        }
+        assert!(
+            store
+                .record_workspace_release_outcome(enrollment, original_epoch, &release, failure)
+                .await
+                .is_err()
+        );
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_release_outcome WHERE manifest_id = $1",
+        )
+        .bind(ready.manifest_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(recorded, 1);
+        return Ok(());
+    }
+    if matches!(release_epoch, ReleaseEpoch::Lost) {
         store
             .transition_connection(
                 candidate.identities().enrollment(),
@@ -1021,6 +1121,11 @@ async fn rejected_staging_releases_ready_workspace(
             store
                 .record_workspace_release_outcome(
                     candidate.identities().enrollment(),
+                    store
+                        .load_connection(candidate.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
                     &release_receipt(&ready, ready.manifest_id),
                     None
                 )
@@ -1062,6 +1167,11 @@ async fn rejected_staging_releases_ready_workspace(
         store
             .record_workspace_release_outcome(
                 candidate.identities().enrollment(),
+                store
+                    .load_connection(candidate.identities().enrollment())
+                    .await?
+                    .expect("release owner connection")
+                    .epoch(),
                 &release_receipt(&ready, WorkspaceManifestId::from_uuid(Uuid::now_v7())),
                 None
             )
@@ -1084,6 +1194,11 @@ async fn rejected_staging_releases_ready_workspace(
             store
                 .record_workspace_release_outcome(
                     candidate.identities().enrollment(),
+                    store
+                        .load_connection(candidate.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
                     &release_receipt(&ready, ready.manifest_id),
                     Some(&detail),
                 )
@@ -1105,6 +1220,11 @@ async fn rejected_staging_releases_ready_workspace(
             store
                 .record_workspace_release_outcome(
                     candidate.identities().enrollment(),
+                    store
+                        .load_connection(candidate.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
                     &release_receipt(&ready, ready.manifest_id),
                     None
                 )
@@ -1142,6 +1262,11 @@ async fn rejected_staging_releases_ready_workspace(
     store
         .record_workspace_release_outcome(
             candidate.identities().enrollment(),
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("release owner connection")
+                .epoch(),
             &release_receipt(&ready, ready.manifest_id),
             None,
         )
@@ -1149,6 +1274,11 @@ async fn rejected_staging_releases_ready_workspace(
     store
         .record_workspace_release_outcome(
             candidate.identities().enrollment(),
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("release owner connection")
+                .epoch(),
             &release_receipt(&ready, ready.manifest_id),
             None,
         )
@@ -1580,7 +1710,16 @@ async fn startup_report_preserves_retired_initial_workspace_release_outcomes()
         match &outcome {
             ReleaseState::CleanupFailed(detail) => {
                 store
-                    .record_workspace_release_outcome(enrolled.enrollment(), &release, Some(detail))
+                    .record_workspace_release_outcome(
+                        enrolled.enrollment(),
+                        store
+                            .load_connection(enrolled.enrollment())
+                            .await?
+                            .expect("release owner connection")
+                            .epoch(),
+                        &release,
+                        Some(detail),
+                    )
                     .await?
             }
             ReleaseState::Unowned => {
@@ -1594,7 +1733,16 @@ async fn startup_report_preserves_retired_initial_workspace_release_outcomes()
             }
             ReleaseState::Completed => {
                 store
-                    .record_workspace_release_outcome(enrolled.enrollment(), &release, None)
+                    .record_workspace_release_outcome(
+                        enrolled.enrollment(),
+                        store
+                            .load_connection(enrolled.enrollment())
+                            .await?
+                            .expect("release owner connection")
+                            .epoch(),
+                        &release,
+                        None,
+                    )
                     .await?
             }
             ReleaseState::Pending => {}

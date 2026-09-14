@@ -168,6 +168,10 @@ until acknowledged; the runner keeps serving.
 
 ## Workspace release and leak reporting
 
+Live release outcomes require the caller's current connection epoch in the
+storage transaction, including equal replay. Authenticated Resume reconciles
+retained completion or failure before opening the next epoch.
+
 The daemon issues cleanup for a retired manifest only to its connected owner,
 after its leases and results settle. Plain-directory placements have no manifest
 and receive no cleanup. Connection loss retires an outstanding release as
@@ -195,6 +199,8 @@ outstanding, cleanup-failed, or unowned release.
 
 Before accepting new provisioning or executing tools, startup reports ready and
 active manifests and unknown entries in bounded, digest-correlated pages.
+Unknown entries include direct root children other than the enrollment, journal
+and active-workspace documents and the managed `sessions/` and `trash/` trees.
 Scanning waits for canceled staging cleanup to finish; successfully removed
 unpublished workspaces produce no leak fact. Provisioning waits until every
 startup page is acknowledged. The daemon reconciles exact retained ready facts,

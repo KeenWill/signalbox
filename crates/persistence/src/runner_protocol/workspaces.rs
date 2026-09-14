@@ -97,10 +97,33 @@ impl RunnerProtocolStore {
         ))
     }
 
-    /// Commits completion or cleanup failure before the daemon acknowledges it.
+    /// Commits a live connection's release outcome under its current epoch.
     pub async fn record_workspace_release_outcome(
         &self,
         enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        expected: &RunnerWorkspaceRelease,
+        failure_detail: Option<&serde_json::Value>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_workspace_release_outcome(enrollment, Some(epoch), expected, failure_detail)
+            .await
+    }
+
+    /// Reconciles retained release evidence after Resume authentication, before opening its epoch.
+    pub async fn reconcile_workspace_release_outcome(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        expected: &RunnerWorkspaceRelease,
+        failure_detail: Option<&serde_json::Value>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_workspace_release_outcome(enrollment, None, expected, failure_detail)
+            .await
+    }
+
+    async fn store_workspace_release_outcome(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: Option<RunnerConnectionEpoch>,
         expected: &RunnerWorkspaceRelease,
         failure_detail: Option<&serde_json::Value>,
     ) -> Result<(), RunnerProtocolStoreError> {
@@ -117,6 +140,18 @@ impl RunnerProtocolStore {
             .bind(enrollment.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
+        if let Some(epoch) = epoch {
+            let current = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+            if !current.is_some_and(|head| {
+                head.epoch() == epoch
+                    && matches!(
+                        head.state(),
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                    )
+            }) {
+                return Err(mismatch());
+            }
+        }
         let row = sqlx::query("SELECT release.*, outcome.outcome, outcome.detail FROM runner_workspace_release release
             LEFT JOIN runner_workspace_release_outcome outcome USING (manifest_id)
             WHERE release.manifest_id = $1 AND release.enrollment_id = $2")
