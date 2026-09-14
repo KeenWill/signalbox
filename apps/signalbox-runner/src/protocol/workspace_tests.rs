@@ -271,7 +271,7 @@ async fn failed_anonymous_clone(missing_revision: bool) {
     let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt.clone()).with_configuration(config.clone());
     runner.advertisement = config.advertisement().clone();
-    runner.workspace = Some(workspaces::WorkspaceExecution::Preparing(tokio::spawn(
+    runner.workspace = Some(workspaces::WorkspaceExecution::preparing(tokio::spawn(
         checked.prepare(state.workspace_store().expect("store")),
     )));
     let mut hub = BufReader::new(hub);
@@ -464,6 +464,69 @@ async fn release_journal_survives_disconnect_and_clears_only_on_exact_acknowledg
         .await
         .expect("exact acknowledgement");
     assert!(state.retained_release().is_none());
+}
+
+#[tokio::test]
+async fn release_worker_moves_to_the_reconnected_transport() {
+    use signalbox_runner_wire::{ReleaseCorrelation, WorkspaceReleased};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let correlation = ReleaseCorrelation {
+        session_id: identity(),
+        placement_revision: positive(),
+        runner_id: receipt.runner_id(),
+        manifest_id: identity(),
+    };
+    state
+        .record_release(correlation.clone())
+        .expect("accepted release");
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let worker_runs = Arc::clone(&runs);
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (finish_sender, finish_receiver) = std::sync::mpsc::channel();
+    let worker_correlation = correlation.clone();
+    let worker = workspaces::WorkspaceReleaseWorker::new(tokio::task::spawn_blocking(move || {
+        worker_runs.fetch_add(1, Ordering::SeqCst);
+        started_sender.send(()).expect("observe worker start");
+        finish_receiver.recv().expect("release worker gate");
+        (worker_correlation, true)
+    }));
+
+    let (first_stream, first_hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut first = connection(first_stream, receipt.clone());
+    first.restore_workspace_release_worker(worker);
+    started_receiver.await.expect("worker started");
+    drop(first_hub);
+    assert!(matches!(
+        first.serve_one(&mut state).await,
+        Err(RunnerConnectionError::PeerClosed)
+    ));
+    let worker = first
+        .take_workspace_release_worker()
+        .expect("disconnect retains release worker");
+    drop(first);
+
+    let (second_stream, second_hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut second = connection(second_stream, receipt);
+    let mut second_hub = BufReader::new(second_hub);
+    second.restore_workspace_release_worker(worker);
+    finish_sender.send(()).expect("finish retained worker");
+    let complete = second.serve_one(&mut state);
+    let receive = receive_message(&mut second_hub);
+    let (completed, released) = tokio::join!(complete, receive);
+    completed.expect("retained worker completes on new transport");
+    assert_eq!(
+        released.expect("release receipt"),
+        Message::WorkspaceReleased(WorkspaceReleased { correlation })
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
