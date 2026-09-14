@@ -56,16 +56,17 @@ impl RunnerProtocolStore {
     pub async fn workspace_releases(
         &self,
         enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
     ) -> Result<Vec<RunnerWorkspaceRelease>, RunnerProtocolStoreError> {
         let rows = sqlx::query("SELECT release.* FROM runner_workspace_release release
             JOIN runner_enrollment enrollment USING (enrollment_id)
             JOIN runner_connection_authority_head head USING (enrollment_id)
             JOIN runner_connection_event event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
-            WHERE release.enrollment_id = $1 AND enrollment.state_kind <> 'revoked' AND event.state_kind IN ('connected','suspect')
+            WHERE release.enrollment_id = $1 AND head.connection_epoch = $2 AND enrollment.state_kind <> 'revoked' AND event.state_kind IN ('connected','suspect')
                 AND NOT EXISTS (SELECT 1 FROM runner_workspace_release_outcome outcome WHERE outcome.manifest_id = release.manifest_id)
                 AND NOT EXISTS (SELECT 1 FROM runner_connection_loss_epoch loss WHERE loss.enrollment_id = release.enrollment_id AND loss.connection_epoch >= release.connection_epoch)
             ORDER BY release.session_id, release.placement_revision, release.manifest_id")
-            .bind(enrollment.into_uuid()).fetch_all(&self.pool).await?;
+            .bind(enrollment.into_uuid()).bind(Decimal::from(epoch.get())).fetch_all(&self.pool).await?;
         rows.iter().map(correlation).collect()
     }
 
