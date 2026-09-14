@@ -524,6 +524,48 @@ impl RunnerStateRoot {
             .acknowledge_release(&self.directory, correlation)
     }
 
+    /// Authenticates acknowledged workspace identities before reconnecting after startup.
+    pub fn authenticate_active_workspaces(
+        &self,
+        configuration: &crate::RunnerConfiguration,
+    ) -> Result<(), crate::WorkspaceProvisionError> {
+        use crate::WorkspaceProvisionError;
+        let store = self
+            .workspace_store()
+            .map_err(|_| WorkspaceProvisionError::Storage)?;
+        for active in self.journal.active_workspaces() {
+            let ready = &active.ready;
+            let manifest = &ready.ready.manifest;
+            if !configuration
+                .advertisement()
+                .sandbox_profiles
+                .contains(&manifest.sandbox_profile)
+            {
+                return Err(WorkspaceProvisionError::ManifestConflict);
+            }
+            if let Some(key) = &manifest.repository {
+                let repository = configuration
+                    .repository(key)
+                    .ok_or(WorkspaceProvisionError::ManifestConflict)?;
+                if repository.credential_profile() != manifest.credential_profile.as_ref()
+                    || manifest.canonical_clone_url_digest.as_ref()
+                        != Some(&signalbox_runner_wire::clone_url_digest(
+                            repository.clone_url(),
+                        ))
+                {
+                    return Err(WorkspaceProvisionError::ManifestConflict);
+                }
+            }
+            let observed = store
+                .authenticate_active(ready)
+                .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
+            if observed != active.directory_identity {
+                return Err(WorkspaceProvisionError::ManifestConflict);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn retained_provision(
         &self,
     ) -> Option<(
@@ -584,8 +626,17 @@ impl RunnerStateRoot {
         &mut self,
         recorded: &signalbox_runner_wire::WorkspaceRecorded,
     ) -> Result<(), RunnerStateError> {
+        let ready = self
+            .journal
+            .provision()
+            .and_then(|(_, ready)| ready)
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        let identity = self
+            .workspace_store()?
+            .authenticate_active(ready)
+            .map_err(|_| RunnerStateError::InvalidTransition)?;
         self.journal
-            .acknowledge_workspace(&self.directory, recorded)
+            .acknowledge_workspace(&self.directory, recorded, identity)
     }
 
     /// Fsyncs the exact claimed lease phase before its named execution step.

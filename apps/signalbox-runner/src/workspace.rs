@@ -274,6 +274,47 @@ impl RunnerWorkspaceStore {
         }
     }
 
+    pub(crate) fn authenticate_active(
+        &self,
+        ready: &signalbox_runner_wire::WorkspaceReady,
+    ) -> Result<DirectoryIdentity, RunnerWorkspaceError> {
+        validate_root_directory(&self.canonical_root, &self.root)
+            .map_err(RunnerWorkspaceError::Io)?;
+        let expected = &ready.ready.manifest;
+        let sessions =
+            open_directory(&self.root, SESSIONS_DIRECTORY).map_err(RunnerWorkspaceError::Io)?;
+        let session = open_directory(&sessions, &expected.session.to_string())
+            .map_err(RunnerWorkspaceError::Io)?;
+        let placement = open_directory(&session, &expected.placement_revision.get().to_string())
+            .map_err(RunnerWorkspaceError::Io)?;
+        let mut manifest = read_manifest(&placement)?;
+        if manifest.lifecycle != ManifestLifecycle::Active {
+            return Err(RunnerWorkspaceError::ManifestConflict);
+        }
+        manifest.lifecycle = ManifestLifecycle::Ready;
+        if manifest != *expected
+            || workspace_manifest_digest(&manifest)
+                .map_err(|_| RunnerWorkspaceError::CorruptManifest)?
+                != ready.ready.manifest_digest
+        {
+            return Err(RunnerWorkspaceError::ManifestConflict);
+        }
+        let leaf = if manifest.repository.is_some() {
+            REPOSITORY_WORKSPACE_DIRECTORY
+        } else {
+            PRIVATE_WORKSPACE_DIRECTORY
+        };
+        let directory = open_directory(&placement, leaf).map_err(RunnerWorkspaceError::Io)?;
+        let execution = checked_execution_directory(
+            &self.canonical_root.join(&manifest.relative_path),
+            &directory,
+        )?;
+        if execution.as_str() != ready.working_directory {
+            return Err(RunnerWorkspaceError::ManifestConflict);
+        }
+        DirectoryIdentity::from_file(&directory)
+    }
+
     pub(crate) fn activate(
         &self,
         prepared: &PreparedWorkspace,
@@ -780,8 +821,9 @@ fn path_names_directory(
     Ok(metadata.is_dir() && metadata.dev() == status.st_dev && metadata.ino() == status.st_ino)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DirectoryIdentity {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectoryIdentity {
     device: u64,
     inode: u64,
 }

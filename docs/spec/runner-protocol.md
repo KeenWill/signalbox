@@ -149,8 +149,12 @@ repository staging on preparation failure or cancellation. Equal replay retains
 the manifest identity and ready receipt. A changed repository mapping fails as
 `manifest_conflict`. Reconnect admits only the exact stored daemon authorization
 under the unchanged registration, and the runner resends its authenticated
-receipt until acknowledgement activates the manifest and clears the journal. The
-daemon serializes provisioning and lease delivery on each connection until the
+receipt until acknowledgement activates the manifest and clears the pending
+operation. The journal retains acknowledged ready facts and the execution
+directory identity until release is acknowledged. Startup authenticates these
+facts against the configuration and filesystem before reconnecting; a changed
+mapping or replaced directory fails as `manifest_conflict`. The daemon
+serializes provisioning and lease delivery on each connection until the
 corresponding durable outcome is acknowledged. Expected acquisition refusals are
 journaled as `operation_failed` and retained through heartbeat and reconnect
 until acknowledged; the runner keeps serving.
