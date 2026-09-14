@@ -156,52 +156,84 @@ async fn unknown_credential_profile_is_rejected_before_journaling_provision() {
 }
 
 #[tokio::test]
-async fn retained_provision_rejects_a_changed_clone_url_mapping_after_restart() {
-    use signalbox_runner_wire::FailureCategory;
-
+async fn restart_rejects_a_changed_repository_mapping_before_cloning() {
+    use signalbox_runner_wire::{FailureCategory, clone_url_digest};
     let directory = tempfile::tempdir().expect("temporary parent");
+    let original_url = "https://github.com/KeenWill/signalbox.git";
+    let changed_url = "https://github.com/KeenWill/changed-repository.git";
     let original = configuration();
+    let changed = crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", "")
+            .replace(original_url, changed_url),
+    )
+    .expect("changed anonymous mapping");
+    assert_eq!(original.advertisement(), changed.advertisement());
     let mut state = enrolled_with_configuration(&directory, &original);
     let receipt = state.state().receipt().expect("receipt").clone();
     let request = provision(&receipt);
     let checked = crate::workspace::provision::CheckedProvision::check(&original, request.clone())
-        .expect("advertised anonymous acquisition");
+        .expect("original mapping");
+    assert_eq!(
+        checked.canonical_clone_url_digest(),
+        &clone_url_digest(original_url)
+    );
     state
-        .record_provision(request, checked.canonical_clone_url_digest().clone())
-        .expect("accepted mapping is pinned before acquisition");
+        .record_provision(
+            request.clone(),
+            checked.canonical_clone_url_digest().clone(),
+        )
+        .expect("journal before workspace preparation");
+    assert!(matches!(
+        state.record_provision(request.clone(), clone_url_digest(changed_url)),
+        Err(RunnerStateError::InvalidTransition)
+    ));
     drop(state);
-
-    let changed = crate::RunnerConfiguration::parse(
-        &include_str!("../../../../config/signalbox-runner.example.toml")
-            .replace("credential_profile = \"github-runner\"", "")
-            .replace(
-                "https://github.com/KeenWill/signalbox.git",
-                "https://github.com/KeenWill/different.git",
-            ),
-    )
-    .expect("changed repository configuration");
-    let mut state =
-        RunnerStateRoot::open(&directory.path().join("state")).expect("restart retains provision");
+    let root = directory.path().join("state");
+    let journal =
+        std::fs::read_to_string(root.join("operation-journal.json")).expect("retained journal");
+    assert!(
+        !journal.contains(original_url),
+        "the journal retains only the URL digest"
+    );
+    let mut state = RunnerStateRoot::open(&root).expect("restart with retained authorization");
+    assert_eq!(
+        state
+            .retained_provision_clone_url_digest()
+            .expect("retained mapping"),
+        &clone_url_digest(original_url)
+    );
     let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut runner = connection(stream, receipt).with_configuration(changed);
     let mut hub = BufReader::new(hub);
-
     runner
         .ensure_workspace(&mut state)
-        .expect("changed mapping becomes a retained refusal");
-    let failure = state
-        .retained_provision_failure()
-        .expect("manifest conflict is retained");
-    assert_eq!(failure.category, FailureCategory::WorkspaceConflict);
+        .expect("resume retained operation");
     runner
         .send_retained_workspace(&state)
         .await
-        .expect("send retained refusal");
-    assert!(matches!(
-        receive_message(&mut hub).await.expect("operation failure"),
-        Message::OperationFailed(failed)
-            if failed.failure.category == FailureCategory::WorkspaceConflict
-    ));
+        .expect("send retained mapping conflict");
+    let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("failure frame")
+    else {
+        panic!("changed mapping is a terminal operation failure")
+    };
+    assert_eq!(
+        failed.failure.correlation,
+        OperationCorrelation::Provision(request.correlation.clone())
+    );
+    assert_eq!(failed.failure.category, FailureCategory::WorkspaceConflict);
+    assert_eq!(failed.failure.detail.code.as_str(), "manifest-conflict");
+    assert!(
+        !root
+            .join("sessions")
+            .join(request.correlation.session_id.to_string())
+            .exists(),
+        "changed mapping must fail before acquiring a workspace"
+    );
+    drop(runner);
+    drop(state);
+    let reopened = RunnerStateRoot::open(&root).expect("restart retains the conflict");
+    assert_eq!(reopened.retained_provision_failure(), Some(&failed.failure));
 }
 
 #[tokio::test]

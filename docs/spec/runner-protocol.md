@@ -142,23 +142,25 @@ its completion is accepted. The daemon retains that reauthorization without
 changing the original release record; unrelated stale release receipts still
 fail the current-epoch check.
 
-The runner retains the complete provisioning request and ready receipt in its
-private journal. Restart recomputes the fixed path and authenticates the root
-and manifest, preserving session files. A cleanup guard removes unpublished
-repository staging on preparation failure or cancellation. Equal replay retains
-the manifest identity and ready receipt. A changed repository mapping fails as
-`manifest_conflict`. Reconnect admits only the exact stored daemon authorization
-under the unchanged registration, and the runner resends its authenticated
-receipt until acknowledgement activates the manifest and clears the pending
-operation. The separately published `active-workspaces.json` retains
-acknowledged ready facts and execution-directory identities until release is
-acknowledged; its aggregate size is independent of the operation-journal frame
-limit. Startup authenticates these facts against the configuration and
-filesystem before reconnecting; a changed mapping or replaced directory fails as
-`manifest_conflict`. The daemon serializes provisioning and lease delivery on
-each connection until the corresponding durable outcome is acknowledged.
-Expected acquisition refusals are journaled as `operation_failed` and retained
-through heartbeat and reconnect until acknowledged; the runner keeps serving.
+The runner retains the complete provisioning request, resolved clone-URL digest,
+and ready receipt in its private journal. Restart checks the configured mapping
+against the retained digest before cloning. Restart recomputes the fixed path
+and authenticates the root and manifest, preserving session files. A cleanup
+guard removes unpublished repository staging on preparation failure or
+cancellation. Equal replay retains the manifest identity and ready receipt. A
+changed repository mapping fails as `manifest_conflict`. Reconnect admits only
+the exact stored daemon authorization under the unchanged registration, and the
+runner resends its authenticated receipt until acknowledgement activates the
+manifest and clears the pending operation. The separately published
+`active-workspaces.json` retains acknowledged ready facts and
+execution-directory identities until release is acknowledged; its aggregate size
+is independent of the operation-journal frame limit. Startup authenticates these
+facts against the configuration and filesystem before reconnecting; a changed
+mapping or replaced directory fails as `manifest_conflict`. The daemon
+serializes provisioning and lease delivery on each connection until the
+corresponding durable outcome is acknowledged. Expected acquisition refusals are
+journaled as `operation_failed` and retained through heartbeat and reconnect
+until acknowledged; the runner keeps serving.
 
 ## Boundary contracts
 
