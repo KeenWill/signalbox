@@ -97,10 +97,33 @@ impl RunnerProtocolStore {
         ))
     }
 
-    /// Commits completion or cleanup failure before the daemon acknowledges it.
+    /// Commits a live connection's release outcome under its current epoch.
     pub async fn record_workspace_release_outcome(
         &self,
         enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        expected: &RunnerWorkspaceRelease,
+        failure_detail: Option<&serde_json::Value>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_workspace_release_outcome(enrollment, Some(epoch), expected, failure_detail)
+            .await
+    }
+
+    /// Reconciles retained release evidence after Resume authentication, before opening its epoch.
+    pub async fn reconcile_workspace_release_outcome(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        expected: &RunnerWorkspaceRelease,
+        failure_detail: Option<&serde_json::Value>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_workspace_release_outcome(enrollment, None, expected, failure_detail)
+            .await
+    }
+
+    async fn store_workspace_release_outcome(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: Option<RunnerConnectionEpoch>,
         expected: &RunnerWorkspaceRelease,
         failure_detail: Option<&serde_json::Value>,
     ) -> Result<(), RunnerProtocolStoreError> {
@@ -117,6 +140,18 @@ impl RunnerProtocolStore {
             .bind(enrollment.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
+        if let Some(epoch) = epoch {
+            let current = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+            if !current.is_some_and(|head| {
+                head.epoch() == epoch
+                    && matches!(
+                        head.state(),
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                    )
+            }) {
+                return Err(mismatch());
+            }
+        }
         let row = sqlx::query("SELECT release.*, outcome.outcome, outcome.detail FROM runner_workspace_release release
             LEFT JOIN runner_workspace_release_outcome outcome USING (manifest_id)
             WHERE release.manifest_id = $1 AND release.enrollment_id = $2")
@@ -292,11 +327,31 @@ fn encode_leak_facts(facts: &[RunnerWorkspaceLeak]) -> serde_json::Value {
 }
 
 impl RunnerProtocolStore {
-    /// Stores an exactly replayable page and projects its unresolved facts.
+    /// Stores a live connection's exactly replayable page under its current epoch.
     /// Final pages require a strictly ordered report matching its complete digest.
     pub async fn record_workspace_leak_page(
         &self,
         enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        page: &RunnerWorkspaceLeakPage,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_workspace_leak_page(enrollment, Some(epoch), page)
+            .await
+    }
+
+    /// Reconciles retained inventory after the caller authenticates Resume, before opening its epoch.
+    pub async fn reconcile_workspace_leak_page(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        page: &RunnerWorkspaceLeakPage,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_workspace_leak_page(enrollment, None, page).await
+    }
+
+    async fn store_workspace_leak_page(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: Option<RunnerConnectionEpoch>,
         page: &RunnerWorkspaceLeakPage,
     ) -> Result<(), RunnerProtocolStoreError> {
         // Version-one runner leak pages carry at most 64 facts.
@@ -315,6 +370,18 @@ impl RunnerProtocolStore {
             .bind(enrollment.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
+        if let Some(epoch) = epoch {
+            let current = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+            if !current.is_some_and(|head| {
+                head.epoch() == epoch
+                    && matches!(
+                        head.state(),
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                    )
+            }) {
+                return Err(mismatch());
+            }
+        }
         let owner = load_enrollment_in(transaction.as_mut(), enrollment)
             .await?
             .ok_or_else(mismatch)?;
@@ -475,6 +542,7 @@ async fn reconcile_leak(
         .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get())).bind(fact.locator.as_str()).fetch_all(&mut *connection).await?;
     if rows.is_empty() {
         let initial = sqlx::query("SELECT placement.*, outcome.outcome,
+                head.session_id IS NOT NULL AS current,
                 release.manifest_id IS NOT NULL AS released
             FROM runner_session_placement_record placement
             LEFT JOIN runner_current_session_placement head USING (session_id,event_ordinal)
@@ -484,7 +552,11 @@ async fn reconcile_leak(
             WHERE placement.pinned_runner_id = $1 AND placement.session_id = $2
                 AND placement.workspace_placement_revision = $3 AND placement.workspace_relative_path = $4
                 AND placement.workspace_manifest_id IS NOT NULL AND placement.state_kind <> 'runner_abandoned'
-                AND (head.session_id IS NOT NULL OR release.manifest_id IS NOT NULL)
+                AND (head.session_id IS NOT NULL OR release.manifest_id IS NOT NULL
+                    OR EXISTS (SELECT 1 FROM runner_session_placement_record retired
+                        WHERE retired.session_id = placement.session_id
+                            AND retired.event_ordinal = placement.event_ordinal + 1
+                            AND retired.state_kind = 'runner_abandoned'))
                 AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_ready ready WHERE ready.manifest_id = placement.workspace_manifest_id)")
             .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
             .bind(fact.locator.as_str()).fetch_all(connection).await?;
@@ -502,8 +574,10 @@ async fn reconcile_leak(
                             _ => return Err(mismatch()),
                         },
                     )
-                } else {
+                } else if placement.decode_column::<bool>("current")? {
                     Ok(None)
+                } else {
+                    Ok(Some(Kind::RetiredPresent))
                 };
             }
         }

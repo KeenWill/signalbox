@@ -94,6 +94,7 @@ impl RunnerProtocolStore {
     pub async fn record_replacement_workspace_ready(
         &self,
         authorization: &RunnerReplacementProvisioning,
+        epoch: RunnerConnectionEpoch,
         workspace: &ProvisionedWorkspace,
         manifest_digest: &super::workspaces::RunnerEvidenceDigest,
     ) -> Result<(), RunnerProtocolStoreError> {
@@ -108,6 +109,32 @@ impl RunnerProtocolStore {
         if retained != *authorization || !matches_authorization(authorization, workspace) {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::CorrelationMismatch,
+            ));
+        }
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(authorization.enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(authorization.enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let connection =
+            load_connection_head_in(transaction.as_mut(), authorization.enrollment).await?;
+        let enrollment = load_enrollment_in(transaction.as_mut(), authorization.enrollment)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        if enrollment.state() == RunnerEnrollmentState::Revoked
+            || !connection.is_some_and(|head| {
+                head.epoch() == epoch
+                    && matches!(
+                        head.state(),
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                    )
+            })
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
             ));
         }
         if let Some(ready) = load_ready(transaction.as_mut(), authorization).await? {
@@ -133,31 +160,6 @@ impl RunnerProtocolStore {
         .fetch_one(&mut *transaction)
         .await?;
         if failed {
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::InvalidState,
-            ));
-        }
-        sqlx::query(RUNNER_ENROLLMENT)
-            .bind(authorization.enrollment.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
-            .bind(authorization.enrollment.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        let connection =
-            load_connection_head_in(transaction.as_mut(), authorization.enrollment).await?;
-        let enrollment = load_enrollment_in(transaction.as_mut(), authorization.enrollment)
-            .await?
-            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
-        if enrollment.state() == RunnerEnrollmentState::Revoked
-            || !connection.is_some_and(|head| {
-                matches!(
-                    head.state(),
-                    RunnerConnectionState::Connected | RunnerConnectionState::Suspect
-                )
-            })
-        {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));

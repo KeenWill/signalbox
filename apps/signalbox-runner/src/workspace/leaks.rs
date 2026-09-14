@@ -28,6 +28,23 @@ impl RunnerWorkspaceStore {
         validate_root_directory(&self.canonical_root, &self.root)
             .map_err(RunnerWorkspaceError::Io)?;
         let mut facts = Vec::new();
+        use crate::state::DocumentKind;
+        for name in entry_names(&self.root)? {
+            if [
+                SESSIONS_DIRECTORY,
+                release::TRASH_DIRECTORY,
+                DocumentKind::Enrollment.file_name(),
+                DocumentKind::Journal.file_name(),
+                DocumentKind::ActiveWorkspaces.file_name(),
+            ]
+            .iter()
+            .any(|known| name == OsStr::new(known))
+            {
+                continue;
+            }
+            facts.push(entry_fact(&self.root, &name, locator_component(&name))?);
+        }
+
         let sessions = scan_directory(
             &self.root,
             SESSIONS_DIRECTORY,

@@ -890,3 +890,28 @@ async fn startup_inventory_reports_inconsistent_trash_manifests_as_conflicts() {
         );
     }
 }
+
+#[test]
+fn startup_inventory_reports_unexpected_root_entries_without_following_links() {
+    let (parent, state) = enrolled_workspace_root();
+    let root = parent.path().join("runner-state");
+    fs::write(root.join("orphan-file"), b"retained bytes").expect("unknown file");
+    fs::create_dir(root.join("orphan-directory")).expect("unknown directory");
+    std::os::unix::fs::symlink(parent.path(), root.join("orphan-link")).expect("unknown link");
+    let runner = state.state().receipt().expect("enrolled").runner_id();
+    let facts = state
+        .workspace_store()
+        .expect("owned store")
+        .startup_leaks(runner)
+        .expect("root inventory");
+    assert_eq!(facts.len(), 3);
+    for name in ["orphan-file", "orphan-directory", "orphan-link"] {
+        assert!(facts.iter().any(|fact| fact.locator == name
+            && fact.kind == signalbox_runner_wire::LeakFactKind::UnknownManifest
+            && fact.session.is_none()
+            && fact.placement_revision.is_none()));
+    }
+    assert!(root.join("orphan-file").is_file());
+    assert!(root.join("orphan-directory").is_dir());
+    assert!(root.join("orphan-link").is_symlink());
+}
