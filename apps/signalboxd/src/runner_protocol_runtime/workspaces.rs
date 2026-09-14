@@ -32,6 +32,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn leak_page_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: Option<PositiveU64>,
         message: WorkspaceLeakPage,
     ) -> Result<WorkspaceLeakRecorded, RunnerRegistrationFailure> {
         let page = message.page;
@@ -72,27 +73,39 @@ impl PostgresRunnerRegistrationService {
                 })
             })
             .collect::<Result<Vec<_>, RunnerRegistrationFailure>>()?;
-        self.store
-            .record_workspace_leak_page(
-                RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
-                &RunnerWorkspaceLeakPage {
-                    registration_revision: revision(page.correlation.registration_revision)?,
-                    report_digest: digest(&page.correlation.report_digest)?,
-                    page: revision(page.correlation.page)?,
-                    prior_page_digest: page.prior_page_digest.as_ref().map(digest).transpose()?,
-                    final_page: page.final_page,
-                    page_digest: digest(&page.page_digest)?,
-                    facts,
-                },
+        let page_to_store = RunnerWorkspaceLeakPage {
+            registration_revision: revision(page.correlation.registration_revision)?,
+            report_digest: digest(&page.correlation.report_digest)?,
+            page: revision(page.correlation.page)?,
+            prior_page_digest: page.prior_page_digest.as_ref().map(digest).transpose()?,
+            final_page: page.final_page,
+            page_digest: digest(&page.page_digest)?,
+            facts,
+        };
+        let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
+        match epoch {
+            Some(epoch) => {
+                self.store
+                    .record_workspace_leak_page(
+                        enrollment,
+                        RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(rejected)?,
+                        &page_to_store,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .reconcile_workspace_leak_page(enrollment, &page_to_store)
+                    .await
+            }
+        }
+        .map_err(|error| {
+            store_failure(
+                RunnerInboundFrameKind::WorkspaceLeakPage,
+                AvailableCorrelation::LeakPage(page.correlation.clone()),
+                error,
             )
-            .await
-            .map_err(|error| {
-                store_failure(
-                    RunnerInboundFrameKind::WorkspaceLeakPage,
-                    AvailableCorrelation::LeakPage(page.correlation.clone()),
-                    error,
-                )
-            })?;
+        })?;
         Ok(WorkspaceLeakRecorded {
             correlation: page.correlation,
             page_digest: page.page_digest,
@@ -155,7 +168,7 @@ impl PostgresRunnerRegistrationService {
             (RunnerWorkspaceReleaseState::Pending, ReleasePhase::ReleaseCompleted, None)
             | (RunnerWorkspaceReleaseState::Pending, ReleasePhase::ReleaseAccepted, Some(_)) => {
                 self.store
-                    .record_workspace_release_outcome(
+                    .reconcile_workspace_release_outcome(
                         identities.enrollment(),
                         &release,
                         detail.as_ref(),

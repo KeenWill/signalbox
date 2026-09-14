@@ -38,8 +38,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<(), RunnerConnectionError> {
-        if self.pending_offer.is_none()
-            && state.reconnect_inventory().lease.is_none()
+        if !self.has_unsettled_tool(state)
             && !matches!(
                 self.startup_report,
                 StartupReport::Scanning(_) | StartupReport::Reporting(_)

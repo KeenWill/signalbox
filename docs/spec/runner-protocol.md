@@ -122,8 +122,14 @@ and avoids repeating the operator's configuration value.
 The runner accepts an ambient `workspace_provision` only after resolving its
 repository and optional credential profile against local configuration. Unknown
 profiles reject before the operation is journaled. Anonymous acquisition runs
-Git as a plain child process. Credentialed and repository-free private-root
-acquisition are unavailable.
+Git as a plain child process with system and global configuration disabled and
+credential helpers cleared. Each command has one five-minute deadline covering
+output collection and process completion; expiration rejects acquisition as
+`repository_unavailable`. Credentialed and repository-free private-root
+acquisition are unavailable. Provisioning rejects while an offer, resumed lease,
+execution, or journaled lease, result, or offer refusal remains unsettled.
+Release waits for that tool state to settle before journal acceptance or
+cleanup.
 
 Repository workspaces live at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
@@ -141,20 +147,23 @@ reaps it and journals its outcome before the next resume handshake.
 The runner retains the complete provisioning request, resolved clone-URL digest,
 and ready receipt in its private journal. Restart checks the configured mapping
 against the retained digest before cloning. Restart recomputes the fixed path
-and authenticates the root and manifest, preserving session files. A cleanup
-guard removes unpublished repository staging on preparation failure or
-cancellation. Equal replay retains the manifest identity and ready receipt. A
-changed repository mapping fails as `manifest_conflict`. Once a ready receipt is
-journaled, this conflict fails closed before reconnect and preserves the
-receipt. Reconnect admits only the exact stored daemon authorization under the
-unchanged registration, and the runner resends its authenticated receipt until
-acknowledgement activates the manifest and clears the pending operation. The
-separately published `active-workspaces.json` retains acknowledged ready facts
-and execution-directory identities until release is reconciled; its aggregate
-size is independent of the operation-journal frame limit. Startup authenticates
-these facts against the configuration and filesystem before reconnecting; a
-changed mapping or replaced directory fails as `manifest_conflict`. The daemon
-loads provisioning and release work only for the current connection epoch and
+and authenticates the root and manifest, preserving session files. A pending
+ready placement is authenticated before reconnect even when its acknowledgement
+is not yet journaled; missing or conflicting files preserve the receipt and fail
+as `manifest_conflict`. A cleanup guard removes unpublished repository staging
+on preparation failure or cancellation. Equal replay retains the manifest
+identity and ready receipt. A changed repository mapping fails as
+`manifest_conflict`. Once a ready receipt is journaled, this conflict fails
+closed before reconnect and preserves the receipt. Reconnect admits only the
+exact stored daemon authorization under the unchanged registration, and the
+runner resends its authenticated receipt until acknowledgement activates the
+manifest and clears the pending operation. The separately published
+`active-workspaces.json` retains acknowledged ready facts and
+execution-directory identities until release is reconciled; its aggregate size
+is independent of the operation-journal frame limit. Startup authenticates these
+facts against the configuration and filesystem before reconnecting; a changed
+mapping or replaced directory fails as `manifest_conflict`. The daemon loads
+provisioning and release work only for the current connection epoch and
 serializes provisioning, release, and lease delivery on each connection until
 the corresponding durable outcome is acknowledged. Expected acquisition refusals
 are journaled as `operation_failed` and retained through heartbeat and reconnect
@@ -179,6 +188,10 @@ failures. Operation decisions use the closed category; runner status applies the
 [redacting diagnostic projection](process-protocol.md) to retained detail.
 
 ## Workspace release and leak reporting
+
+Live release outcomes require the caller's current connection epoch in the
+storage transaction, including equal replay. Authenticated Resume reconciles
+retained completion or failure before opening the next epoch.
 
 The daemon issues cleanup for a retired manifest only to its connected owner,
 after its leases and results settle. Plain-directory placements have no manifest
@@ -207,13 +220,20 @@ outstanding, cleanup-failed, or unowned release.
 
 Before accepting new provisioning or executing tools, startup reports ready and
 active manifests and unknown entries in bounded, digest-correlated pages.
+Unknown entries include direct root children other than the enrollment, journal
+and active-workspace documents and the managed `sessions/` and `trash/` trees.
 Scanning waits for canceled staging cleanup to finish; successfully removed
 unpublished workspaces produce no leak fact. Provisioning waits until every
 startup page is acknowledged. The daemon reconciles exact retained ready facts,
-including the reconstructed ready manifest of a current initial placement, and
-stores unresolved diagnostics before acknowledging each page. The final page
-verifies strict ordering and the complete digest over all retained facts.
-Reports remain visible without a resumable session and authorize no deletion.
+including the reconstructed ready manifest of a current initial placement and
+the retained source of an abandoned initial placement. An abandoned workspace
+whose owner was lost keeps its retired-present diagnostic. A live page's
+transaction validates the physical connection epoch before storage or equal
+replay. Authenticated Resume reconciles its retained page before opening an
+epoch. Unresolved diagnostics are stored before acknowledging each page. The
+final page verifies strict ordering and the complete digest over all retained
+facts. Reports remain visible without a resumable session and authorize no
+deletion.
 
 ## Boundary contracts
 
@@ -461,25 +481,27 @@ retained request; other loss sources require a different runner.
 Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,
 including its absolute working directory. The daemon acknowledges a durably
-retained receipt even while installation waits. Provisioning retains a
-repository key and checkout recovery facts together or neither; mismatched
-repository and recovery facts are rejected before staging. Installation consumes
-that receipt, promotes the pending candidate, installs the placement and grant,
-appends the reference-only placement boundary, and records the terminal result
-atomically after any authorized in-flight call reaches its observation boundary
-and, for a tool batch, after all results are appended. Provisioning refusal or
-candidate loss records a typed terminal rejection and leaves the candidate
-pending. A terminal delegated runtime does not count as an active turn for
-recovery commands. Replacement stays staged while an explicit compaction call is
-nonterminal; its observation commit wakes installation from the resulting
-frontier. Replacement rejects a candidate lacking the requested sandbox or
-repository workspace capability before staging provisioning. Ambient
-default-directory replacement requires the successor registration's reported
-directory. A rejected command's ready workspace, including a correlated receipt
-arriving after abandonment, is released only through its exact manifest
-correlation on the candidate's retained connection epoch. Suspicion retains that
-cleanup authority; loss does not transfer it. Release acknowledgement uses the
-same current-epoch fence as release dispatch.
+retained receipt even while installation waits. Recording or replaying it
+validates the physical connection epoch under the same transaction's authority
+locks. Provisioning retains a repository key and checkout recovery facts
+together or neither; mismatched repository and recovery facts are rejected
+before staging. Installation consumes that receipt, promotes the pending
+candidate, installs the placement and grant, appends the reference-only
+placement boundary, and records the terminal result atomically after any
+authorized in-flight call reaches its observation boundary and, for a tool
+batch, after all results are appended. Provisioning refusal or candidate loss
+records a typed terminal rejection and leaves the candidate pending. A terminal
+delegated runtime does not count as an active turn for recovery commands.
+Replacement stays staged while an explicit compaction call is nonterminal; its
+observation commit wakes installation from the resulting frontier. Replacement
+rejects a candidate lacking the requested sandbox or repository workspace
+capability before staging provisioning. Ambient default-directory replacement
+requires the successor registration's reported directory. A rejected command's
+ready workspace, including a correlated receipt arriving after abandonment, is
+released only through its exact manifest correlation on the candidate's retained
+connection epoch. Suspicion retains that cleanup authority; loss does not
+transfer it. Release acknowledgement uses the same current-epoch fence as
+release dispatch.
 
 ## Planned
 
