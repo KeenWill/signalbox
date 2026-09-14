@@ -154,8 +154,10 @@ reconnect until acknowledged; the runner keeps serving.
 The daemon issues cleanup for a retired manifest only to its connected owner,
 after its leases and results settle. Plain-directory placements have no manifest
 and receive no cleanup. Connection loss retires an outstanding release as
-unowned and retains a leak diagnostic. On reconnect, `fail_stale` clears that
-exact journaled release; ownership never transfers to a successor.
+unowned and retains a leak diagnostic. Loss that settles a live lease also
+retains its retired manifest as a `retired_present` leak. On reconnect,
+`fail_stale` clears that exact journaled release; ownership never transfers to a
+successor.
 
 The runner fsyncs `release_accepted` before marking the manifest `releasing`,
 renaming the placement below `trash/`, and deleting it through directory

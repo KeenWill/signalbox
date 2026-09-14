@@ -1042,3 +1042,81 @@ async fn startup_report_matches_the_retained_release_leak(
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lost_offered_lease_retains_its_manifest_as_a_leak() -> Result<(), Box<dyn Error>> {
+    lost_live_lease_retains_manifest(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lost_claimed_lease_retains_its_manifest_as_a_leak() -> Result<(), Box<dyn Error>> {
+    lost_live_lease_retains_manifest(true).await
+}
+
+async fn lost_live_lease_retains_manifest(claimed: bool) -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::status::read_runner_status;
+    use signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceLeakKind;
+    let (_container, pool) = migrated_postgres().await?;
+    let workspace = private_workspace(
+        SessionId::from_uuid(uuid(SESSION)),
+        enrollment().runner(),
+        RunnerGeneration::try_from_u64(1).expect("first placement"),
+    );
+    let (store, enrolled, _, pin, epoch) = stored_active_pin_fixture_with_workspace(
+        &pool,
+        ActivePinEffectCase::EffectFree,
+        Some(workspace.clone()),
+    )
+    .await?;
+    if claimed {
+        store
+            .claim_tool_lease(enrolled.enrollment(), epoch, pin.lease.correlation())
+            .await?;
+    }
+    store
+        .transition_connection(
+            enrolled.enrollment(),
+            epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(enrolled.enrollment())
+        .await?
+        .expect("durable loss");
+    store
+        .propagate_connection_loss_session(loss, pin.placement.session())
+        .await?;
+    store
+        .propagate_connection_loss_session(loss, pin.placement.session())
+        .await?;
+    assert!(
+        store
+            .workspace_releases(enrolled.enrollment())
+            .await?
+            .is_empty(),
+        "disconnected owners receive no release authority"
+    );
+    let page = read_runner_status(&pool, 100, None).await?;
+    let digest = signalbox_runner_wire::workspace_manifest_digest(
+        &signalbox_runner_wire::WorkspaceManifest::from_domain(
+            signalbox_runner_wire::ManifestLifecycle::Ready,
+            &workspace,
+        )?,
+    )?;
+    assert_eq!(
+        page.leaks.len(),
+        1,
+        "loss retains the orphaned workspace exactly once"
+    );
+    let (runner, leak) = &page.leaks[0];
+    assert_eq!(*runner, workspace.runner);
+    assert_eq!(leak.kind, RunnerWorkspaceLeakKind::RetiredPresent);
+    assert_eq!(leak.locator, workspace.relative_path);
+    assert_eq!(leak.entry_digest.as_str(), digest.as_str());
+    assert_eq!(leak.session, Some(workspace.session));
+    assert_eq!(leak.placement_revision, Some(workspace.placement_revision));
+    Ok(())
+}

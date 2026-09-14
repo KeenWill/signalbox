@@ -1176,6 +1176,7 @@ impl RunnerProtocolStore {
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
         }
+        workspaces::retain_placement_leak(&mut transaction, &prior).await?;
         outbox::append(
             transaction.as_mut(),
             OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {

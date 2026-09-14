@@ -504,22 +504,35 @@ pub(super) async fn retain_retired_placement(
         ON CONFLICT DO NOTHING")
         .bind(session.into_uuid()).bind(Decimal::from(ordinal - 1)).bind(Decimal::from(ordinal)).execute(&mut *connection).await?.rows_affected();
     if inserted == 0 {
-        let retained: Option<String> = sqlx::query_scalar(
-            "SELECT manifest_digest FROM runner_replacement_workspace_ready WHERE manifest_id = $1",
-        )
-        .bind(manifest)
-        .fetch_optional(&mut *connection)
-        .await?;
-        let digest = match retained {
-            Some(digest) => digest,
-            None => placement_manifest_digest(&source)?,
-        };
-        sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
-            SELECT pinned_runner_id,workspace_relative_path,
-                $3,
-                'retired_present',session_id,workspace_placement_revision FROM runner_session_placement_record WHERE session_id = $1 AND event_ordinal = $2
-            ON CONFLICT DO NOTHING")
-            .bind(session.into_uuid()).bind(Decimal::from(ordinal - 1)).bind(digest).execute(connection).await?;
+        retain_placement_leak(connection, &source).await?;
     }
+    Ok(())
+}
+
+pub(super) async fn retain_placement_leak(
+    connection: &mut PgConnection,
+    source: &PgRow,
+) -> Result<(), RunnerProtocolStoreError> {
+    let Some(manifest) = source.decode_column::<Option<Uuid>>("workspace_manifest_id")? else {
+        return Ok(());
+    };
+    let retained: Option<String> = sqlx::query_scalar(
+        "SELECT manifest_digest FROM runner_replacement_workspace_ready WHERE manifest_id = $1",
+    )
+    .bind(manifest)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let digest = match retained {
+        Some(digest) => digest,
+        None => placement_manifest_digest(source)?,
+    };
+    sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
+        VALUES ($1,$2,$3,'retired_present',$4,$5) ON CONFLICT DO NOTHING")
+        .bind(source.decode_column::<Uuid>("pinned_runner_id")?)
+        .bind(source.decode_column::<String>("workspace_relative_path")?)
+        .bind(digest)
+        .bind(source.decode_column::<Uuid>("session_id")?)
+        .bind(source.decode_column::<Decimal>("workspace_placement_revision")?)
+        .execute(connection).await?;
     Ok(())
 }

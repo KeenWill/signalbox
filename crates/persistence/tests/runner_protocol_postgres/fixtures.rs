@@ -634,6 +634,23 @@ pub(crate) async fn stored_active_pin_fixture_with_authorization(
     ),
     Box<dyn Error>,
 > {
+    stored_active_pin_fixture_with_workspace(pool, effect_case, None).await
+}
+
+pub(crate) async fn stored_active_pin_fixture_with_workspace(
+    pool: &PgPool,
+    effect_case: ActivePinEffectCase,
+    workspace: Option<ProvisionedWorkspace>,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+        RunnerConnectionEpoch,
+    ),
+    Box<dyn Error>,
+> {
     let (authorize, fixture_catalog, fixture_overrides, fixture_effect_kind): (
         fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
         RunnerCatalog,
@@ -717,9 +734,11 @@ pub(crate) async fn stored_active_pin_fixture_with_authorization(
         SessionRunnerPlacementRequest {
             selector: RunnerSelector::CapabilityClass(class()),
             working_directory: WorkingDirectorySelection::RunnerDefault,
-            credential_profile: Some(profile()),
+            credential_profile: workspace.is_none().then(profile),
             workspace: WorkspaceRequirement::None,
-            sandbox: RunnerSandboxProfile::Ambient,
+            sandbox: workspace
+                .as_ref()
+                .map_or(RunnerSandboxProfile::Ambient, |workspace| workspace.sandbox),
             permission_overrides: fixture_overrides,
         },
     );
@@ -728,9 +747,14 @@ pub(crate) async fn stored_active_pin_fixture_with_authorization(
         .pin_and_offer_lease(
             &expected_enrollment,
             registration.registration(),
-            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
-                .expect("the active fixture working directory is valid"),
-            None,
+            workspace
+                .as_ref()
+                .map(|workspace| workspace.working_directory.clone())
+                .unwrap_or_else(|| {
+                    RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                        .expect("the active fixture working directory is valid")
+                }),
+            workspace,
             authorize(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
