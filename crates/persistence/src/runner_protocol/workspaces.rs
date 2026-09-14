@@ -255,6 +255,7 @@ fn encode_leak_facts(facts: &[RunnerWorkspaceLeak]) -> serde_json::Value {
 
 impl RunnerProtocolStore {
     /// Stores an exactly replayable page and projects its unresolved facts.
+    /// Final pages require a strictly ordered report matching its complete digest.
     pub async fn record_workspace_leak_page(
         &self,
         enrollment: RunnerEnrollmentId,
@@ -321,6 +322,9 @@ impl RunnerProtocolStore {
         sqlx::query("INSERT INTO runner_workspace_leak_page (enrollment_id,registration_revision,report_digest,page,prior_page_digest,final_page,page_digest,facts) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(enrollment.into_uuid()).bind(Decimal::from(page.registration_revision.get())).bind(page.report_digest.as_str()).bind(Decimal::from(page.page.get()))
             .bind(page.prior_page_digest.as_ref().map(RunnerEvidenceDigest::as_str)).bind(page.final_page).bind(page.page_digest.as_str()).bind(facts).execute(&mut *transaction).await?;
+        if page.final_page {
+            verify_leak_report(transaction.as_mut(), enrollment, page).await?;
+        }
         for fact in &page.facts {
             if let Some(kind) = reconcile_leak(&mut transaction, owner.runner(), fact).await? {
                 sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision) VALUES ($1,$2,$3,$4,$5,$6)
@@ -331,6 +335,60 @@ impl RunnerProtocolStore {
         }
         commit_mutation(transaction).await
     }
+}
+
+async fn verify_leak_report(
+    connection: &mut PgConnection,
+    enrollment: RunnerEnrollmentId,
+    page: &RunnerWorkspaceLeakPage,
+) -> Result<(), RunnerProtocolStoreError> {
+    use signalbox_runner_wire::{CanonicalUuid, Digest, LeakFact, LeakFactKind, PositiveU64};
+    let rows = sqlx::query("SELECT fact.value->>'kind' AS kind, fact.value->>'locator' AS locator,
+            fact.value->>'entry_digest' AS entry_digest, (fact.value->>'session')::uuid AS session_id,
+            (fact.value->>'placement_revision')::numeric AS placement_revision
+        FROM runner_workspace_leak_page AS page
+        CROSS JOIN LATERAL jsonb_array_elements(page.facts) WITH ORDINALITY AS fact(value, ordinal)
+        WHERE page.enrollment_id = $1 AND page.registration_revision = $2 AND page.report_digest = $3
+        ORDER BY page.page, fact.ordinal")
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(page.registration_revision.get()))
+        .bind(page.report_digest.as_str())
+        .fetch_all(connection)
+        .await?;
+    let facts = rows
+        .iter()
+        .map(|row| {
+            let kind = RunnerWorkspaceLeakKind::parse(&row.decode_column::<String>("kind")?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            Ok(LeakFact {
+                kind: match kind {
+                    RunnerWorkspaceLeakKind::UnknownManifest => LeakFactKind::UnknownManifest,
+                    RunnerWorkspaceLeakKind::RetiredPresent => LeakFactKind::RetiredPresent,
+                    RunnerWorkspaceLeakKind::ManifestConflict => LeakFactKind::ManifestConflict,
+                    RunnerWorkspaceLeakKind::CleanupFailed => LeakFactKind::CleanupFailed,
+                    RunnerWorkspaceLeakKind::Unreconciled => LeakFactKind::Unreconciled,
+                },
+                locator: row.decode_column("locator")?,
+                entry_digest: Digest::try_new(row.decode_column("entry_digest")?)
+                    .map_err(|_| mismatch())?,
+                session: row
+                    .decode_column::<Option<Uuid>>("session_id")?
+                    .map(CanonicalUuid::from_uuid),
+                placement_revision: row
+                    .decode_column::<Option<Decimal>>("placement_revision")?
+                    .map(|value| {
+                        PositiveU64::try_new(decode_generation(value)?.get())
+                            .map_err(|_| mismatch())
+                    })
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, RunnerProtocolStoreError>>()?;
+    let digest = signalbox_runner_wire::leak_report_digest(&facts).map_err(|_| mismatch())?;
+    if digest.as_str() != page.report_digest.as_str() {
+        return Err(mismatch());
+    }
+    Ok(())
 }
 
 async fn reconcile_leak(

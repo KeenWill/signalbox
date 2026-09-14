@@ -5044,6 +5044,7 @@ dependencies = [
  "signalbox-derive",
  "signalbox-domain",
  "signalbox-newtype",
+ "signalbox-runner-wire",
  "signalbox-tools-plan",
  "sqlx",
  "tempfile",

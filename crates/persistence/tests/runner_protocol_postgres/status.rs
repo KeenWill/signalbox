@@ -214,9 +214,7 @@ fn private_workspace(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_persistence::runner_protocol::workspaces::{
-        RunnerEvidenceDigest, RunnerWorkspaceLeak, RunnerWorkspaceLeakKind, RunnerWorkspaceLeakPage,
-    };
+    use signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceLeakKind;
     let (_container, pool) = migrated_postgres().await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let receipt = store
@@ -226,29 +224,16 @@ async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
     store
         .open_connection(receipt.identities().enrollment())
         .await?;
-    let digest = |byte: char| {
-        RunnerEvidenceDigest::try_new(byte.to_string().repeat(64))
-            .expect("arbitrary canonical evidence identity")
-    };
-    let mut page = RunnerWorkspaceLeakPage {
-        registration_revision: RunnerGeneration::try_from_u64(1).expect("first revision"),
-        report_digest: digest('a'),
-        page: RunnerGeneration::try_from_u64(1).expect("first page"),
-        prior_page_digest: None,
-        final_page: true,
-        page_digest: digest('b'),
-        facts: ["sessions/orphan-a", "sessions/orphan-b"]
-            .into_iter()
-            .map(|locator| RunnerWorkspaceLeak {
-                kind: RunnerWorkspaceLeakKind::UnknownManifest,
-                locator: WorkspaceRelativePath::try_new(locator.to_owned())
-                    .expect("relative locator"),
-                entry_digest: digest('c'),
-                session: None,
-                placement_revision: None,
-            })
-            .collect(),
-    };
+    let facts: Vec<_> = ["sessions/orphan-a", "sessions/orphan-b"]
+        .into_iter()
+        .map(|locator| {
+            let mut fact = report_fact(0);
+            fact.locator = locator.to_owned();
+            fact
+        })
+        .collect();
+    let report = signalbox_runner_wire::leak_report_digest(&facts)?;
+    let mut page = report_page(&report, 1, None, true, &facts);
     store
         .record_workspace_leak_page(receipt.identities().enrollment(), &page)
         .await?;
@@ -281,7 +266,7 @@ async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
     assert!(next.next_after.is_none());
     assert!(next.leaks[0].1.session.is_none());
     page.page = page.page.checked_next().expect("next page");
-    page.prior_page_digest = Some(digest('b'));
+    page.prior_page_digest = Some(page.page_digest.clone());
     assert!(
         store
             .record_workspace_leak_page(receipt.identities().enrollment(), &page)
@@ -289,5 +274,183 @@ async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
             .is_err(),
         "a final page cannot be extended"
     );
+    Ok(())
+}
+
+fn report_fact(index: usize) -> signalbox_runner_wire::LeakFact {
+    signalbox_runner_wire::LeakFact {
+        kind: signalbox_runner_wire::LeakFactKind::UnknownManifest,
+        locator: format!("sessions/orphan-{index:03}"),
+        entry_digest: signalbox_runner_wire::Digest::try_new("c".repeat(64))
+            .expect("arbitrary canonical entry identity"),
+        session: None,
+        placement_revision: None,
+    }
+}
+
+fn report_page(
+    report: &signalbox_runner_wire::Digest,
+    page_number: u64,
+    prior: Option<&signalbox_runner_wire::Digest>,
+    final_page: bool,
+    facts: &[signalbox_runner_wire::LeakFact],
+) -> signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceLeakPage {
+    use signalbox_persistence::runner_protocol::workspaces::{
+        RunnerEvidenceDigest, RunnerWorkspaceLeak, RunnerWorkspaceLeakKind, RunnerWorkspaceLeakPage,
+    };
+    use signalbox_runner_wire::{
+        LeakFactKind as Kind, LeakPageDigestInput, PositiveU64, leak_page_digest,
+    };
+    let page_digest = leak_page_digest(LeakPageDigestInput {
+        registration_revision: PositiveU64::try_new(1).expect("first registration"),
+        report_digest: report,
+        page: PositiveU64::try_new(page_number).expect("positive page"),
+        prior_page_digest: prior,
+        final_page,
+        facts,
+    })
+    .expect("individually valid page, including its claimed report digest");
+    let digest = |value: &signalbox_runner_wire::Digest| {
+        RunnerEvidenceDigest::try_new(value.as_str().to_owned()).expect("canonical wire digest")
+    };
+    RunnerWorkspaceLeakPage {
+        registration_revision: RunnerGeneration::try_from_u64(1).expect("first registration"),
+        report_digest: digest(report),
+        page: RunnerGeneration::try_from_u64(page_number).expect("positive page"),
+        prior_page_digest: prior.map(digest),
+        final_page,
+        page_digest: digest(&page_digest),
+        facts: facts
+            .iter()
+            .map(|fact| RunnerWorkspaceLeak {
+                kind: match fact.kind {
+                    Kind::UnknownManifest => RunnerWorkspaceLeakKind::UnknownManifest,
+                    Kind::RetiredPresent => RunnerWorkspaceLeakKind::RetiredPresent,
+                    Kind::ManifestConflict => RunnerWorkspaceLeakKind::ManifestConflict,
+                    Kind::CleanupFailed => RunnerWorkspaceLeakKind::CleanupFailed,
+                    Kind::Unreconciled => RunnerWorkspaceLeakKind::Unreconciled,
+                },
+                locator: WorkspaceRelativePath::try_new(fact.locator.clone())
+                    .expect("relative locator"),
+                entry_digest: digest(&fact.entry_digest),
+                session: fact.session.map(|id| SessionId::from_uuid(id.into_uuid())),
+                placement_revision: fact.placement_revision.map(|revision| {
+                    RunnerGeneration::try_from_u64(revision.get()).expect("positive revision")
+                }),
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn final_leak_page_rejects_a_false_complete_report_digest() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    store.open_connection(enrollment).await?;
+    let facts = vec![report_fact(0)];
+    let claimed = signalbox_runner_wire::leak_report_digest(&[])?;
+    let page = report_page(&claimed, 1, None, true, &facts);
+    assert!(
+        store
+            .record_workspace_leak_page(enrollment, &page)
+            .await
+            .is_err()
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak_page")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        rows, 0,
+        "the rejected final page has no durable acknowledgement"
+    );
+    let projected: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(projected, 0, "the failed transaction projects no facts");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn final_leak_page_rejects_reversed_and_duplicate_page_boundaries()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{Digest, leak_report_digest};
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    store.open_connection(enrollment).await?;
+    for duplicate in [false, true] {
+        let first: Vec<_> = (1..=64).map(report_fact).collect();
+        let last = if duplicate {
+            first.last().expect("full first page").clone()
+        } else {
+            report_fact(0)
+        };
+        let mut canonical = first.clone();
+        canonical.push(last.clone());
+        canonical.sort();
+        canonical.dedup();
+        let report = leak_report_digest(&canonical)?;
+        let page_one = report_page(&report, 1, None, false, &first);
+        store
+            .record_workspace_leak_page(enrollment, &page_one)
+            .await?;
+        let prior = Digest::try_new(page_one.page_digest.as_str().to_owned())?;
+        let page_two = report_page(&report, 2, Some(&prior), true, &[last]);
+        assert!(
+            store
+                .record_workspace_leak_page(enrollment, &page_two)
+                .await
+                .is_err()
+        );
+        let pages: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_leak_page WHERE report_digest = $1",
+        )
+        .bind(report.as_str())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(pages, 1, "only the first page remains retained");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn final_leak_page_acknowledges_the_exact_assembled_report() -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{Digest, leak_report_digest};
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    store.open_connection(enrollment).await?;
+    let facts: Vec<_> = (0..65).map(report_fact).collect();
+    let report = leak_report_digest(&facts)?;
+    let first = report_page(&report, 1, None, false, &facts[..64]);
+    store.record_workspace_leak_page(enrollment, &first).await?;
+    let prior = Digest::try_new(first.page_digest.as_str().to_owned())?;
+    let last = report_page(&report, 2, Some(&prior), true, &facts[64..]);
+    store.record_workspace_leak_page(enrollment, &last).await?;
+    store.record_workspace_leak_page(enrollment, &last).await?;
+    let pages: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak_page")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(pages, 2);
+    let projected: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(projected, 65);
     Ok(())
 }

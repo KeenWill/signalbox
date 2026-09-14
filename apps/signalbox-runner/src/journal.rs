@@ -383,6 +383,17 @@ impl Journal {
         self.clear_operation(directory)
     }
 
+    pub(crate) fn discard_release(
+        &mut self,
+        directory: &File,
+        correlation: &ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.release() {
+            Some((retained, _, _)) if retained == correlation => self.clear_operation(directory),
+            _ => Err(RunnerStateError::InvalidTransition),
+        }
+    }
+
     fn clear_operation(&mut self, directory: &File) -> Result<(), RunnerStateError> {
         let mut next = self.clone();
         next.entries.clear();

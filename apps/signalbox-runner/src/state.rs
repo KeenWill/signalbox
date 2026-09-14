@@ -531,6 +531,12 @@ impl RunnerStateRoot {
         self.journal
             .acknowledge_release(&self.directory, correlation, failed)
     }
+    pub(crate) fn discard_reconciled_release(
+        &mut self,
+        correlation: &signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.discard_release(&self.directory, correlation)
+    }
     pub(crate) fn retained_leak_page(&self) -> Option<&signalbox_runner_wire::LeakPage> {
         self.journal.leak_page()
     }

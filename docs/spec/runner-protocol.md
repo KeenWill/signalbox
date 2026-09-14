@@ -150,7 +150,8 @@ reconnect until acknowledged; the runner keeps serving.
 The daemon issues cleanup for a retired manifest only to its connected owner,
 after its leases and results settle. Plain-directory placements have no manifest
 and receive no cleanup. Connection loss retires an outstanding release as
-unowned and retains a leak diagnostic; ownership never transfers to a successor.
+unowned and retains a leak diagnostic. On reconnect, `fail_stale` clears that
+exact journaled release; ownership never transfers to a successor.
 
 The runner fsyncs `release_accepted` before marking the manifest `releasing`,
 renaming the placement below `trash/`, and deleting it through directory
@@ -162,8 +163,10 @@ surviving workspace as a `cleanup_failed` leak.
 
 Before execution, startup reports ready and active manifests and unknown entries
 in bounded, digest-correlated pages. The daemon reconciles exact retained ready
-facts and stores unresolved diagnostics before acknowledging each page. Reports
-remain visible without a resumable session and authorize no deletion.
+facts and stores unresolved diagnostics before acknowledging each page. The
+final page verifies strict ordering and the complete digest over all retained
+facts. Reports remain visible without a resumable session and authorize no
+deletion.
 
 ## Boundary contracts
 

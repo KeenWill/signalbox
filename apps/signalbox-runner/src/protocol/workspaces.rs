@@ -340,6 +340,21 @@ pub(super) fn apply_workspace_directives(
             {
                 state.acknowledge_release(&correlation, failed)?
             }
+            A::FailStale
+                if directives
+                    .operation_failure
+                    .as_ref()
+                    .is_none_or(|failure| failure.action == A::FailStale) =>
+            {
+                let signalbox_runner_wire::OperationCorrelation::Release(expected) =
+                    &directive.correlation
+                else {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::ResumeDirectives,
+                    ));
+                };
+                state.discard_reconciled_release(expected)?;
+            }
             _ => {
                 return Err(RunnerConnectionError::Violation(
                     ProtocolViolation::ResumeDirectives,

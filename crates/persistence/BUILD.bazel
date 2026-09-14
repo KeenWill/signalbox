@@ -16,6 +16,7 @@ TEST_DEPS = [
     "//crates/conversation-import-codex:signalbox_conversation_import_codex",
     "//crates/domain:signalbox_domain",
     "//crates/newtype:signalbox_newtype",
+    "//crates/runner-wire:signalbox_runner_wire",
     "//crates/tools-plan:signalbox_tools_plan",
 ]
 
@@ -45,6 +46,7 @@ rust_library(
         "//crates/blob-store:signalbox_blob_store",
         "//crates/domain:signalbox_domain",
         "//crates/newtype:signalbox_newtype",
+        "//crates/runner-wire:signalbox_runner_wire",
         "//crates/tools-plan:signalbox_tools_plan",
     ],
 )

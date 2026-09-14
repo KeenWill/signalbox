@@ -962,3 +962,116 @@ async fn duplicate_provision_failure_acknowledgement_preserves_a_later_failure()
         .expect("next acknowledgement");
     assert!(state.retained_provision_failure().is_none());
 }
+
+#[tokio::test]
+async fn stale_release_reconciliation_survives_restart_and_preserves_the_leak_page() {
+    use signalbox_runner_wire::{
+        DetailName, FailureCategory, FailureDetail, OperationFailure, ReleaseCorrelation,
+        ReleasePhase,
+    };
+    for (phase, failed) in [
+        (ReleasePhase::ReleaseAccepted, false),
+        (ReleasePhase::ReleaseCompleted, false),
+        (ReleasePhase::ReleaseAccepted, true),
+    ] {
+        let directory = tempfile::tempdir().expect("temporary parent");
+        let mut state = enrolled(&directory);
+        let receipt = state.state().receipt().expect("receipt").clone();
+        let correlation = ReleaseCorrelation {
+            session_id: identity(),
+            placement_revision: positive(),
+            runner_id: receipt.runner_id(),
+            manifest_id: identity(),
+        };
+        state
+            .record_release(correlation.clone())
+            .expect("accepted release");
+        if phase == ReleasePhase::ReleaseCompleted {
+            state
+                .complete_release(&correlation)
+                .expect("completed release");
+        }
+        if failed {
+            state
+                .fail_release(OperationFailure {
+                    correlation: OperationCorrelation::Release(correlation.clone()),
+                    category: FailureCategory::WorkspaceCleanupFailed,
+                    detail: FailureDetail::try_new(
+                        DetailName::try_new("cleanup-refused".to_owned()).expect("detail name"),
+                        "cleanup refused".to_owned(),
+                        serde_json::json!({}),
+                    )
+                    .expect("bounded detail"),
+                })
+                .expect("failed release");
+        }
+        let page = crate::workspace::leaks::pages(receipt.registration_revision(), &[])
+            .expect("empty startup report")
+            .pop_front()
+            .expect("final page");
+        state
+            .record_leak_page(page.clone())
+            .expect("independent report");
+        drop(state);
+        let mut state = RunnerStateRoot::open(&directory.path().join("state")).expect("restart");
+        let operation = OperationCorrelation::Release(correlation.clone());
+        for wrong_correlation in [true, false] {
+            let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+            let mut hub = BufReader::new(hub);
+            let config = configuration();
+            let resume = RunnerConnection::establish(stream, &mut state, config.advertisement());
+            let daemon = async {
+                let Message::Resume(request) = receive_message(&mut hub).await.expect("resume")
+                else {
+                    panic!("resume request")
+                };
+                assert!(request.inventory.workspace_operation.is_some());
+                let mut exact = correlation.clone();
+                if wrong_correlation {
+                    exact.manifest_id = identity();
+                }
+                send_message(
+                    &mut hub,
+                    Message::Resumed(Box::new(Resumed {
+                        registration_revision: receipt.registration_revision(),
+                        connection_epoch: positive(),
+                        directives: ReconnectDirectives {
+                            workspace_operation: Some(Directive {
+                                correlation: OperationCorrelation::Release(exact),
+                                action: DirectiveAction::FailStale,
+                            }),
+                            operation_failure: failed.then(|| Directive {
+                                correlation: operation.clone(),
+                                action: DirectiveAction::FailStale,
+                            }),
+                            leak_page: Some(Directive {
+                                correlation: page.correlation.clone(),
+                                action: DirectiveAction::Resend,
+                            }),
+                            ..Default::default()
+                        },
+                    })),
+                )
+                .await
+                .expect("stale release decision");
+            };
+            let (runner, ()) = tokio::join!(resume, daemon);
+            if wrong_correlation {
+                assert!(runner.is_err());
+                assert_eq!(
+                    state.retained_release().expect("exact release retained").0,
+                    &correlation
+                );
+            } else {
+                assert!(runner.is_ok(), "stale release must not prevent reconnect");
+                assert!(state.retained_release().is_none());
+            }
+            assert_eq!(state.retained_leak_page(), Some(&page));
+        }
+        drop(state);
+        let state = RunnerStateRoot::open(&directory.path().join("state")).expect("second restart");
+        assert!(state.reconnect_inventory().workspace_operation.is_none());
+        assert!(state.reconnect_inventory().operation_failure.is_none());
+        assert_eq!(state.retained_leak_page(), Some(&page));
+    }
+}
