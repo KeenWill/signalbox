@@ -559,6 +559,9 @@ impl PostgresRunnerRegistrationService {
             )
             .await
             .map_err(|error| {
+                if matches!(&error, RunnerProtocolStoreError::CommitAmbiguous(_)) {
+                    self.dispatch.changed();
+                }
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
         if let RunnerLeaseResumeOutcome::LoseConnection(connection) = resolution {
@@ -575,6 +578,9 @@ impl PostgresRunnerRegistrationService {
                 )
                 .await
                 .map_err(|error| {
+                    if matches!(&error, RunnerProtocolStoreError::CommitAmbiguous(_)) {
+                        self.dispatch.changed();
+                    }
                     store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
                 })?;
         }
@@ -675,6 +681,9 @@ impl PostgresRunnerRegistrationService {
                 )
                 .await
                 .map_err(|error| {
+                    if matches!(&error, RunnerProtocolStoreError::CommitAmbiguous(_)) {
+                        self.dispatch.changed();
+                    }
                     store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
                 })?;
             match current {
