@@ -12,7 +12,7 @@ name = "signalbox-file-media-svg-worker"
 path = "src/bin/signalbox-file-media-svg-worker.rs"
 
 [dependencies]
-cssparser = "0.37.0"
+cssparser = "0.38.0"
 iri-string = "0.7.14"
 quick-xml = "0.42.0"
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }
