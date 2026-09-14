@@ -168,6 +168,19 @@ impl RunnerProtocolStore {
         }
         let outcome = match lease.state() {
             RunnerLeaseState::LostUnclaimed
+                if matches!(evidence, RunnerLeaseResumeEvidence::Refusal { .. }) =>
+            {
+                let RunnerLeaseResumeEvidence::Refusal {
+                    category, detail, ..
+                } = evidence
+                else {
+                    return Err(invalid());
+                };
+                self.record_tool_lease_failure_in(&mut transaction, correlation, category, &detail)
+                    .await?;
+                RunnerLeaseResumeOutcome::Recorded
+            }
+            RunnerLeaseState::LostUnclaimed
             | RunnerLeaseState::LostExecutionPossible
             | RunnerLeaseState::LostClaimed => RunnerLeaseResumeOutcome::Lost,
             RunnerLeaseState::Completed => {

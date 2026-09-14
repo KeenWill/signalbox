@@ -2,7 +2,6 @@
 
 use super::dispatch::{invalid, tool_error, validate_connection};
 use super::*;
-use signalbox_domain::{ToolAttemptObservation, ToolExecutionError, ToolExecutionErrorKind};
 
 /// Closed reasons for refusing an offered lease before execution authority is issued.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,32 +91,23 @@ impl RunnerProtocolStore {
         let refused = lease
             .refuse(correlation.clone())
             .map_err(RunnerProtocolStoreError::Domain)?;
-        let batch = crate::tool_loop::load_active_batch_from_connection(
-            transaction.as_mut(),
-            correlation.dispatch.session(),
-            correlation.dispatch.turn(),
-        )
-        .await
-        .map_err(tool_error)?
-        .ok_or_else(invalid)?;
-        let authorized = batch
-            .resume_in_flight_attempt(correlation.dispatch.attempt())
-            .map_err(|_| invalid())?;
-        if authorized.correlation() != correlation.dispatch {
+        let changed = sqlx::query("UPDATE tool_attempt SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed', error_kind = 'execution_failed'
+            WHERE attempt_id = $1 AND request_id = $2 AND session_id = $3 AND turn_id = $4
+                AND issuing_turn_attempt_id = $5 AND dispatch_generation = $6 AND state_kind = 'in_flight'
+                AND NOT EXISTS (SELECT 1 FROM runner_lease_generation successor
+                    WHERE successor.lease_id = $7 AND successor.generation > $8)")
+            .bind(correlation.dispatch.attempt().into_uuid())
+            .bind(correlation.dispatch.request().into_uuid())
+            .bind(correlation.dispatch.session().into_uuid())
+            .bind(correlation.dispatch.turn().into_uuid())
+            .bind(correlation.dispatch.issuing_attempt().into_uuid())
+            .bind(Decimal::from(correlation.dispatch.generation().as_u64()))
+            .bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get()))
+            .execute(&mut **transaction).await?.rows_affected();
+        if changed != 1 {
             return Err(invalid());
         }
-        let observed = authorized
-            .executor_fence()
-            .bind(ToolAttemptObservation::KnownFailed {
-                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
-            });
-        let (current, _) = authorized.into_parts();
-        let ended = current
-            .apply_terminal_observation(observed)
-            .map_err(|_| invalid())?;
-        crate::tool_loop::persist_ended_attempt(transaction.as_mut(), &ended)
-            .await
-            .map_err(tool_error)?;
         sqlx::query("INSERT INTO runner_lease_failure (lease_id, generation, category, detail) VALUES ($1,$2,$3,$4)")
             .bind(correlation.lease.into_uuid()).bind(Decimal::from(correlation.generation.get()))
             .bind(category.as_str()).bind(detail).execute(&mut **transaction).await?;

@@ -270,7 +270,10 @@ impl RunnerLease {
         mut self,
         correlation: RunnerLeaseCorrelation,
     ) -> Result<Self, RunnerDomainError> {
-        if self.state != RunnerLeaseState::Offered {
+        if !matches!(
+            self.state,
+            RunnerLeaseState::Offered | RunnerLeaseState::LostUnclaimed
+        ) {
             return Err(RunnerDomainError::InvalidState);
         }
         if self.correlation() != correlation {

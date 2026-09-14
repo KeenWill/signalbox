@@ -2,7 +2,7 @@ ALTER TABLE runner_lease_event DROP CONSTRAINT runner_lease_event_state_shape;
 ALTER TABLE runner_lease_event ADD CONSTRAINT runner_lease_event_state_shape CHECK (
     (event_ordinal = 1 AND state_kind = 'offered')
     OR (event_ordinal = 2 AND state_kind IN ('claimed', 'refused', 'lost_unclaimed', 'lost_execution_possible'))
-    OR (event_ordinal = 3 AND state_kind IN ('completed', 'lost_claimed'))
+    OR (event_ordinal = 3 AND state_kind IN ('completed', 'lost_claimed', 'refused'))
 );
 
 CREATE TABLE runner_lease_failure (
@@ -53,3 +53,66 @@ CREATE CONSTRAINT TRIGGER runner_lease_refusal_has_evidence
 CREATE CONSTRAINT TRIGGER runner_lease_failure_settles_authority
     AFTER INSERT ON runner_lease_failure DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION require_runner_lease_refusal();
+
+CREATE OR REPLACE FUNCTION guard_runner_lease_event() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE prior_state text;
+BEGIN
+    IF NEW.event_ordinal = 1 THEN RETURN NEW; END IF;
+    SELECT state_kind INTO prior_state FROM runner_lease_event
+        WHERE lease_id = NEW.lease_id AND generation = NEW.generation
+            AND event_ordinal = NEW.event_ordinal - 1;
+    IF NOT FOUND
+        OR (NEW.event_ordinal = 2 AND prior_state <> 'offered')
+        OR (NEW.event_ordinal = 3 AND NOT (
+            (NEW.state_kind = 'refused' AND prior_state = 'lost_unclaimed')
+            OR (NEW.state_kind IN ('completed', 'lost_claimed') AND prior_state = 'claimed')
+        )) THEN
+        RAISE EXCEPTION 'runner lease event transition is not monotonic' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION assert_runner_no_execution_proof_complete(checked_lease uuid, checked_generation numeric)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM runner_lease_no_execution_proof
+        WHERE lease_id = checked_lease AND generation = checked_generation)
+        IS DISTINCT FROM EXISTS (SELECT 1 FROM runner_lease_event
+        WHERE lease_id = checked_lease AND generation = checked_generation AND state_kind = 'lost_unclaimed') THEN
+        RAISE EXCEPTION 'runner lost-unclaimed lease lacks exact no-execution proof' USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+DO $migration$
+DECLARE
+    function_name text;
+    definition text;
+    prior text := $prior$                    OR (
+                        attempt.state_kind = 'terminal'
+                        AND attempt.terminal_disposition_kind = 'ambiguous'
+                        AND lease_event.state_kind IN ($prior$;
+    refusal text := $refusal$                    OR (
+                        attempt.state_kind = 'terminal'
+                        AND attempt.terminal_disposition_kind = 'known_failed'
+                        AND attempt.error_kind = 'execution_failed'
+                        AND attempt.error_detail IS NULL
+                        AND lease_event.state_kind = 'refused'
+                        AND EXISTS (SELECT 1 FROM runner_lease_failure failure
+                            WHERE failure.lease_id = lease.lease_id AND failure.generation = lease.generation)
+                    )
+$refusal$;
+BEGIN
+    FOREACH function_name IN ARRAY ARRAY[
+        'assert_turn_runner_recovery_complete(uuid,uuid)',
+        'assert_runner_placement_interrupted_attempt_complete(uuid,numeric)'
+    ] LOOP
+        SELECT pg_get_functiondef(function_name::regprocedure) INTO definition;
+        IF strpos(definition, prior) = 0 THEN
+            RAISE EXCEPTION 'runner recovery attempt predicate is missing from %', function_name;
+        END IF;
+        EXECUTE replace(definition, prior, refusal || prior);
+    END LOOP;
+END;
+$migration$;

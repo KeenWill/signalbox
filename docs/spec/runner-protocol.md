@@ -167,8 +167,10 @@ A refused offer never authorizes execution. Its lease becomes `refused` and its
 physical attempt becomes a known execution failure; dispatch waiters wake and
 the runner continues serving after acknowledgement. Refusal cannot settle a
 claimed lease. Authenticated reconnect reconciles retained refusal before
-opening a new epoch. Startup and shutdown retain unacknowledged failures.
-Operation decisions use the closed category; runner status applies the
+opening a new epoch, including refusal of a lost, unclaimed offer after
+transport loss. That refusal preserves the loss history and no-execution proof
+while settling the lease and attempt. Startup and shutdown retain unacknowledged
+failures. Operation decisions use the closed category; runner status applies the
 [redacting diagnostic projection](process-protocol.md) to retained detail.
 
 ## Workspace release and leak reporting

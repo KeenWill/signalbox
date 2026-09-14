@@ -670,10 +670,11 @@ unresolved facts projected into status.
 
 Offered-lease refusal commits immutable `runner_lease_failure` evidence, the
 `refused` lease event, and its terminal known-failed physical attempt together.
-Release cleanup failure retains its immutable outcome and exact detail.
-Acknowledgement follows commit; equal replay returns the retained outcome and
-unequal replay is a correlation error. Status reads apply redaction without
-changing stored detail.
+A retained refusal may settle a lost-unclaimed lease after transport loss; its
+no-execution proof and placement-loss evidence remain stored. Release cleanup
+failure retains its immutable outcome and exact detail. Acknowledgement follows
+commit; equal replay returns the retained outcome and unequal replay is a
+correlation error. Status reads apply redaction without changing stored detail.
 
 OAuth provisioning locks its profile and every retained pool co-member in
 reference order, rereads membership, and retries acquisition if membership grew.
