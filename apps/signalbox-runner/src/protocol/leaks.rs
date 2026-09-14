@@ -114,9 +114,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         state: &mut RunnerStateRoot,
         recorded: signalbox_runner_wire::WorkspaceLeakRecorded,
     ) -> Result<(), RunnerConnectionError> {
-        if state.retained_leak_page().is_none()
-            && self.last_leak_recorded.as_ref() == Some(&recorded)
-        {
+        if self.last_leak_recorded.as_ref() == Some(&recorded) {
             return Ok(());
         }
         if state.retained_leak_page().is_none_or(|page| {

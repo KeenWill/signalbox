@@ -38,10 +38,3 @@ pub fn create_executable_snapshot() -> error::Result<fs::File>;
 #[cfg(target_os = "linux")]
 pub fn seal_executable_snapshot(file: &fs::File) -> error::Result<()>;
 ```
-
-## chmod_descriptor
-
-```rust
-#[cfg(target_os = "linux")]
-pub fn chmod_descriptor(descriptor: owned::BorrowedFd<'_>, mode: u32) -> error::Result<()>;
-```
