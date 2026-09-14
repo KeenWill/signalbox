@@ -1,7 +1,7 @@
 //! Configured model execution for session titles.
 
 use signalbox_application::UsageTokenAxes;
-use signalbox_domain::{DurableCommandId, ModelCallId, SessionId, TurnId};
+use signalbox_domain::{DurableCommandId, ModelCallId, ResolvedProviderTarget, SessionId, TurnId};
 use signalbox_model_provider_runtime::{
     InvocationProcessObserver, ProviderTargetRelation, relate_provider_target,
 };
@@ -122,15 +122,13 @@ impl SessionTitles {
             .models
             .session_title_settings()
             .ok_or(TitleError::Configuration)?;
-        let catalog = self.models.runtime_model_catalog();
-        let definition = catalog.resolve(target).ok_or(TitleError::Configuration)?;
         let selected = self
             .models
             .resolve_direct_model(selection)
-            .ok_or(TitleError::Configuration)?;
-        let selected = catalog
-            .resolve(selected.target())
-            .ok_or(TitleError::Configuration)?;
+            .ok_or(TitleError::Configuration)?
+            .target();
+        let catalog = self.models.runtime_model_catalog();
+        let definition = catalog.resolve(target).ok_or(TitleError::Configuration)?;
         let families = self.models.credential_family_catalog();
         let family = families.family(target).ok_or(TitleError::Configuration)?;
         // The title target already includes the selected fast-mode route.
@@ -190,7 +188,7 @@ impl SessionTitles {
         };
         let mut operation = title_operation(
             &call,
-            ResolvedTarget::new(selected.provider_model().to_owned()),
+            selected,
             ResolvedTarget::new(definition.provider_model().to_owned()),
             settings,
         );
@@ -390,21 +388,23 @@ impl ObservationSink<ModelCallId> for TitleObservations {
 
 fn title_operation(
     call: &SessionTitleCall,
-    selected: ResolvedTarget,
+    selected: ResolvedProviderTarget,
     serving: ResolvedTarget,
-    settings: ModelSettings,
+    mut settings: ModelSettings,
 ) -> ModelOperation<ModelCallId> {
-    let mapped = (selected != serving).then_some(serving);
-    let mut operation = ModelOperation::new(
+    // The serving target has already been selected from the configured fast-mode
+    // mapping. Dispatch it directly so adapter routing uses that target too.
+    if selected != call.target {
+        settings.fast_mode = signalbox_model_runtime::FastMode::Disabled;
+    }
+    ModelOperation::new(
         call.call,
         CredentialReference::new(call.credential_reference.clone()),
         RequestedTarget::new(format!("direct:{}", call.selection.into_uuid())),
-        selected,
+        serving,
         Vec::new(),
         settings,
-    );
-    operation.retained_mapped_target = mapped;
-    operation
+    )
 }
 
 pub(crate) fn title_input_budget(
@@ -482,13 +482,27 @@ mod tests {
     use signalbox_domain::SessionMetadataContent;
 
     #[test]
-    fn inherited_title_fast_mode_retains_the_serving_target_for_runtime_validation() {
-        for fast_mode in ["enabled", "disabled"] {
-            let source = crate::configuration::tests::CONFIGURATION
-                .replace("version = 1", &format!("version = 1\n[model_settings]\nfast_mode = \"{fast_mode}\""))
-                .replace("context_window_tokens = 200000", "context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-000000000002\"");
-            let models = HubModelConfiguration::parse(&format!(
-                r#"{source}
+    fn title_dispatch_preserves_request_control_and_consumes_fast_target_mapping() {
+        for support in ["alternate_target", "request_control"] {
+            for fast_mode in ["enabled", "disabled"] {
+                let fast_target = if support == "alternate_target" {
+                    "\nfast_target_id = \"20000000-0000-4000-8000-000000000002\""
+                } else {
+                    ""
+                };
+                let source = crate::configuration::tests::CONFIGURATION
+                    .replace(
+                        "version = 1",
+                        &format!("version = 1\n[model_settings]\nfast_mode = \"{fast_mode}\""),
+                    )
+                    .replace(
+                        "context_window_tokens = 200000",
+                        &format!(
+                            "context_window_tokens = 200000\nfast_mode = \"{support}\"{fast_target}"
+                        ),
+                    );
+                let models = HubModelConfiguration::parse(&format!(
+                    r#"{source}
 [[serving_targets]]
 target_id = "20000000-0000-4000-8000-000000000002"
 model_family = "anthropic"
@@ -499,53 +513,53 @@ context_window_tokens = 200000
 [session_titles]
 selection_id = "10000000-0000-4000-8000-000000000001"
 "#
-            ))
-            .expect("supported inherited title settings");
-            let (selection, target, settings) =
-                models.session_title_settings().expect("title settings");
-            let catalog = models.runtime_model_catalog();
-            let selected = models
-                .resolve_direct_model(selection)
-                .expect("selected model");
-            let selected = catalog
-                .resolve(selected.target())
-                .expect("selectable definition");
-            let serving = catalog.resolve(target).expect("serving definition");
-            let call = SessionTitleCall {
-                call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
-                session: SessionId::from_uuid(uuid::Uuid::now_v7()),
-                selection,
-                target,
-                credential_reference: "synthetic-title-credential".to_owned(),
-                input_includes_cache_tokens: false,
-                initial_for_turn: None,
-            };
-            let operation = title_operation(
-                &call,
-                ResolvedTarget::new(selected.provider_model().to_owned()),
-                ResolvedTarget::new(serving.provider_model().to_owned()),
-                settings,
-            );
-            let capabilities = models.runtime_model_capability_catalog();
-            let capability = capabilities
-                .validate(&operation.resolved_target, &operation.settings)
-                .expect("runtime accepts the selectable model's settings");
-            let (effective, request_fast_mode) = capability
-                .effective_target(
-                    &operation.resolved_target,
-                    operation.settings.fast_mode,
-                    operation.retained_mapped_target.as_ref(),
-                )
-                .expect("runtime resolves retained title target");
-            assert_eq!(effective.as_str(), serving.provider_model());
-            assert_eq!(
-                request_fast_mode,
-                signalbox_model_runtime::FastMode::Disabled
-            );
-            assert_eq!(
-                operation.retained_mapped_target.is_some(),
-                fast_mode == "enabled"
-            );
+                ))
+                .expect("supported inherited title settings");
+                let (selection, target, settings) =
+                    models.session_title_settings().expect("title settings");
+                let catalog = models.runtime_model_catalog();
+                let serving = catalog.resolve(target).expect("serving definition");
+                let call = SessionTitleCall {
+                    call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+                    session: SessionId::from_uuid(uuid::Uuid::now_v7()),
+                    selection,
+                    target,
+                    credential_reference: "synthetic-title-credential".to_owned(),
+                    input_includes_cache_tokens: false,
+                    initial_for_turn: None,
+                };
+                let operation = title_operation(
+                    &call,
+                    models
+                        .resolve_direct_model(selection)
+                        .expect("selected route")
+                        .target(),
+                    ResolvedTarget::new(serving.provider_model().to_owned()),
+                    settings,
+                );
+                let capabilities = models.runtime_model_capability_catalog();
+                let capability = capabilities
+                    .validate(&operation.resolved_target, &operation.settings)
+                    .expect("runtime accepts the selectable model's settings");
+                let (effective, request_fast_mode) = capability
+                    .effective_target(
+                        &operation.resolved_target,
+                        operation.settings.fast_mode,
+                        operation.retained_mapped_target.as_ref(),
+                    )
+                    .expect("runtime resolves retained title target");
+                assert_eq!(effective.as_str(), serving.provider_model());
+                assert_eq!(operation.resolved_target.as_str(), serving.provider_model());
+                assert_eq!(
+                    request_fast_mode,
+                    if support == "request_control" && fast_mode == "enabled" {
+                        signalbox_model_runtime::FastMode::Enabled
+                    } else {
+                        signalbox_model_runtime::FastMode::Disabled
+                    }
+                );
+                assert!(operation.retained_mapped_target.is_none());
+            }
         }
     }
 
@@ -753,7 +767,7 @@ selection_id = "{selection}"
         let request = PreparedTitle {
             operation: title_operation(
                 &call,
-                ResolvedTarget::new("synthetic-title"),
+                call.target,
                 ResolvedTarget::new("synthetic-title"),
                 ModelSettings::new(256),
             ),

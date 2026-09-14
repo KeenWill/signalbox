@@ -52,6 +52,25 @@ describe('command registry', () => {
     expect(removeAttachment).toHaveBeenCalledOnce()
   })
 
+  it('offers session name suggestions only for a selected available session', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+      navigate: () => undefined,
+      openNavigation: () => undefined,
+    }
+    const suggestSessionTitle = vi.fn()
+    expect(productCommandAvailable('session.title.suggest', context)).toBe(false)
+    const selected = { ...context, suggestSessionTitle }
+    expect(productCommandAvailable('session.title.suggest', selected)).toBe(true)
+    invokeProductCommand('session.title.suggest', selected)
+    expect(suggestSessionTitle).toHaveBeenCalledOnce()
+  })
+
   it('registers every advertised product navigation sequence', () => {
     expect(globalHotkeySequenceBindings).toEqual(
       expect.arrayContaining([
