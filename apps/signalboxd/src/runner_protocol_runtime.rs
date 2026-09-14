@@ -2181,8 +2181,25 @@ where
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.workspace_ready(context.enrollment, receipt).await {
                             Ok(Some(recorded)) => {
-                                if busy_provision == Some(recorded.correlation.authorization_id) { busy_provision = None; }
+                                let completed_provision =
+                                    busy_provision == Some(recorded.correlation.authorization_id);
                                 write_message(&mut writer, Message::WorkspaceRecorded(recorded)).await?;
+                                if completed_provision
+                                    && !sent_promotion
+                                    && let Some(receipt) = service
+                                        .promotion_receipt(context.enrollment)
+                                        .await
+                                        .map_err(RunnerProtocolRuntimeError::Lifecycle)?
+                                {
+                                    if receipt.connection_epoch != context.epoch {
+                                        return Ok(());
+                                    }
+                                    write_message(&mut writer, Message::Enrolled(receipt)).await?;
+                                    sent_promotion = true;
+                                }
+                                if completed_provision {
+                                    busy_provision = None;
+                                }
                             },
                             Ok(None) => {},
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
