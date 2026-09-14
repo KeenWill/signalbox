@@ -1693,16 +1693,17 @@ fn reconstitute(
     ) {
         (None, None, None, false) => None,
         (None, None, Some(_), false)
-            if input
-                .frontier_entries
-                .iter()
-                .skip(input.starting_snapshot.entry_count())
-                .all(|entry| {
-                    matches!(
-                        entry.payload(),
-                        SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
-                    )
-                }) =>
+            if input.frontier_entries.len() > input.starting_snapshot.entry_count()
+                && input
+                    .frontier_entries
+                    .iter()
+                    .skip(input.starting_snapshot.entry_count())
+                    .all(|entry| {
+                        matches!(
+                            entry.payload(),
+                            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                        )
+                    }) =>
         {
             None
         }
