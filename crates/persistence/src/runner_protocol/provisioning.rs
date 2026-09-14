@@ -70,19 +70,23 @@ impl RunnerProtocolStore {
         sqlx::query("SELECT * FROM runner_replacement_provisioning_authorization WHERE authorization_id = $1")
             .bind(authorization.into_uuid()).fetch_optional(&self.pool).await?.as_ref().map(decode_authorization).transpose()
     }
-    /// Loads unconsumed workspace operations for one exact candidate enrollment.
+    /// Loads unconsumed workspace operations for the candidate’s current connection epoch.
     pub async fn replacement_provisioning(
         &self,
         enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
     ) -> Result<Vec<RunnerReplacementProvisioning>, RunnerProtocolStoreError> {
         let rows = sqlx::query(
             "SELECT operation.* FROM runner_replacement_provisioning_authorization AS operation
              JOIN runner_replacement_stage AS stage USING (command_id)
-             WHERE operation.registration_enrollment_id = $1
+             JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
+             JOIN runner_connection_event AS event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
+             WHERE operation.registration_enrollment_id = $1 AND head.connection_epoch = $2
+               AND event.state_kind IN ('connected', 'suspect')
                AND NOT EXISTS (SELECT 1 FROM replace_lost_runner_result AS result WHERE result.command_id = operation.command_id)
                AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_ready AS ready WHERE ready.authorization_id = operation.authorization_id)
              ORDER BY operation.authorization_id",
-        ).bind(enrollment.into_uuid()).fetch_all(&self.pool).await?;
+        ).bind(enrollment.into_uuid()).bind(Decimal::from(epoch.get())).fetch_all(&self.pool).await?;
         rows.iter().map(decode_authorization).collect()
     }
 

@@ -105,10 +105,12 @@ impl RunnerWorkspaceStore {
                             } else {
                                 LeakFactKind::RetiredPresent
                             };
-                            if matches!(
-                                manifest.lifecycle,
-                                ManifestLifecycle::Active | ManifestLifecycle::Releasing
-                            ) {
+                            if kind == LeakFactKind::Unreconciled
+                                && matches!(
+                                    manifest.lifecycle,
+                                    ManifestLifecycle::Active | ManifestLifecycle::Releasing
+                                )
+                            {
                                 manifest.lifecycle = ManifestLifecycle::Ready;
                             }
                             facts.push(LeakFact {

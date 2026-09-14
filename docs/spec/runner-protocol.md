@@ -153,6 +153,7 @@ and execution-directory identities until release is reconciled; its aggregate
 size is independent of the operation-journal frame limit. Startup authenticates
 these facts against the configuration and filesystem before reconnecting; a
 changed mapping or replaced directory fails as `manifest_conflict`. The daemon
+loads provisioning and release work only for the current connection epoch and
 serializes provisioning, release, and lease delivery on each connection until
 the corresponding durable outcome is acknowledged. Expected acquisition refusals
 are journaled as `operation_failed` and retained through heartbeat and reconnect

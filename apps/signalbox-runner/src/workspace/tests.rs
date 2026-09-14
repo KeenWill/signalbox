@@ -530,6 +530,41 @@ async fn startup_inventory_preserves_releasing_manifest_before_and_after_rename(
 }
 
 #[tokio::test]
+async fn startup_inventory_preserves_observed_in_place_conflict_digests() {
+    let (_parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let placement = File::open(placement_path).expect("placement descriptor");
+    let mut conflicting = read_manifest(&placement).expect("ready manifest");
+    conflicting.runner = CanonicalUuid::from_uuid(Uuid::from_u128(OTHER_RUNNER));
+    for lifecycle in [ManifestLifecycle::Active, ManifestLifecycle::Releasing] {
+        conflicting.lifecycle = lifecycle;
+        write_manifest(&placement, &conflicting).expect("conflicting manifest");
+        let facts = store
+            .startup_leaks(prepared.manifest.runner)
+            .expect("conflict inventory");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].kind,
+            signalbox_runner_wire::LeakFactKind::ManifestConflict
+        );
+        assert_eq!(
+            facts[0].entry_digest,
+            workspace_manifest_digest(&conflicting).expect("observed digest")
+        );
+    }
+}
+
+#[tokio::test]
 async fn startup_inventory_collapses_duplicate_releasing_manifests() {
     let (parent, state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
