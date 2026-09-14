@@ -38,6 +38,7 @@ fn connection(
         workspace: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
+        last_offer_refusal: None,
         last_release_recorded: None,
         startup_report: leaks::StartupReport::Disabled,
         leak_sent: false,
@@ -1447,6 +1448,7 @@ async fn release_waits_for_all_unsettled_tool_authority() {
 
 #[derive(Clone, Copy, Debug)]
 enum ToolAuthority {
+    OfferRefusal,
     PendingOffer,
     ResumedLease,
     WaitingDispatch,
@@ -1456,6 +1458,7 @@ enum ToolAuthority {
 
 async fn check_workspace_tool_exclusion(release: bool) {
     for authority in [
+        ToolAuthority::OfferRefusal,
         ToolAuthority::PendingOffer,
         ToolAuthority::ResumedLease,
         ToolAuthority::WaitingDispatch,
@@ -1466,6 +1469,17 @@ async fn check_workspace_tool_exclusion(release: bool) {
         let (mut state, mut runner, _hub, offer) = super::lease_tests::fixture(&directory);
         runner.configuration = Some(configuration());
         match authority {
+            ToolAuthority::OfferRefusal => {
+                runner
+                    .refuse_offer(
+                        &mut state,
+                        &offer,
+                        signalbox_runner_wire::FailureCategory::LeaseAdmissionRefused,
+                        "fixture_refusal",
+                    )
+                    .await
+                    .expect("retained offer refusal");
+            }
             ToolAuthority::PendingOffer => runner.pending_offer = Some(offer.clone()),
             ToolAuthority::ResumedLease => runner.resumed_lease = Some(offer.correlation.clone()),
             ToolAuthority::WaitingDispatch

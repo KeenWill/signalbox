@@ -150,6 +150,7 @@ pub(super) fn fixture(
         workspace: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
+        last_offer_refusal: None,
         last_release_recorded: None,
         startup_report: leaks::StartupReport::Disabled,
         leak_sent: false,
@@ -794,4 +795,183 @@ async fn startup_report_acknowledgement_precedes_a_queued_lease_claim() {
             correlation: offer.correlation
         })
     );
+}
+
+#[tokio::test]
+async fn refused_offer_is_retained_until_acknowledgement_and_runner_keeps_serving() {
+    use signalbox_runner_wire::{OperationCorrelation, OperationFailureRecorded};
+    let parent = TempDir::new().expect("fixture parent");
+    let (mut state, mut connection, mut hub, mut offer) = fixture(&parent);
+    let valid_directory = offer.correlation.working_directory.clone();
+    offer.correlation.working_directory =
+        WorkingDirectory::try_new(format!("/{}", "absent".repeat(500)))
+            .expect("oversized failure diagnostic path");
+    connection
+        .serve_message(&mut state, Message::LeaseOffer(offer.clone()))
+        .await
+        .expect("typed refusal");
+    let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("failure frame")
+    else {
+        panic!("refusal, without a claim");
+    };
+    assert_eq!(
+        failed.failure.correlation,
+        OperationCorrelation::LeaseOffer(offer.correlation.clone())
+    );
+    assert_eq!(state.retained_offer_refusal(), Some(&failed.failure));
+    assert!(state.reconnect_inventory().lease.is_none());
+    assert!(connection.execution.is_none());
+    assert!(connection.has_unsettled_lease(&state));
+    drop(state);
+    let mut state =
+        RunnerStateRoot::open(&parent.path().join("state")).expect("reopen retained refusal");
+    assert_eq!(state.retained_offer_refusal(), Some(&failed.failure));
+    connection
+        .serve_message(
+            &mut state,
+            Message::Heartbeat(Heartbeat {
+                sequence: PositiveU64::try_new(1).expect("first challenge"),
+                last_accepted_peer_sequence: 0,
+            }),
+        )
+        .await
+        .expect("heartbeat while refusing");
+    assert!(matches!(
+        receive_message(&mut hub).await.expect("heartbeat reply"),
+        Message::HeartbeatAck(_)
+    ));
+    assert_eq!(
+        receive_message(&mut hub).await.expect("failure replay"),
+        Message::OperationFailed(failed.clone())
+    );
+    let mut wrong = offer.correlation.clone();
+    wrong.lease_id = CanonicalUuid::from_uuid(uuid::Uuid::now_v7());
+    assert!(
+        connection
+            .serve_message(
+                &mut state,
+                Message::OperationFailureRecorded(OperationFailureRecorded {
+                    correlation: OperationCorrelation::LeaseOffer(wrong),
+                })
+            )
+            .await
+            .is_err()
+    );
+    let acknowledgement = Message::OperationFailureRecorded(OperationFailureRecorded {
+        correlation: failed.failure.correlation.clone(),
+    });
+    connection
+        .serve_message(&mut state, acknowledgement.clone())
+        .await
+        .expect("exact acknowledgement");
+    assert!(!connection.has_unsettled_lease(&state));
+    offer.correlation.lease_id = CanonicalUuid::from_uuid(uuid::Uuid::now_v7());
+    connection
+        .serve_message(&mut state, Message::LeaseOffer(offer.clone()))
+        .await
+        .expect("next refusal");
+    let Message::OperationFailed(next) = receive_message(&mut hub).await.expect("next failure")
+    else {
+        panic!("next refusal");
+    };
+    connection
+        .serve_message(&mut state, acknowledgement)
+        .await
+        .expect("duplicate previous acknowledgement");
+    assert_eq!(state.retained_offer_refusal(), Some(&next.failure));
+    connection
+        .serve_message(
+            &mut state,
+            Message::OperationFailureRecorded(OperationFailureRecorded {
+                correlation: next.failure.correlation,
+            }),
+        )
+        .await
+        .expect("second acknowledgement");
+    offer.correlation.lease_id = CanonicalUuid::from_uuid(uuid::Uuid::now_v7());
+    offer.correlation.working_directory = valid_directory;
+    connection
+        .serve_message(&mut state, Message::LeaseOffer(offer.clone()))
+        .await
+        .expect("later admissible offer");
+    assert_eq!(
+        receive_message(&mut hub).await.expect("claim"),
+        Message::LeaseClaim(LeaseClaim {
+            correlation: offer.correlation
+        })
+    );
+}
+
+#[tokio::test]
+async fn reconnect_reconciles_only_the_exact_retained_offer_refusal() {
+    for action in [
+        DirectiveAction::Resend,
+        DirectiveAction::DiscardAsRecorded,
+        DirectiveAction::FailStale,
+    ] {
+        let parent = TempDir::new().expect("fixture parent");
+        let (mut state, mut connection, mut hub, offer) = fixture(&parent);
+        let advertisement = connection.advertisement.clone();
+        connection
+            .refuse_offer(
+                &mut state,
+                &offer,
+                signalbox_runner_wire::FailureCategory::LeaseAdmissionRefused,
+                "admission_unavailable",
+            )
+            .await
+            .expect("durable refusal");
+        let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("refusal")
+        else {
+            panic!("refusal");
+        };
+        drop(connection);
+        drop(state);
+        let mut state = RunnerStateRoot::open(&parent.path().join("state")).expect("restart");
+        let (runner, hub) = tokio::io::duplex(64 * 1024);
+        let mut hub = BufReader::new(hub);
+        let exchange = async {
+            let Message::Resume(request) = receive_message(&mut hub).await.expect("resume") else {
+                panic!("resume");
+            };
+            assert_eq!(
+                request.inventory.operation_failure,
+                Some(failed.failure.clone())
+            );
+            assert!(request.inventory.lease.is_none());
+            send_message(
+                &mut hub,
+                Message::Resumed(Box::new(signalbox_runner_wire::Resumed {
+                    registration_revision: request.prior_registration_revision,
+                    connection_epoch: PositiveU64::try_new(2).expect("next epoch"),
+                    directives: signalbox_runner_wire::ReconnectDirectives {
+                        operation_failure: Some(signalbox_runner_wire::Directive {
+                            correlation: failed.failure.correlation.clone(),
+                            action,
+                        }),
+                        ..Default::default()
+                    },
+                })),
+            )
+            .await
+            .expect("refusal disposition");
+        };
+        let (connection, ()) = tokio::join!(
+            RunnerConnection::establish(runner, &mut state, &advertisement),
+            exchange
+        );
+        assert!(connection.expect("resumed").execution.is_none());
+        assert_eq!(
+            state.retained_offer_refusal().is_some(),
+            action == DirectiveAction::Resend
+        );
+        drop(state);
+        assert_eq!(
+            RunnerStateRoot::open(&parent.path().join("state"))
+                .expect("durable reconciliation")
+                .retained_offer_refusal()
+                .is_some(),
+            action == DirectiveAction::Resend
+        );
+    }
 }

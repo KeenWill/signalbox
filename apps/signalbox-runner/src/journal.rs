@@ -36,6 +36,9 @@ pub(crate) struct Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum JournalEntry {
+    OfferRefusal {
+        failure: OperationFailure,
+    },
     Release {
         correlation: ReleaseCorrelation,
         phase: ReleasePhase,
@@ -83,6 +86,18 @@ impl Journal {
                             >= phase.correlation.registration_revision
                         && receipt.authority() == crate::EnrollmentAuthority::Active => {}
                 _ => return Err(RunnerStateError::CorruptState),
+            }
+        }
+        if let Some(failure) = self.offer_refusal() {
+            let OperationCorrelation::LeaseOffer(correlation) = &failure.correlation else {
+                return Err(RunnerStateError::CorruptState);
+            };
+            if !state.receipt().is_some_and(|receipt| {
+                receipt.runner_id() == correlation.runner_id
+                    && receipt.registration_revision() >= correlation.registration_revision
+                    && receipt.authority() == crate::EnrollmentAuthority::Active
+            }) {
+                return Err(RunnerStateError::CorruptState);
             }
         }
         if let Some(JournalEntry::Provision { request, .. }) = self.entries.first() {
@@ -170,6 +185,10 @@ impl Journal {
 
     pub(crate) fn reconnect_inventory(&self) -> ReconnectInventory {
         let mut inventory = match self.entries.first() {
+            Some(JournalEntry::OfferRefusal { failure }) => ReconnectInventory {
+                operation_failure: Some(failure.clone()),
+                ..ReconnectInventory::default()
+            },
             Some(JournalEntry::Release {
                 correlation,
                 phase,
@@ -218,6 +237,12 @@ impl Journal {
             .leak_page
             .as_ref()
             .is_some_and(|page| page.validate().is_err())
+        {
+            return Err(RunnerStateError::CorruptState);
+        }
+        if let Some(failure) = self.offer_refusal()
+            && (!matches!(failure.correlation, OperationCorrelation::LeaseOffer(_))
+                || failure.validate().is_err())
         {
             return Err(RunnerStateError::CorruptState);
         }
@@ -289,6 +314,49 @@ impl Journal {
         write_document(directory, DocumentKind::Journal, &encoded)?;
         *self = document.journal;
         Ok(())
+    }
+
+    pub(crate) fn offer_refusal(&self) -> Option<&OperationFailure> {
+        match self.entries.first() {
+            Some(JournalEntry::OfferRefusal { failure }) => Some(failure),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn record_offer_refusal(
+        &mut self,
+        directory: &File,
+        failure: OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        if let Some(prior) = self.offer_refusal() {
+            return if prior == &failure {
+                Ok(())
+            } else {
+                Err(RunnerStateError::InvalidTransition)
+            };
+        }
+        if !self.entries.is_empty()
+            || !matches!(failure.correlation, OperationCorrelation::LeaseOffer(_))
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        let mut next = self.clone();
+        next.entries = vec![JournalEntry::OfferRefusal { failure }];
+        self.publish(directory, next)
+    }
+
+    pub(crate) fn acknowledge_offer_refusal(
+        &mut self,
+        directory: &File,
+        correlation: &OperationCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .offer_refusal()
+            .is_some_and(|failure| &failure.correlation == correlation)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.publish(directory, self.without_operation())
     }
 
     pub(crate) fn release(

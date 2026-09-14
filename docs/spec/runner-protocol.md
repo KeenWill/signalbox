@@ -125,8 +125,9 @@ credential helpers cleared. Each command has one five-minute deadline covering
 output collection and process completion; expiration rejects acquisition as
 `repository_unavailable`. Credentialed and repository-free private-root
 acquisition are unavailable. Provisioning rejects while an offer, resumed lease,
-execution, or journaled lease or result remains unsettled. Release waits for
-that tool authority to settle before journal acceptance or cleanup.
+execution, or journaled lease, result, or offer refusal remains unsettled.
+Release waits for that tool state to settle before journal acceptance or
+cleanup.
 
 Repository workspaces live at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
@@ -167,6 +168,24 @@ are journaled as `operation_failed` and retained through heartbeat and reconnect
 until acknowledged; the runner keeps serving. Provisioning dispatch also
 requires the authorization’s registration revision to match the current
 registration head.
+
+## Operation failures
+
+The runner journals admitted-operation refusals until their exact
+`operation_failure_recorded` acknowledgement. The daemon stores the bounded
+code, message, and structured payload verbatim with the terminal provisioning,
+release, or offered-lease outcome before acknowledging. Equal retransmission
+replays that outcome; unequal detail or correlation is rejected.
+
+A refused offer never authorizes execution. Its lease becomes `refused` and its
+physical attempt becomes a known execution failure; dispatch waiters wake and
+the runner continues serving after acknowledgement. Refusal cannot settle a
+claimed lease. Authenticated reconnect reconciles retained refusal before
+opening a new epoch, including refusal of a lost, unclaimed offer after
+transport loss. That refusal preserves the loss history and no-execution proof
+while settling the lease and attempt. Startup and shutdown retain unacknowledged
+failures. Operation decisions use the closed category; runner status applies the
+[redacting diagnostic projection](process-protocol.md) to retained detail.
 
 ## Workspace release and leak reporting
 
@@ -476,8 +495,6 @@ release dispatch.
 
 ## Planned
 
-- General operation-failure evidence over the wire:
-  [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:

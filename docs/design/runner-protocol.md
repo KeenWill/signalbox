@@ -1,10 +1,9 @@
 # Runner protocol design
 
 This design is not built; it extends
-[runner protocol and placement](../spec/runner-protocol.md) with workspace and
-failure reconciliation, concurrent enrollment and active-turn replacement,
-healthy-session relocation, workspaces, sandboxes, the egress broker, and forced
-Git configuration.
+[runner protocol and placement](../spec/runner-protocol.md) with concurrent
+enrollment and active-turn replacement, healthy-session relocation, workspaces,
+sandboxes, the egress broker, and forced Git configuration.
 
 ## Goal
 
@@ -17,20 +16,6 @@ configuration the runner forces and a canonical-URL check the model cannot
 defeat.
 
 ## Design
-
-### Lease and dispatch
-
-The runner spools `operation_failed` for general admitted operations until
-acknowledgement. A runner that cannot perform an admitted operation reports it
-with `operation_failed` rather than sending nothing. A failure the daemon has
-durably recorded resolves the corresponding provisioning, release, or lease
-authority as refused, and neither side waits on it further.
-
-For operations other than replacement provisioning, the daemon retains
-runner-authored `operation_failed` detail verbatim and never parses or branches
-on it. Runner inspection returns the detail as bounded
-[diagnostic evidence](../spec/process-protocol.md), without host or credential
-paths.
 
 ### Successor enrollment, promotion, and replacement
 

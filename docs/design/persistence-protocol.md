@@ -6,20 +6,11 @@ This design is not built; it extends
 ## Goal
 
 Complete the durable storage that built subsystems already reserve space for:
-general runner operation-failure evidence; imported-create placement
-authentication on replay; the instruction admitted set; credential-pool state
-and availability waits; and OAuth member-availability wakeups.
+imported-create placement authentication on replay; the instruction admitted
+set; credential-pool state and availability waits; and OAuth member-availability
+wakeups.
 
 ## Design
-
-For operations other than replacement provisioning, runner operation-failure
-evidence is stored in the transaction that resolves the correlated operation as
-refused, and the daemon acknowledges the failure to the runner only after that
-commit. The record is append-only and keyed by the refused operation's
-correlation identity, so success and refusal are exclusive after the operation
-head retires. The record keeps the bounded code, message, and exact payload of
-the admitted detail, so runner status inspection reproduces the failure. Equal
-retransmission rereads the equal record; unequal reuse is a correlation error.
 
 Imported-create replay compares the stored placement request with the created
 session's revision-one placement.
@@ -53,11 +44,6 @@ machine they serve is owned by
 fixes their transitions.
 
 ## Compatibility constraints
-
-Failure detail is never acknowledged before it is stored, because a restart
-would forget evidence operators must inspect; the operation transition is never
-delayed until after acknowledgement, because the runner would keep resending a
-failure the daemon had already acted on.
 
 Every new table follows the spec page: kind-scoped storage versions on
 durable-command and outbox records, append-only facts under triggers, events

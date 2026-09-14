@@ -489,6 +489,7 @@ pub enum RunnerLeaseState {
     Offered,
     Claimed,
     Completed,
+    Refused,
     LostUnclaimed,
     LostExecutionPossible,
     LostClaimed,
@@ -525,6 +526,10 @@ impl RunnerLease {
     pub const fn runner(&self) -> RunnerId;
     pub const fn effect(&self) -> RunnerToolEffectClass;
     pub fn claim(
+        self,
+        correlation: RunnerLeaseCorrelation,
+    ) -> result::Result<Self, RunnerDomainError>;
+    pub fn refuse(
         self,
         correlation: RunnerLeaseCorrelation,
     ) -> result::Result<Self, RunnerDomainError>;

@@ -31,6 +31,19 @@ pub(super) async fn handle_read_runner_status<Writer: AsyncWrite + Unpin>(
                 RunnerStatusCursor::OperationFailure { authorization_id } => {
                     RunnerStatusAfter::OperationFailure(authorization_id.into_uuid())
                 }
+                RunnerStatusCursor::ReleaseFailure { manifest_id } => {
+                    RunnerStatusAfter::ReleaseFailure(manifest_id.into_uuid())
+                }
+                RunnerStatusCursor::LeaseFailure {
+                    lease_id,
+                    lease_generation,
+                } => RunnerStatusAfter::LeaseFailure {
+                    lease: lease_id.into_uuid(),
+                    generation: signalbox_domain::RunnerGeneration::try_from_u64(
+                        lease_generation.value(),
+                    )
+                    .ok_or(ErrorCode::Unavailable)?,
+                },
                 RunnerStatusCursor::WorkspaceLeak {
                     runner_id,
                     locator,
@@ -126,6 +139,17 @@ async fn spool_runner_status(
                             authorization_id: wire_uuid(id),
                         })
                     }
+                    RunnerStatusAfter::ReleaseFailure(id) => {
+                        Ok(RunnerStatusCursor::ReleaseFailure {
+                            manifest_id: wire_uuid(id),
+                        })
+                    }
+                    RunnerStatusAfter::LeaseFailure { lease, generation } => {
+                        Ok(RunnerStatusCursor::LeaseFailure {
+                            lease_id: wire_uuid(lease),
+                            lease_generation: generation.into(),
+                        })
+                    }
                     RunnerStatusAfter::WorkspaceLeak {
                         runner,
                         locator,
@@ -219,10 +243,13 @@ fn project_leak(
     })
 }
 
-fn project_failure(failure: store::RunnerStatusFailure) -> Result<ServerMessage, ErrorCode> {
-    let authorization = failure.authorization;
+fn project_provision_failure(
+    authorization: signalbox_domain::RunnerReplacementProvisioning,
+    category: signalbox_domain::RunnerProvisioningFailureKind,
+    detail: serde_json::Value,
+) -> Result<ServerMessage, ErrorCode> {
     use signalbox_domain::RunnerProvisioningFailureKind as Category;
-    let category = match failure.category {
+    let category = match category {
         Category::CredentialUnavailable => RunnerFailureCategory::CredentialUnavailable,
         Category::RepositoryUnavailable => RunnerFailureCategory::RepositoryUnavailable,
         Category::SandboxUnavailable => RunnerFailureCategory::SandboxUnavailable,
@@ -263,9 +290,85 @@ fn project_failure(failure: store::RunnerStatusFailure) -> Result<ServerMessage,
         failure: RunnerOperationFailure::Provision {
             correlation,
             category,
-            detail: redact_detail(failure.detail)?,
+            detail: redact_detail(detail)?,
         },
     })
+}
+
+fn project_failure(failure: store::RunnerStatusFailure) -> Result<ServerMessage, ErrorCode> {
+    use signalbox_process_protocol::{
+        RunnerLeaseFailureCorrelation, RunnerReleaseFailureCorrelation,
+    };
+    let failure = match failure {
+        store::RunnerStatusFailure::Release {
+            correlation,
+            detail,
+        } => RunnerOperationFailure::Release {
+            correlation: RunnerReleaseFailureCorrelation {
+                session_id: wire_uuid(correlation.session.into_uuid()),
+                placement_revision: correlation.placement_revision.into(),
+                runner_id: wire_uuid(correlation.runner.into_uuid()),
+                manifest_id: wire_uuid(correlation.manifest.into_uuid()),
+            },
+            category: RunnerFailureCategory::WorkspaceCleanupFailed,
+            detail: redact_detail(detail)?,
+        },
+        store::RunnerStatusFailure::LeaseOffer {
+            correlation,
+            category,
+            detail,
+        } => {
+            use signalbox_persistence::runner_protocol::RunnerLeaseFailureKind as Category;
+            let category = match category {
+                Category::CredentialUnavailable => RunnerFailureCategory::CredentialUnavailable,
+                Category::RepositoryUnavailable => RunnerFailureCategory::RepositoryUnavailable,
+                Category::SandboxUnavailable => RunnerFailureCategory::SandboxUnavailable,
+                Category::WorkspaceConflict => RunnerFailureCategory::WorkspaceConflict,
+                Category::LeaseAdmissionRefused => RunnerFailureCategory::LeaseAdmissionRefused,
+            };
+            let dispatch = correlation.dispatch;
+            RunnerOperationFailure::LeaseOffer {
+                correlation: RunnerLeaseFailureCorrelation {
+                    registration_revision: correlation.registration_revision.into(),
+                    lease_id: wire_uuid(correlation.lease.into_uuid()),
+                    lease_generation: correlation.generation.into(),
+                    runner_id: wire_uuid(correlation.runner.into_uuid()),
+                    placement_revision: correlation.placement_revision.into(),
+                    working_directory: signalbox_process_protocol::RunnerWorkingDirectory::try_new(
+                        correlation.working_directory.as_str().to_owned(),
+                    )
+                    .map_err(|_| ErrorCode::Internal)?,
+                    sandbox_profile: match correlation.sandbox {
+                        signalbox_domain::RunnerSandboxProfile::Ambient => {
+                            signalbox_process_protocol::RunnerSandboxProfile::Ambient
+                        }
+                        signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => {
+                            signalbox_process_protocol::RunnerSandboxProfile::WorkspaceRestricted
+                        }
+                    },
+                    tool_name: correlation.tool.as_str().to_owned(),
+                    session_id: wire_uuid(dispatch.session().into_uuid()),
+                    turn_id: wire_uuid(dispatch.turn().into_uuid()),
+                    tool_request_id: wire_uuid(dispatch.request().into_uuid()),
+                    tool_attempt_id: wire_uuid(dispatch.attempt().into_uuid()),
+                    issuing_turn_attempt_id: wire_uuid(dispatch.issuing_attempt().into_uuid()),
+                    tool_dispatch_generation:
+                        signalbox_process_protocol::PositiveCanonicalU64::try_new(
+                            dispatch.generation().as_u64(),
+                        )
+                        .map_err(|_| ErrorCode::Internal)?,
+                },
+                category,
+                detail: redact_detail(detail)?,
+            }
+        }
+        store::RunnerStatusFailure::Provision {
+            authorization,
+            category,
+            detail,
+        } => return project_provision_failure(authorization, category, detail),
+    };
+    Ok(ServerMessage::RunnerOperationFailure { failure })
 }
 
 fn redact_detail(value: serde_json::Value) -> Result<RunnerFailureDetail, ErrorCode> {
@@ -387,7 +490,7 @@ mod tests {
                 )?,
             ),
         };
-        let projected = project_failure(store::RunnerStatusFailure {
+        let projected = project_failure(store::RunnerStatusFailure::Provision {
             authorization,
             category: RunnerProvisioningFailureKind::RepositoryUnavailable,
             detail: serde_json::json!({"code":"repository_unavailable", "message":"/host/repository", "payload":{}}),
@@ -433,5 +536,57 @@ mod tests {
         let retained =
             serde_json::json!({"code":"failure", "message":"message", "payload":{"tries":-1}});
         assert!(matches!(redact_detail(retained), Err(ErrorCode::Internal)));
+    }
+    #[test]
+    fn runner_status_redacts_general_failures_and_preserves_their_correlations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Arbitrary distinct identities and counters expose cross-wired projection fields.
+        let id = |value| uuid::Uuid::from_u128(value).to_string();
+        let supplied: signalbox_runner_wire::LeaseCorrelation = serde_json::from_value(
+            serde_json::json!({
+                "registration_revision":2, "lease_id":id(1), "lease_generation":3, "runner_id":id(4),
+                "placement_revision":5, "working_directory":"/workspace", "sandbox_profile":"ambient", "tool_name":"echo",
+                "session_id":id(6), "turn_id":id(7), "tool_request_id":id(8), "tool_attempt_id":id(9),
+                "issuing_turn_attempt_id":id(10), "tool_dispatch_generation":11
+            }),
+        )?;
+        let correlation = crate::runner_dispatch_wire::domain_correlation(supplied.clone())?;
+        let detail = serde_json::json!({"code":"admission_unavailable","message":"cannot read /private/key","payload":{"path":"/private/key","nested":[{"secret":"token","tries":1,"available":false}]}});
+        let expected_detail = serde_json::json!({"code":"admission_unavailable","message":"[redacted]","payload":{"path":"","nested":[{"secret":"","tries":1,"available":false}]}});
+        let projected = project_failure(store::RunnerStatusFailure::LeaseOffer {
+            correlation: correlation.clone(), category: signalbox_persistence::runner_protocol::RunnerLeaseFailureKind::LeaseAdmissionRefused, detail: detail.clone(),
+        }).expect("lease failure projects");
+        let encoded = serde_json::to_value(projected)?;
+        let mut expected_correlation = serde_json::to_value(supplied)?;
+        for value in expected_correlation
+            .as_object_mut()
+            .expect("correlation object")
+            .values_mut()
+        {
+            if let Some(number) = value.as_u64() {
+                *value = serde_json::Value::String(number.to_string());
+            }
+        }
+        assert_eq!(encoded["failure"]["correlation"], expected_correlation);
+        assert_eq!(encoded["failure"]["detail"], expected_detail);
+        let manifest = uuid::Uuid::from_u128(12);
+        let projected = project_failure(store::RunnerStatusFailure::Release {
+            correlation:
+                signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
+                    session: correlation.dispatch.session(),
+                    placement_revision: correlation.placement_revision,
+                    runner: correlation.runner,
+                    manifest: signalbox_domain::WorkspaceManifestId::from_uuid(manifest),
+                },
+            detail,
+        })
+        .expect("release failure projects");
+        let encoded = serde_json::to_value(projected)?;
+        assert_eq!(
+            encoded["failure"]["correlation"],
+            serde_json::json!({"session_id":id(6),"placement_revision":"5","runner_id":id(4),"manifest_id":manifest.to_string()})
+        );
+        assert_eq!(encoded["failure"]["detail"], expected_detail);
+        Ok(())
     }
 }

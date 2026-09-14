@@ -542,17 +542,21 @@ A pending provisioning-only successor is visible by the identity
 `runner status [--page-size N] [--after JSON]` and verifies fact ordering,
 counts, and continuation before rendering the page.
 
-The failure projection's `operation_kind` selects the refused operation's
-complete correlation arm, including its runner. Its category set is exactly the
-runner wire's closed daemon-actionable set. The detail carries bounded `code`,
-`message`, and structured `payload`; storage retains the runner-authored text
-unchanged. The diagnostic projection replaces the message with `[redacted]` and
-payload strings with empty strings, preserving the checked code and nontext
-structure. A workspace leak carries runner, fact kind, relative locator, entry
-digest, and nullable session and placement revision. Retained startup and
-cleanup diagnostics produce leak messages and their `leak_count`, including
-facts without a resumable session. Retained failure and leak traversal belongs
-to [persistence-protocol](persistence-protocol.md).
+The failure projection's `operation_kind` selects `provision`, `release`, or
+`lease_offer` with its complete correlation, including its runner. Release
+failures follow provisioning failures, ordered by manifest UUID with a
+`release_failure { manifest_id }` cursor; lease failures follow by lease UUID
+and numeric generation with a `lease_failure { lease_id, lease_generation }`
+cursor, before workspace leaks. Its category set is exactly the runner wire's
+closed daemon-actionable set. The detail carries bounded `code`, `message`, and
+structured `payload`; storage retains the runner-authored text unchanged. The
+diagnostic projection replaces the message with `[redacted]` and payload strings
+with empty strings, preserving the checked code and nontext structure. A
+workspace leak carries runner, fact kind, relative locator, entry digest, and
+nullable session and placement revision. Retained startup and cleanup
+diagnostics produce leak messages and their `leak_count`, including facts
+without a resumable session. Retained failure and leak traversal belongs to
+[persistence-protocol](persistence-protocol.md).
 
 `runner_state_transition` notifies followers of live transitions above the
 snapshot cursor; reconnect snapshots and session summaries carry the current

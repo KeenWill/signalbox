@@ -688,6 +688,37 @@ impl RunnerStateRoot {
             .record_provision(&self.directory, request, canonical_clone_url_digest)
     }
 
+    pub(crate) fn retained_offer_refusal(
+        &self,
+    ) -> Option<&signalbox_runner_wire::OperationFailure> {
+        self.journal.offer_refusal()
+    }
+    pub(crate) fn record_offer_refusal(
+        &mut self,
+        failure: signalbox_runner_wire::OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        let signalbox_runner_wire::OperationCorrelation::LeaseOffer(correlation) =
+            &failure.correlation
+        else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        if !self.state.receipt().is_some_and(|receipt| {
+            receipt.authority() == EnrollmentAuthority::Active
+                && receipt.runner_id() == correlation.runner_id
+                && receipt.registration_revision() == correlation.registration_revision
+        }) {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.journal.record_offer_refusal(&self.directory, failure)
+    }
+    pub(crate) fn acknowledge_offer_refusal(
+        &mut self,
+        correlation: &signalbox_runner_wire::OperationCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_offer_refusal(&self.directory, correlation)
+    }
+
     pub(crate) fn retained_provision_failure(
         &self,
     ) -> Option<&signalbox_runner_wire::OperationFailure> {

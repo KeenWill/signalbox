@@ -16,6 +16,13 @@ pub enum RunnerStatusAfter {
     Placement(Uuid),
     /// Last emitted immutable provisioning authorization.
     OperationFailure(Uuid),
+    /// Last emitted failed workspace release.
+    ReleaseFailure(Uuid),
+    /// Last emitted refused lease generation.
+    LeaseFailure {
+        lease: Uuid,
+        generation: RunnerGeneration,
+    },
     /// Last emitted leak, ordered by runner, locator, and evidence digest.
     WorkspaceLeak {
         runner: Uuid,
@@ -43,10 +50,21 @@ pub enum RunnerStatusFact {
 
 /// Retained refusal and its exact immutable authorization.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunnerStatusFailure {
-    pub authorization: RunnerReplacementProvisioning,
-    pub category: signalbox_domain::RunnerProvisioningFailureKind,
-    pub detail: serde_json::Value,
+pub enum RunnerStatusFailure {
+    Provision {
+        authorization: RunnerReplacementProvisioning,
+        category: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: serde_json::Value,
+    },
+    Release {
+        correlation: super::workspaces::RunnerWorkspaceRelease,
+        detail: serde_json::Value,
+    },
+    LeaseOffer {
+        correlation: RunnerLeaseCorrelation,
+        category: RunnerLeaseFailureKind,
+        detail: serde_json::Value,
+    },
 }
 
 /// One bounded page of current runner facts followed by retained failures.
@@ -176,7 +194,16 @@ pub async fn read_runner_status(
         }
     }
     let mut failures = Vec::new();
-    if runners.len() < limit && !matches!(after, Some(RunnerStatusAfter::WorkspaceLeak { .. })) {
+    if runners.len() < limit
+        && matches!(
+            after,
+            None | Some(
+                RunnerStatusAfter::Enrollment(_)
+                    | RunnerStatusAfter::Placement(_)
+                    | RunnerStatusAfter::OperationFailure(_)
+            )
+        )
+    {
         let last = match after {
             Some(RunnerStatusAfter::OperationFailure(id)) => Some(id),
             _ => None,
@@ -201,9 +228,90 @@ pub async fn read_runner_status(
                 "workspace_conflict" => Kind::WorkspaceConflict,
                 _ => return Err(RunnerStatusError::Corruption),
             };
-            failures.push(RunnerStatusFailure {
+            failures.push(RunnerStatusFailure::Provision {
                 authorization: super::provisioning::decode_authorization(&row)?,
                 category,
+                detail: row.try_get("detail")?,
+            });
+        }
+    }
+    if runners.len() + failures.len() < limit
+        && !matches!(
+            after,
+            Some(RunnerStatusAfter::LeaseFailure { .. } | RunnerStatusAfter::WorkspaceLeak { .. })
+        )
+    {
+        let last = match after {
+            Some(RunnerStatusAfter::ReleaseFailure(id)) => Some(id),
+            _ => None,
+        };
+        let rows = sqlx::query("SELECT release.*, outcome.detail FROM runner_workspace_release release
+            JOIN runner_workspace_release_outcome outcome USING (manifest_id)
+            WHERE outcome.outcome = 'cleanup_failed' AND ($1::uuid IS NULL OR release.manifest_id > $1)
+            ORDER BY release.manifest_id LIMIT $2")
+            .bind(last).bind((limit - runners.len() - failures.len()) as i64).fetch_all(&mut *transaction).await?;
+        for row in rows {
+            failures.push(RunnerStatusFailure::Release {
+                correlation: super::workspaces::RunnerWorkspaceRelease {
+                    session: SessionId::from_uuid(row.try_get("session_id")?),
+                    placement_revision: decode_generation(row.try_get("placement_revision")?)?,
+                    runner: RunnerId::from_uuid(row.try_get("runner_id")?),
+                    manifest: signalbox_domain::WorkspaceManifestId::from_uuid(
+                        row.try_get("manifest_id")?,
+                    ),
+                },
+                detail: row.try_get("detail")?,
+            });
+        }
+    }
+    if runners.len() + failures.len() < limit
+        && !matches!(after, Some(RunnerStatusAfter::WorkspaceLeak { .. }))
+    {
+        let (last, generation) = match after {
+            Some(RunnerStatusAfter::LeaseFailure { lease, generation }) => {
+                (Some(lease), Some(Decimal::from(generation.get())))
+            }
+            _ => (None, None),
+        };
+        let rows = sqlx::query("SELECT lease.*, attempt.turn_id, attempt.issuing_turn_attempt_id, attempt.request_id, attempt.dispatch_generation,
+                placement.placement_revision, placement.pinned_working_directory, placement.requested_sandbox_profile,
+                failure.category, failure.detail
+            FROM runner_lease_failure failure JOIN runner_lease_generation lease USING (lease_id,generation)
+            JOIN tool_attempt attempt ON attempt.attempt_id = lease.attempt_id
+            JOIN runner_session_placement_record placement ON placement.session_id = lease.session_id AND placement.event_ordinal = lease.placement_event_ordinal
+            WHERE ($1::uuid IS NULL OR (lease.lease_id, lease.generation) > ($1,$2))
+            ORDER BY lease.lease_id,lease.generation LIMIT $3")
+            .bind(last).bind(generation).bind((limit - runners.len() - failures.len()) as i64).fetch_all(&mut *transaction).await?;
+        for row in rows {
+            failures.push(RunnerStatusFailure::LeaseOffer {
+                correlation: RunnerLeaseCorrelation {
+                    lease: runner_lease_id(row.try_get("lease_id")?),
+                    generation: decode_generation(row.try_get("generation")?)?,
+                    runner: runner_id(row.try_get("runner_id")?),
+                    registration_revision: decode_generation(
+                        row.try_get("offer_registration_revision")?,
+                    )?,
+                    placement_revision: decode_generation(row.try_get("placement_revision")?)?,
+                    working_directory: working_directory(row.try_get("pinned_working_directory")?)?,
+                    sandbox: decode_sandbox(row.try_get("requested_sandbox_profile")?)?,
+                    tool: tool_name(row.try_get("tool_name")?)?,
+                    dispatch: ToolAttemptDispatchCorrelation::reconstitute(
+                        ToolAttemptDispatchCorrelationReconstitutionInput {
+                            session: session_id(row.try_get("session_id")?),
+                            turn: TurnId::from_uuid(row.try_get("turn_id")?),
+                            issuing_attempt: TurnAttemptId::from_uuid(
+                                row.try_get("issuing_turn_attempt_id")?,
+                            ),
+                            request: ToolRequestId::from_uuid(row.try_get("request_id")?),
+                            attempt: tool_attempt_id(row.try_get("attempt_id")?),
+                            generation: decode_dispatch_generation(
+                                row.try_get("dispatch_generation")?,
+                            )?,
+                        },
+                    ),
+                },
+                category: RunnerLeaseFailureKind::parse(&row.try_get::<String, _>("category")?)
+                    .ok_or(RunnerStatusError::Corruption)?,
                 detail: row.try_get("detail")?,
             });
         }
@@ -267,8 +375,19 @@ pub async fn read_runner_status(
                 entry_digest: leak.entry_digest.clone(),
             })
             .or_else(|| {
-                failures.last().map(|row| {
-                    RunnerStatusAfter::OperationFailure(row.authorization.authorization.into_uuid())
+                failures.last().map(|row| match row {
+                    RunnerStatusFailure::Provision { authorization, .. } => {
+                        RunnerStatusAfter::OperationFailure(authorization.authorization.into_uuid())
+                    }
+                    RunnerStatusFailure::Release { correlation, .. } => {
+                        RunnerStatusAfter::ReleaseFailure(correlation.manifest.into_uuid())
+                    }
+                    RunnerStatusFailure::LeaseOffer { correlation, .. } => {
+                        RunnerStatusAfter::LeaseFailure {
+                            lease: correlation.lease.into_uuid(),
+                            generation: correlation.generation,
+                        }
+                    }
                 })
             })
             .or_else(|| {

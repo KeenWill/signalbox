@@ -42,6 +42,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, ty
 pub use signalbox_domain::RunnerEnrollmentRequestId;
 
 mod dispatch;
+mod failures;
+pub use failures::RunnerLeaseFailureKind;
 mod resume;
 pub use resume::{RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome};
 mod provisioning;
@@ -3241,6 +3243,7 @@ async fn persist_runner_loss_lease_and_wait(
             }
         }
         RunnerLeaseState::Completed
+        | RunnerLeaseState::Refused
         | RunnerLeaseState::LostUnclaimed
         | RunnerLeaseState::LostExecutionPossible
         | RunnerLeaseState::LostClaimed => {
@@ -7405,6 +7408,7 @@ const fn encode_lease_state(state: RunnerLeaseState) -> &'static str {
         RunnerLeaseState::Offered => "offered",
         RunnerLeaseState::Claimed => "claimed",
         RunnerLeaseState::Completed => "completed",
+        RunnerLeaseState::Refused => "refused",
         RunnerLeaseState::LostUnclaimed => "lost_unclaimed",
         RunnerLeaseState::LostClaimed => "lost_claimed",
         RunnerLeaseState::LostExecutionPossible => "lost_execution_possible",
@@ -7416,6 +7420,7 @@ fn decode_lease_state(value: String) -> Result<RunnerLeaseState, RunnerProtocolS
         "offered" => Ok(RunnerLeaseState::Offered),
         "claimed" => Ok(RunnerLeaseState::Claimed),
         "completed" => Ok(RunnerLeaseState::Completed),
+        "refused" => Ok(RunnerLeaseState::Refused),
         "lost_unclaimed" => Ok(RunnerLeaseState::LostUnclaimed),
         "lost_claimed" => Ok(RunnerLeaseState::LostClaimed),
         "lost_execution_possible" => Ok(RunnerLeaseState::LostExecutionPossible),

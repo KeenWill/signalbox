@@ -102,7 +102,10 @@ impl RunnerDispatchService {
         };
         self.changed();
         loop {
-            if lease.state() == RunnerLeaseState::Completed {
+            if matches!(
+                lease.state(),
+                RunnerLeaseState::Completed | RunnerLeaseState::Refused
+            ) {
                 return Ok(RunnerDispatchOutcome::Completed);
             }
             if matches!(
