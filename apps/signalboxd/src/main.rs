@@ -1898,11 +1898,37 @@ async fn run_hub_incarnation(
                 .reconcile_startup(prior_connections)
                 .await
                 .map(|_| ())
-                .map_err(|_| {
-                    erase_startup_database_cause(
-                        RuntimePhase::StartupScan,
-                        SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
-                    )
+                .map_err(|error| {
+                    use signalbox_persistence::runner_protocol::RunnerProtocolStoreError;
+
+                    let mut failure = erase_startup_scan_cause(
+                        match &error {
+                            RunnerProtocolStoreError::CommitAmbiguous(_) => {
+                                OperatorFailureClass::Infrastructure {
+                                    commit_ambiguous: true,
+                                }
+                            }
+                            RunnerProtocolStoreError::Corruption(_) => {
+                                OperatorFailureClass::FailClosedCorruption
+                            }
+                            RunnerProtocolStoreError::Database(_)
+                            | RunnerProtocolStoreError::Domain(_)
+                            | RunnerProtocolStoreError::EnrollmentRequest(_) => {
+                                OperatorFailureClass::Infrastructure {
+                                    commit_ambiguous: false,
+                                }
+                            }
+                        },
+                        "runner_connection_reconciliation_failed",
+                        None,
+                        None,
+                    );
+                    failure.database_failure = matches!(
+                        error,
+                        RunnerProtocolStoreError::Database(_)
+                            | RunnerProtocolStoreError::CommitAmbiguous(_)
+                    );
+                    failure
                 })
         },
         &mut runtime_tasks,
