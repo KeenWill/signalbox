@@ -158,6 +158,7 @@ pub(super) fn fixture(
         deferred_dispatch: None,
         deferred_release: None,
         deferred_provision: None,
+        deferred_promotion: None,
         offer_claimed: false,
         receipt,
         advertisement,

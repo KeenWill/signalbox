@@ -227,7 +227,7 @@ pub(super) async fn retain_release_leak(
     sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
         SELECT runner_id,relative_path,$3,$2,session_id,placement_revision
         FROM runner_workspace_release WHERE manifest_id = $1
-        ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind")
+        ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind, report_derived = false")
         .bind(manifest).bind(kind).bind(digest).execute(connection).await?;
     Ok(())
 }
@@ -394,7 +394,7 @@ impl RunnerProtocolStore {
             .bind(enrollment.into_uuid()).bind(Decimal::from(page.registration_revision.get())).bind(page.report_digest.as_str())
             .bind(Decimal::from(page.page.get())).fetch_optional(&mut *transaction).await?;
         if let Some(prior) = prior {
-            return if prior
+            if !(prior
                 .decode_column::<Option<String>>("prior_page_digest")?
                 .as_deref()
                 == page
@@ -403,12 +403,16 @@ impl RunnerProtocolStore {
                     .map(RunnerEvidenceDigest::as_str)
                 && prior.decode_column::<bool>("final_page")? == page.final_page
                 && prior.decode_column::<String>("page_digest")? == page.page_digest.as_str()
-                && prior.decode_column::<serde_json::Value>("facts")? == facts
+                && prior.decode_column::<serde_json::Value>("facts")? == facts)
             {
-                Ok(())
-            } else {
-                Err(mismatch())
-            };
+                return Err(mismatch());
+            }
+            if page.final_page {
+                refresh_report_leaks(transaction.as_mut(), owner.runner(), enrollment, page)
+                    .await?;
+                return commit_mutation(transaction).await;
+            }
+            return Ok(());
         }
         if page.page.get() > 1 {
             let prior = sqlx::query("SELECT final_page,page_digest FROM runner_workspace_leak_page WHERE enrollment_id = $1 AND registration_revision = $2 AND report_digest = $3 AND page = $4")
@@ -432,14 +436,67 @@ impl RunnerProtocolStore {
         }
         for fact in &page.facts {
             if let Some(kind) = reconcile_leak(&mut transaction, owner.runner(), fact).await? {
-                sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision) VALUES ($1,$2,$3,$4,$5,$6)
-                    ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind, session_id = EXCLUDED.session_id, placement_revision = EXCLUDED.placement_revision")
+                sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision,report_derived) VALUES ($1,$2,$3,$4,$5,$6,true)
+                    ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind, session_id = EXCLUDED.session_id, placement_revision = EXCLUDED.placement_revision WHERE runner_workspace_leak.report_derived")
                     .bind(owner.runner().into_uuid()).bind(fact.locator.as_str()).bind(fact.entry_digest.as_str()).bind(kind.token())
                     .bind(fact.session.map(SessionId::into_uuid)).bind(fact.placement_revision.map(|revision| Decimal::from(revision.get()))).execute(&mut *transaction).await?;
             }
         }
+        if page.final_page {
+            refresh_report_leaks(transaction.as_mut(), owner.runner(), enrollment, page).await?;
+        }
         commit_mutation(transaction).await
     }
+}
+
+async fn refresh_report_leaks(
+    connection: &mut PgConnection,
+    runner: RunnerId,
+    enrollment: RunnerEnrollmentId,
+    page: &RunnerWorkspaceLeakPage,
+) -> Result<(), RunnerProtocolStoreError> {
+    let rows = sqlx::query("SELECT fact->>'kind' AS kind, fact->>'locator' AS locator, fact->>'entry_digest' AS entry_digest,
+            (fact->>'session')::uuid AS session_id, (fact->>'placement_revision')::numeric AS placement_revision
+        FROM runner_workspace_leak_page page CROSS JOIN LATERAL jsonb_array_elements(page.facts) fact
+        WHERE page.enrollment_id = $1 AND page.registration_revision = $2 AND page.report_digest = $3")
+        .bind(enrollment.into_uuid()).bind(Decimal::from(page.registration_revision.get()))
+        .bind(page.report_digest.as_str()).fetch_all(&mut *connection).await?;
+    for row in rows {
+        let fact = RunnerWorkspaceLeak {
+            kind: RunnerWorkspaceLeakKind::parse(&row.decode_column::<String>("kind")?)
+                .ok_or_else(mismatch)?,
+            locator: WorkspaceRelativePath::try_new(row.decode_column::<String>("locator")?)
+                .map_err(|_| mismatch())?,
+            entry_digest: RunnerEvidenceDigest::try_new(
+                row.decode_column::<String>("entry_digest")?,
+            )
+            .ok_or_else(mismatch)?,
+            session: row
+                .decode_column::<Option<Uuid>>("session_id")?
+                .map(SessionId::from_uuid),
+            placement_revision: row
+                .decode_column::<Option<Decimal>>("placement_revision")?
+                .map(decode_generation)
+                .transpose()?,
+        };
+        if let Some(kind) = reconcile_leak(connection, runner, &fact).await? {
+            sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision,report_derived) VALUES ($1,$2,$3,$4,$5,$6,true)
+                ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET kind = EXCLUDED.kind, session_id = EXCLUDED.session_id, placement_revision = EXCLUDED.placement_revision WHERE runner_workspace_leak.report_derived")
+                .bind(runner.into_uuid()).bind(fact.locator.as_str()).bind(fact.entry_digest.as_str()).bind(kind.token())
+                .bind(fact.session.map(SessionId::into_uuid)).bind(fact.placement_revision.map(|value| Decimal::from(value.get())))
+                .execute(&mut *connection).await?;
+        }
+    }
+    sqlx::query("DELETE FROM runner_workspace_leak leak WHERE leak.runner_id = $1 AND leak.report_derived
+        AND NOT EXISTS (
+            SELECT 1 FROM runner_workspace_leak_page page
+            CROSS JOIN LATERAL jsonb_array_elements(page.facts) fact
+            WHERE page.enrollment_id = $2 AND page.registration_revision = $3 AND page.report_digest = $4
+                AND fact->>'locator' = leak.locator AND fact->>'entry_digest' = leak.entry_digest)")
+        .bind(runner.into_uuid()).bind(enrollment.into_uuid())
+        .bind(Decimal::from(page.registration_revision.get())).bind(page.report_digest.as_str())
+        .execute(connection).await?;
+    Ok(())
 }
 
 async fn verify_leak_report(
@@ -671,7 +728,7 @@ pub(super) async fn retain_placement_leak(
         None => placement_manifest_digest(source)?,
     };
     sqlx::query("INSERT INTO runner_workspace_leak (runner_id,locator,entry_digest,kind,session_id,placement_revision)
-        VALUES ($1,$2,$3,'retired_present',$4,$5) ON CONFLICT DO NOTHING")
+        VALUES ($1,$2,$3,'retired_present',$4,$5) ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET report_derived = false")
         .bind(source.decode_column::<Uuid>("pinned_runner_id")?)
         .bind(source.decode_column::<String>("workspace_relative_path")?)
         .bind(digest)

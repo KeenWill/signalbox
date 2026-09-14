@@ -101,6 +101,7 @@ CREATE TRIGGER runner_workspace_leak_page_is_append_only BEFORE UPDATE OR DELETE
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TABLE runner_workspace_leak (
+    report_derived boolean NOT NULL DEFAULT false,
     runner_id uuid NOT NULL REFERENCES runner_enrollment(runner_id),
     locator text NOT NULL,
     entry_digest text NOT NULL CHECK (entry_digest ~ '^[0-9a-f]{64}$'),

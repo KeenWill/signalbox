@@ -163,6 +163,10 @@ are read separately from the timeline bounds. Header projection read failures
 and a missing summary for an existing session return
 `attention_projection_failed` with a classified diagnostic.
 
+The catalog's Suggest a name action requests a generated title and displays it
+inline with Accept and Edit. Accept and edited suggestions use the title PATCH;
+cancelling leaves the saved title unchanged.
+
 `PATCH /api/sessions/{session_id}/metadata` accepts a command ID and nonempty
 title, rejects other fields, and replaces metadata through the user command
 service. It loads and preserves tags, attributes, and the archive flag under the
@@ -527,17 +531,19 @@ Initial-title installation and terminal call evidence commit atomically.
 `POST /api/sessions/{session_id}/title/suggest` accepts `{}` and returns
 `{ "title": "..." }` without saving; accepting a suggestion uses the metadata
 PATCH route. Generation continues through settlement if the requesting browser
-disconnects or cancels. Recovery after guard loss aborts and drains all title
+disconnects or cancels. Dismissing a pending suggestion keeps its row’s Suggest
+action unavailable until the request settles, including across catalog paging or
+workspace navigation. Recovery after guard loss aborts and drains all title
 work. At most four title tasks run at once; recovery prepares each conversation
 inside an admitted task without blocking reservation reconciliation. A full
 initial-title handoff defers work instead of waiting for title execution.
 Conversation-read and credential-read failures abandon unsent title claims.
 Title calls record their target, credentials, send boundary, completion, and
 reported token axes as session-level `session_title` usage evidence. Runtime
-validation uses the selectable model and retains its mapped fast target. Title
-calls use ordinary credential-pool admission and invocation capacity. Initial
-work without an available title runtime, contention, and transient preparation
-failures remain with periodic invocation recovery until admission or
+validation uses the serving model and preserves request-controlled fast mode.
+Title calls use ordinary credential-pool admission and invocation capacity.
+Initial work without an available title runtime, contention, and transient
+preparation failures remain with periodic invocation recovery until admission or
 ineligibility, using the current model catalog at admission; a terminal report
 naming another call leaves usage unreported. Startup closes abandoned title
 calls and releases their initial claims and unregistered invocation
@@ -552,8 +558,13 @@ model limit. A window too small for the fixed prompt and conservative framing
 allowance is rejected before claiming a call. Generated titles are at most 256
 UTF-8 bytes. Bootstrap advertises runtime availability through
 `capabilities.session_title_generation`, including startup availability of the
-selected effective adapter and sufficient prompt room. Unconfigured title
-generation clears deferred work. Title conversation SQL limits projected
+selected effective adapter and sufficient prompt room. The catalog refreshes
+this availability on window focus. Unconfigured title generation clears deferred
+work. Recovery scans unclaimed sessions in pages of 64 by session ID and refills
+as pending entries are admitted. The cursor advances only past retained rows.
+Live completion and retry retention share the 64-entry ceiling; overflow remains
+in the durable backlog. An exhausted scan waits for retention overflow or
+startup/reload before restarting. Title conversation SQL limits projected
 membership and nonempty payload rows to 64, newest first, and each text payload
 to the input byte budget. Completed-turn dispatch retains identifiers; title
 preparation runs inside an admitted task.

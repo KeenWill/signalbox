@@ -37,6 +37,8 @@ impl session_titles::SessionTitleRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn unclaimed_initial_turns(
         &self,
+        after: option::Option<signalbox_domain::SessionId>,
+        limit: u32,
     ) -> result::Result<
         vec::Vec<(signalbox_domain::SessionId, signalbox_domain::TurnId)>,
         error::Error,
