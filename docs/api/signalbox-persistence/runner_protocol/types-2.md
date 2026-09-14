@@ -137,9 +137,13 @@ pub enum RunnerStatusAfter {
     Enrollment(uuid::Uuid),
     Placement(uuid::Uuid),
     OperationFailure(uuid::Uuid),
-    WorkspaceLeak,
+    WorkspaceLeak {
+        runner: uuid::Uuid,
+        locator: string::String,
+        entry_digest: runner_protocol::workspaces::RunnerEvidenceDigest,
+    },
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## RunnerStatusFact
@@ -177,6 +181,10 @@ pub struct RunnerStatusFailure {
 pub struct RunnerStatusPage {
     pub runners: vec::Vec<runner_protocol::status::RunnerStatusFact>,
     pub failures: vec::Vec<runner_protocol::status::RunnerStatusFailure>,
+    pub leaks: vec::Vec<(
+        signalbox_domain::RunnerId,
+        runner_protocol::workspaces::RunnerWorkspaceLeak,
+    )>,
     pub next_after: option::Option<runner_protocol::status::RunnerStatusAfter>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -205,4 +213,80 @@ impl convert::From<runner_protocol::RunnerProtocolStoreError>
 {
     fn from(error: runner_protocol::RunnerProtocolStoreError) -> Self;
 }
+```
+
+## RunnerEvidenceDigest
+
+```rust
+pub struct RunnerEvidenceDigest(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, cmp::Ord, cmp::PartialOrd
+impl runner_protocol::workspaces::RunnerEvidenceDigest {
+    pub fn try_new(value: string::String) -> option::Option<Self>;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## RunnerWorkspaceRelease
+
+```rust
+pub struct RunnerWorkspaceRelease {
+    pub session: signalbox_domain::SessionId,
+    pub placement_revision: signalbox_domain::RunnerGeneration,
+    pub runner: signalbox_domain::RunnerId,
+    pub manifest: signalbox_domain::WorkspaceManifestId,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerWorkspaceReleaseState
+
+```rust
+pub enum RunnerWorkspaceReleaseState {
+    Pending,
+    Completed,
+    CleanupFailed(value::Value),
+    Unowned,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerWorkspaceLeakKind
+
+```rust
+pub enum RunnerWorkspaceLeakKind {
+    UnknownManifest,
+    RetiredPresent,
+    ManifestConflict,
+    CleanupFailed,
+    Unreconciled,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerWorkspaceLeak
+
+```rust
+pub struct RunnerWorkspaceLeak {
+    pub kind: runner_protocol::workspaces::RunnerWorkspaceLeakKind,
+    pub locator: signalbox_domain::WorkspaceRelativePath,
+    pub entry_digest: runner_protocol::workspaces::RunnerEvidenceDigest,
+    pub session: option::Option<signalbox_domain::SessionId>,
+    pub placement_revision: option::Option<signalbox_domain::RunnerGeneration>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerWorkspaceLeakPage
+
+```rust
+pub struct RunnerWorkspaceLeakPage {
+    pub registration_revision: signalbox_domain::RunnerGeneration,
+    pub report_digest: runner_protocol::workspaces::RunnerEvidenceDigest,
+    pub page: signalbox_domain::RunnerGeneration,
+    pub prior_page_digest: option::Option<runner_protocol::workspaces::RunnerEvidenceDigest>,
+    pub final_page: bool,
+    pub page_digest: runner_protocol::workspaces::RunnerEvidenceDigest,
+    pub facts: vec::Vec<runner_protocol::workspaces::RunnerWorkspaceLeak>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

@@ -1,7 +1,8 @@
 //! Descriptor-relative managed workspace storage below the locked runner root.
 
+pub(crate) mod leaks;
 pub(crate) mod provision;
-mod release;
+pub(crate) mod release;
 
 use std::{
     error::Error,
@@ -210,13 +211,19 @@ pub(crate) struct PreparedWorkspace {
 pub(crate) struct RunnerWorkspaceStore {
     root: File,
     canonical_root: PathBuf,
+    staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerWorkspaceStore {
-    pub(crate) fn from_root(root: File, canonical_root: PathBuf) -> Self {
+    pub(crate) fn from_root(
+        root: File,
+        canonical_root: PathBuf,
+        staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
         Self {
             root,
             canonical_root,
+            staging_cleanup,
         }
     }
 
@@ -321,6 +328,7 @@ impl RunnerWorkspaceStore {
         Prepare: FnOnce(RepositoryWorkspaceTarget) -> Preparation,
         Preparation: Future<Output = Result<Recovery, PreparationError>>,
     {
+        let staging_guard = self.staging_cleanup.clone().lock_owned().await;
         let sessions = open_or_create_directory(&self.root, SESSIONS_DIRECTORY)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let session_name = request.session().to_string();
@@ -373,6 +381,7 @@ impl RunnerWorkspaceStore {
             name: &staging_name,
             directory: &staging,
             published: false,
+            staging_guard: Some(staging_guard),
         };
         let repository = open_or_create_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
@@ -464,6 +473,7 @@ struct StagingCleanup<'a> {
     name: &'a str,
     directory: &'a File,
     published: bool,
+    staging_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl Drop for StagingCleanup<'_> {
@@ -477,7 +487,9 @@ impl Drop for StagingCleanup<'_> {
             match cleanup {
                 Ok((parent, directory)) => {
                     let name = self.name.to_owned();
+                    let staging_guard = self.staging_guard.take();
                     std::mem::drop(tokio::task::spawn_blocking(move || {
+                        let _staging_guard = staging_guard;
                         if let Err(error) = release::finish_deletion(&parent, &name, directory) {
                             eprintln!("unpublished workspace staging cleanup failed: {error}");
                         }

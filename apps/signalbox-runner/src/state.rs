@@ -323,6 +323,7 @@ pub struct RunnerStateRoot {
     state: RunnerState,
     journal: Journal,
     active_workspaces: ActiveWorkspaces,
+    staging_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RunnerStateRoot {
@@ -467,6 +468,7 @@ impl RunnerStateRoot {
             state,
             journal,
             active_workspaces,
+            staging_cleanup: std::sync::Arc::default(),
         })
     }
 
@@ -489,6 +491,7 @@ impl RunnerStateRoot {
         Ok(crate::workspace::RunnerWorkspaceStore::from_root(
             directory,
             self.canonical_root.clone(),
+            self.staging_cleanup.clone(),
         ))
     }
 
@@ -502,6 +505,7 @@ impl RunnerStateRoot {
     ) -> Option<(
         &signalbox_runner_wire::ReleaseCorrelation,
         signalbox_runner_wire::ReleasePhase,
+        Option<&signalbox_runner_wire::OperationFailure>,
     )> {
         self.journal.release()
     }
@@ -527,22 +531,64 @@ impl RunnerStateRoot {
     ) -> Result<(), RunnerStateError> {
         self.journal.complete_release(&self.directory, correlation)
     }
+    pub(crate) fn fail_release(
+        &mut self,
+        failure: signalbox_runner_wire::OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.fail_release(&self.directory, failure)
+    }
     pub(crate) fn acknowledge_release(
         &mut self,
         correlation: &signalbox_runner_wire::ReleaseCorrelation,
+        failed: bool,
     ) -> Result<(), RunnerStateError> {
-        if self.journal.release()
-            != Some((
-                correlation,
-                signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
-            ))
+        let Some((prior, phase, failure)) = self.journal.release() else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        if prior != correlation
+            || if failed {
+                failure.is_none()
+            } else {
+                phase != signalbox_runner_wire::ReleasePhase::ReleaseCompleted
+            }
         {
             return Err(RunnerStateError::InvalidTransition);
         }
         self.active_workspaces
             .remove(&self.directory, correlation.manifest_id)?;
         self.journal
-            .acknowledge_release(&self.directory, correlation)
+            .acknowledge_release(&self.directory, correlation, failed)
+    }
+    pub(crate) fn discard_reconciled_release(
+        &mut self,
+        correlation: &signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .journal
+            .release()
+            .is_some_and(|(retained, _, _)| retained == correlation)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.active_workspaces
+            .remove(&self.directory, correlation.manifest_id)?;
+        self.journal.discard_release(&self.directory, correlation)
+    }
+    pub(crate) fn retained_leak_page(&self) -> Option<&signalbox_runner_wire::LeakPage> {
+        self.journal.leak_page()
+    }
+    pub(crate) fn record_leak_page(
+        &mut self,
+        page: signalbox_runner_wire::LeakPage,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.record_leak_page(&self.directory, page)
+    }
+    pub(crate) fn acknowledge_leak_page(
+        &mut self,
+        correlation: &signalbox_runner_wire::LeakPageCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_leak_page(&self.directory, correlation)
     }
 
     /// Authenticates retained ready placements and acknowledged identities before reconnecting.
@@ -570,7 +616,7 @@ impl RunnerStateRoot {
                 .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
         }
         for active in self.active_workspaces.records.values() {
-            if self.journal.release().is_some_and(|(release, _)| {
+            if self.journal.release().is_some_and(|(release, _, _)| {
                 release.manifest_id == active.ready.ready.manifest.manifest_id
             }) {
                 continue;

@@ -549,9 +549,10 @@ runner wire's closed daemon-actionable set. The detail carries bounded `code`,
 unchanged. The diagnostic projection replaces the message with `[redacted]` and
 payload strings with empty strings, preserving the checked code and nontext
 structure. A workspace leak carries runner, fact kind, relative locator, entry
-digest, and nullable session and placement revision. No retained leak producer
-exists, so the read returns no leak messages and `leak_count` is zero. Retained
-failure traversal belongs to [persistence-protocol](persistence-protocol.md).
+digest, and nullable session and placement revision. Retained startup and
+cleanup diagnostics produce leak messages and their `leak_count`, including
+facts without a resumable session. Retained failure and leak traversal belongs
+to [persistence-protocol](persistence-protocol.md).
 
 `runner_state_transition` notifies followers of live transitions above the
 snapshot cursor; reconnect snapshots and session summaries carry the current

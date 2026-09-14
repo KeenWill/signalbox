@@ -344,7 +344,7 @@ async fn released_acknowledged_workspace_does_not_block_restart() {
         .complete_release(&correlation)
         .expect("complete release");
     reopened
-        .acknowledge_release(&correlation)
+        .acknowledge_release(&correlation, false)
         .expect("acknowledge release");
     drop(reopened);
     let reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
@@ -391,11 +391,11 @@ async fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
     drop(state);
     let mut reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
     assert_eq!(
-        reopened.retained_release().map(|(_, phase)| phase),
+        reopened.retained_release().map(|(_, phase, _)| phase),
         Some(signalbox_runner_wire::ReleasePhase::ReleaseCompleted)
     );
     reopened
-        .acknowledge_release(&correlation)
+        .acknowledge_release(&correlation, false)
         .expect("exact completion acknowledgement");
     assert!(reopened.retained_release().is_none());
 }
@@ -443,6 +443,171 @@ async fn accepted_release_restarts_after_trash_manifest_was_deleted() {
 }
 
 #[tokio::test]
+async fn startup_inventory_preserves_releasing_manifest_before_and_after_rename() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let placement = File::open(placement_path).expect("placement descriptor");
+    let mut releasing = read_manifest(&placement).expect("ready manifest");
+    releasing.lifecycle = ManifestLifecycle::Releasing;
+    write_manifest(&placement, &releasing).expect("releasing manifest");
+    drop(placement);
+    let in_place = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("in-place releasing inventory");
+    assert_eq!(in_place.len(), 1);
+    assert_eq!(
+        in_place[0].kind,
+        signalbox_runner_wire::LeakFactKind::Unreconciled
+    );
+    assert_eq!(in_place[0].entry_digest, prepared.manifest_digest);
+    assert_eq!(in_place[0].locator, prepared.manifest.relative_path);
+
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    fs::rename(
+        placement_path,
+        trash.join(prepared.manifest.manifest_id.to_string()),
+    )
+    .expect("simulate committed release rename");
+    fs::remove_file(
+        trash
+            .join(prepared.manifest.manifest_id.to_string())
+            .join(REPOSITORY_WORKSPACE_DIRECTORY)
+            .join("prepared"),
+    )
+    .expect("simulate partial recursive deletion of repository contents");
+    fs::remove_dir(
+        trash
+            .join(prepared.manifest.manifest_id.to_string())
+            .join(REPOSITORY_WORKSPACE_DIRECTORY),
+    )
+    .expect("simulate partial recursive deletion with the manifest retained");
+
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("descriptor inventory");
+    assert_eq!(facts.len(), 1);
+    let fact = &facts[0];
+    assert_eq!(fact.kind, signalbox_runner_wire::LeakFactKind::Unreconciled);
+    assert_eq!(fact.locator, prepared.manifest.relative_path);
+    assert_eq!(fact.entry_digest, prepared.manifest_digest);
+    assert_eq!(fact.session, Some(prepared.manifest.session));
+    assert_eq!(
+        fact.placement_revision,
+        Some(prepared.manifest.placement_revision)
+    );
+    fs::remove_file(
+        trash
+            .join(prepared.manifest.manifest_id.to_string())
+            .join(MANIFEST_FILE),
+    )
+    .expect("simulate manifest deletion before the final directory removal fails");
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("manifest-free trash inventory");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].locator,
+        format!("trash/{}", prepared.manifest.manifest_id)
+    );
+    assert_eq!(
+        facts[0].kind,
+        signalbox_runner_wire::LeakFactKind::RetiredPresent
+    );
+    assert_eq!(facts[0].session, None);
+    assert_eq!(facts[0].placement_revision, None);
+}
+
+#[tokio::test]
+async fn startup_inventory_preserves_observed_in_place_conflict_digests() {
+    let (_parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let placement = File::open(placement_path).expect("placement descriptor");
+    let mut conflicting = read_manifest(&placement).expect("ready manifest");
+    conflicting.runner = CanonicalUuid::from_uuid(Uuid::from_u128(OTHER_RUNNER));
+    for lifecycle in [ManifestLifecycle::Active, ManifestLifecycle::Releasing] {
+        conflicting.lifecycle = lifecycle;
+        write_manifest(&placement, &conflicting).expect("conflicting manifest");
+        let facts = store
+            .startup_leaks(prepared.manifest.runner)
+            .expect("conflict inventory");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].kind,
+            signalbox_runner_wire::LeakFactKind::ManifestConflict
+        );
+        assert_eq!(
+            facts[0].entry_digest,
+            workspace_manifest_digest(&conflicting).expect("observed digest")
+        );
+    }
+}
+
+#[tokio::test]
+async fn startup_inventory_collapses_duplicate_releasing_manifests() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let placement = File::open(placement_path).expect("placement descriptor");
+    let mut releasing = read_manifest(&placement).expect("ready manifest");
+    releasing.lifecycle = ManifestLifecycle::Releasing;
+    write_manifest(&placement, &releasing).expect("in-place releasing manifest");
+
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    let duplicate = trash.join(prepared.manifest.manifest_id.to_string());
+    fs::create_dir(&duplicate).expect("duplicate trash placement");
+    fs::set_permissions(&duplicate, fs::Permissions::from_mode(DIRECTORY_MODE))
+        .expect("private duplicate placement");
+    let duplicate = File::open(duplicate).expect("duplicate placement descriptor");
+    write_manifest(&duplicate, &releasing).expect("duplicate releasing manifest");
+
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("duplicate inventory");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].kind,
+        signalbox_runner_wire::LeakFactKind::Unreconciled
+    );
+    assert_eq!(facts[0].locator, prepared.manifest.relative_path);
+    assert_eq!(facts[0].entry_digest, prepared.manifest_digest);
+    leaks::pages(PositiveU64::try_new(1).expect("registration"), &facts)
+        .expect("duplicate observations form a canonical report");
+}
+
+#[tokio::test]
 async fn release_requires_the_provisioning_runner_and_exact_manifest() {
     let (_parent, mut state) = enrolled_workspace_root();
     let store = state.workspace_store().expect("owned workspace store");
@@ -465,6 +630,40 @@ async fn release_requires_the_provisioning_runner_and_exact_manifest() {
         store.release(&state.accepted_release().expect("journal authority")),
         Err(RunnerWorkspaceError::ManifestConflict)
     ));
+    assert!(Path::new(prepared.execution_directory.as_str()).exists());
+}
+
+#[tokio::test]
+async fn startup_inventory_reports_manifests_and_strays_without_following_links() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    store.activate(&prepared).expect("active workspace");
+    let sessions = parent.path().join("runner-state/sessions");
+    std::os::unix::fs::symlink(parent.path(), sessions.join("unknown")).expect("untrusted link");
+    let facts = store
+        .startup_leaks(prepared.manifest.runner)
+        .expect("descriptor inventory");
+    assert_eq!(facts.len(), 2);
+    assert!(facts.iter().any(|fact| fact.kind
+        == signalbox_runner_wire::LeakFactKind::Unreconciled
+        && fact.entry_digest == prepared.manifest_digest
+        && fact.locator == prepared.manifest.relative_path));
+    assert!(facts.iter().any(|fact| fact.kind
+        == signalbox_runner_wire::LeakFactKind::UnknownManifest
+        && fact.locator == "sessions/unknown"));
+    let pages = leaks::pages(PositiveU64::try_new(1).expect("registration"), &facts)
+        .expect("bounded report");
+    assert_eq!(pages.len(), 1);
+    let page = pages.front().expect("report page");
+    assert!(page.final_page);
+    page.validate().expect("canonical page");
     assert!(Path::new(prepared.execution_directory.as_str()).exists());
 }
 
@@ -526,6 +725,68 @@ async fn aborted_repository_preparation_removes_its_unpublished_staging_tree() {
     }
     assert_eq!(fs::read_dir(session).expect("session directory").count(), 0);
 }
+#[test]
+fn reconnect_scan_waits_for_canceled_staging_cleanup() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("one runtime worker and one blocking worker");
+    runtime.block_on(async {
+        let (_parent, state) = fixture_root();
+        let preparation_store = state.workspace_store().expect("preparation store");
+        let scan_store = state
+            .workspace_store()
+            .expect("reconnect store shares cleanup lifetime");
+        let request = repository_request();
+        let runner = request.runner();
+        let (entered, preparing) = tokio::sync::oneshot::channel();
+        let preparation = tokio::spawn(async move {
+            preparation_store
+                .prepare_repository_workspace(&request, |target| async move {
+                    fs::write(
+                        target.path().join("partial-clone"),
+                        PREPARED_REPOSITORY_BYTES,
+                    )?;
+                    entered.send(()).expect("staging observer");
+                    std::future::pending::<Result<Recovery, io::Error>>().await
+                })
+                .await
+        });
+        preparing
+            .await
+            .expect("staging exists before transport loss");
+        let (unblock, held) = std::sync::mpsc::channel();
+        let (entered, occupied) = tokio::sync::oneshot::channel();
+        let blocking = tokio::task::spawn_blocking(move || {
+            entered.send(()).expect("blocking-pool observer");
+            held.recv().expect("blocking-pool release");
+        });
+        occupied.await.expect("hold filesystem workers");
+        preparation.abort();
+        let mut scan = Box::pin(scan_store.scan_startup_leaks(runner));
+        // Poll reconnect before cancellation drops the staging guard. An uncoordinated
+        // scan would queue ahead of deletion on the occupied blocking pool.
+        std::future::poll_fn(|context| {
+            assert!(scan.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            preparation
+                .await
+                .expect_err("transport canceled preparation")
+                .is_cancelled()
+        );
+        unblock.send(()).expect("permit cleanup and scanning");
+        blocking.await.expect("blocking worker released");
+        let facts = scan.await.expect("reconnect scan completes after cleanup");
+        assert!(
+            facts.is_empty(),
+            "successful unpublished cleanup must not produce a permanent leak fact: {facts:?}"
+        );
+    });
+}
 
 #[tokio::test]
 async fn active_receipts_larger_than_a_frame_do_not_block_workspace_acknowledgement() {
@@ -577,4 +838,99 @@ async fn active_receipts_larger_than_a_frame_do_not_block_workspace_acknowledgem
         serde_json::from_slice(&fs::read(path).expect("retained inventory"))
             .expect("receipt document");
     assert!(receipts.records.contains_key(&next.manifest.manifest_id));
+}
+
+#[tokio::test]
+async fn startup_inventory_reports_inconsistent_trash_manifests_as_conflicts() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    let trashed = trash.join(prepared.manifest.manifest_id.to_string());
+    fs::rename(placement_path, &trashed).expect("release rename");
+    let directory = File::open(&trashed).expect("trash descriptor");
+    let mut releasing = read_manifest(&directory).expect("manifest");
+    releasing.lifecycle = ManifestLifecycle::Releasing;
+    let mut wrong_id = releasing.clone();
+    wrong_id.manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let mut wrong_runner = releasing.clone();
+    wrong_runner.runner = CanonicalUuid::from_uuid(Uuid::from_u128(OTHER_RUNNER));
+    let mut wrong_path = releasing.clone();
+    wrong_path.relative_path = format!("sessions/{}/99/repo", releasing.session);
+    let mut wrong_lifecycle = releasing.clone();
+    wrong_lifecycle.lifecycle = ManifestLifecycle::Active;
+    for manifest in [wrong_id, wrong_runner, wrong_path, wrong_lifecycle] {
+        write_manifest(&directory, &manifest).expect("readable inconsistent manifest");
+        let facts = store
+            .startup_leaks(prepared.manifest.runner)
+            .expect("inventory");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].kind,
+            signalbox_runner_wire::LeakFactKind::ManifestConflict
+        );
+        assert_eq!(
+            facts[0].locator,
+            format!("trash/{}", prepared.manifest.manifest_id)
+        );
+        assert_eq!(
+            facts[0].entry_digest,
+            workspace_manifest_digest(&manifest).expect("observed digest")
+        );
+    }
+}
+
+#[test]
+fn startup_inventory_reports_unexpected_root_entries_without_following_links() {
+    let (parent, state) = enrolled_workspace_root();
+    let root = parent.path().join("runner-state");
+    fs::write(root.join("orphan-file"), b"retained bytes").expect("unknown file");
+    fs::create_dir(root.join("orphan-directory")).expect("unknown directory");
+    std::os::unix::fs::symlink(parent.path(), root.join("orphan-link")).expect("unknown link");
+    let runner = state.state().receipt().expect("enrolled").runner_id();
+    let facts = state
+        .workspace_store()
+        .expect("owned store")
+        .startup_leaks(runner)
+        .expect("root inventory");
+    assert_eq!(facts.len(), 3);
+    for name in ["orphan-file", "orphan-directory", "orphan-link"] {
+        assert!(facts.iter().any(|fact| fact.locator == name
+            && fact.kind == signalbox_runner_wire::LeakFactKind::UnknownManifest
+            && fact.session.is_none()
+            && fact.placement_revision.is_none()));
+    }
+    assert!(root.join("orphan-file").is_file());
+    assert!(root.join("orphan-directory").is_dir());
+    assert!(root.join("orphan-link").is_symlink());
+}
+
+#[test]
+fn reconnect_inventory_reenumerates_root_after_prior_scan() {
+    let (parent, state) = enrolled_workspace_root();
+    let runner = state.state().receipt().expect("enrollment").runner_id();
+    let store = state.workspace_store().expect("workspace store");
+    assert!(store.startup_leaks(runner).expect("first scan").is_empty());
+    let root = parent.path().join("runner-state");
+    fs::write(root.join("later-orphan"), b"retained").expect("new root entry");
+    for _ in 0..2 {
+        let facts = state
+            .workspace_store()
+            .expect("reconnected store")
+            .startup_leaks(runner)
+            .expect("later scan");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].locator, "later-orphan");
+    }
 }

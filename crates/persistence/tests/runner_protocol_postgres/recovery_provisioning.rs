@@ -37,6 +37,31 @@ async fn unborn_repository_placement_and_replacement_receipt_round_trip_without_
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_private_placement_releases_only_to_its_connected_owner()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::RetiredWorkspace).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_plain_directory_has_neither_release_nor_leak() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, runner, _, pin) = stored_pin_fixture(&pool).await?;
+    store.register(&runner, narrowed_advertisement()).await?;
+    append_runner_registration_loss_projection(&pool, pin.placement.session()).await?;
+    store
+        .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session: pin.placement.session(),
+        })
+        .await?;
+    let retained: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM runner_workspace_release) + (SELECT count(*) FROM runner_workspace_leak)").fetch_one(&pool).await?;
+    assert_eq!(retained, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_replaced_connection_cannot_load_workspace_provisioning() -> Result<(), Box<dyn Error>> {
     provision_with_candidate_capabilities(ProvisionCase::Reconnected).await
 }
@@ -61,6 +86,7 @@ enum ProvisionCase {
     Reconnected,
     RegistrationChanged,
     StaleReady,
+    RetiredWorkspace,
     UnbornRepository,
     Unsupported,
     RevisionWithoutRepository,
@@ -146,10 +172,11 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     if !matches!(
         case,
         ProvisionCase::Supported
-            | ProvisionCase::UnbornRepository
             | ProvisionCase::Reconnected
             | ProvisionCase::RegistrationChanged
             | ProvisionCase::StaleReady
+            | ProvisionCase::RetiredWorkspace
+            | ProvisionCase::UnbornRepository
     ) {
         let rejected =
             RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
@@ -243,7 +270,12 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             .await?;
         assert!(matches!(
             store
-                .record_replacement_workspace_ready(authorization, prior_epoch, &ready)
+                .record_replacement_workspace_ready(
+                    authorization,
+                    prior_epoch,
+                    &ready,
+                    &ready_digest()
+                )
                 .await,
             Err(RunnerProtocolStoreError::Domain(
                 signalbox_domain::RunnerDomainError::InvalidState
@@ -268,7 +300,12 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     wrong.runner = predecessor.identities().runner();
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &wrong)
+            .record_replacement_workspace_ready(
+                authorization,
+                candidate_connection.epoch(),
+                &wrong,
+                &ready_digest()
+            )
             .await
             .is_err()
     );
@@ -280,15 +317,30 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         )
         .await?;
     store
-        .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+        .record_replacement_workspace_ready(
+            authorization,
+            candidate_connection.epoch(),
+            &ready,
+            &ready_digest(),
+        )
         .await?;
     store
-        .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+        .record_replacement_workspace_ready(
+            authorization,
+            candidate_connection.epoch(),
+            &ready,
+            &ready_digest(),
+        )
         .await?;
     if let Some(prior_epoch) = stale_epoch {
         assert!(matches!(
             store
-                .record_replacement_workspace_ready(authorization, prior_epoch, &ready)
+                .record_replacement_workspace_ready(
+                    authorization,
+                    prior_epoch,
+                    &ready,
+                    &ready_digest()
+                )
                 .await,
             Err(RunnerProtocolStoreError::Domain(
                 signalbox_domain::RunnerDomainError::InvalidState
@@ -302,7 +354,8 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             .record_replacement_workspace_ready(
                 authorization,
                 candidate_connection.epoch(),
-                &changed
+                &changed,
+                &ready_digest()
             )
             .await
             .is_err()
@@ -354,6 +407,77 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         .load_placement(session)
         .await?
         .expect("installed placement");
+    if case == ProvisionCase::RetiredWorkspace {
+        assert!(
+            store
+                .workspace_releases(
+                    candidate.identities().enrollment(),
+                    candidate_connection.epoch()
+                )
+                .await?
+                .is_empty(),
+            "an installed current manifest cannot be released"
+        );
+        let prior_epoch = candidate_connection.epoch();
+        candidate_connection = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        let active = store
+            .load_enrollment(candidate.identities().enrollment())
+            .await?
+            .expect("promoted owner");
+        store.register(&active, narrowed_advertisement()).await?;
+        append_runner_registration_loss_projection(&pool, session).await?;
+        store
+            .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+            })
+            .await?;
+        assert!(
+            store
+                .workspace_releases(candidate.identities().enrollment(), prior_epoch)
+                .await?
+                .is_empty()
+        );
+        let release = release_receipt(&ready, ready.manifest_id);
+        assert_eq!(
+            store
+                .workspace_releases(
+                    candidate.identities().enrollment(),
+                    candidate_connection.epoch()
+                )
+                .await?,
+            vec![release.clone()]
+        );
+        assert!(
+            store
+                .record_workspace_release_outcome(
+                    predecessor.identities().enrollment(),
+                    store
+                        .load_connection(predecessor.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
+                    &release,
+                    None
+                )
+                .await
+                .is_err()
+        );
+        store
+            .record_workspace_release_outcome(
+                candidate.identities().enrollment(),
+                store
+                    .load_connection(candidate.identities().enrollment())
+                    .await?
+                    .expect("release owner connection")
+                    .epoch(),
+                &release,
+                None,
+            )
+            .await?;
+    }
     if case == ProvisionCase::RegistrationChanged {
         let active = store
             .load_enrollment(candidate.identities().enrollment())
@@ -665,7 +789,12 @@ async fn provisioning_failure_fixture(fenced: bool) -> Result<(), Box<dyn Error>
     );
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+            .record_replacement_workspace_ready(
+                authorization,
+                candidate_connection.epoch(),
+                &ready,
+                &ready_digest()
+            )
             .await
             .is_err()
     );
@@ -754,7 +883,12 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
         authorization.placement_revision,
     );
     store
-        .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+        .record_replacement_workspace_ready(
+            authorization,
+            candidate_connection.epoch(),
+            &ready,
+            &ready_digest(),
+        )
         .await?;
     let connection = store
         .load_connection(candidate.identities().enrollment())
@@ -787,7 +921,7 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
     );
     assert!(
         store
-            .replacement_workspace_releases(
+            .workspace_releases(
                 candidate.identities().enrollment(),
                 candidate_connection.epoch()
             )
@@ -806,44 +940,72 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, None, false).await
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Current, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(true, None, false).await
+    rejected_staging_releases_ready_workspace(true, ReleaseEpoch::Current, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(
-        false,
-        Some(RunnerConnectionTransition::TransportClosed),
-        false,
-    )
-    .await
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Lost, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn release_admission_after_heartbeat_loss_leaves_the_prior_epoch_unchanged()
+async fn cleanup_failure_retires_release_and_preserves_exact_detail() -> Result<(), Box<dyn Error>>
+{
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Current, true).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn release_outcomes_reject_a_fenced_connection_before_storage_and_replay()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(
-        false,
-        Some(RunnerConnectionTransition::HeartbeatTimeout),
-        false,
-    )
-    .await
+    for cleanup_failed in [false, true] {
+        rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Fenced, cleanup_failed)
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retained_release_outcomes_reconcile_before_a_new_epoch_opens() -> Result<(), Box<dyn Error>>
+{
+    for cleanup_failed in [false, true] {
+        rejected_staging_releases_ready_workspace(false, ReleaseEpoch::Retained, cleanup_failed)
+            .await?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ReleaseEpoch {
+    Current,
+    Lost,
+    HeartbeatLoss,
+    Fenced,
+    Retained,
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retained_release_authority_is_not_reissued_after_heartbeat_loss()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::HeartbeatLoss, false).await
 }
 
 async fn rejected_staging_releases_ready_workspace(
     late_ready: bool,
-    loss: Option<RunnerConnectionTransition>,
-    reconnect_release: bool,
+    release_epoch: ReleaseEpoch,
+    cleanup_failed: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -935,7 +1097,12 @@ async fn rejected_staging_releases_ready_workspace(
     );
     if !late_ready {
         store
-            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+            .record_replacement_workspace_ready(
+                authorization,
+                candidate_connection.epoch(),
+                &ready,
+                &ready_digest(),
+            )
             .await?;
     }
     let candidate_connection = store
@@ -972,19 +1139,30 @@ async fn rejected_staging_releases_ready_workspace(
                 .record_replacement_workspace_ready(
                     authorization,
                     candidate_connection.epoch(),
-                    &wrong
+                    &wrong,
+                    &ready_digest()
                 )
                 .await
                 .is_err()
         );
         store
-            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+            .record_replacement_workspace_ready(
+                authorization,
+                candidate_connection.epoch(),
+                &ready,
+                &ready_digest(),
+            )
             .await?;
         store
-            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
+            .record_replacement_workspace_ready(
+                authorization,
+                candidate_connection.epoch(),
+                &ready,
+                &ready_digest(),
+            )
             .await?;
     }
-    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release WHERE authorization_id = $1 AND connection_epoch = $2")
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_release WHERE authorization_id = $1 AND connection_epoch = $2")
         .bind(authorization.authorization.into_uuid()).bind(Decimal::from(candidate_connection.epoch().get())).fetch_one(&pool).await?;
     assert_eq!(releases, 1);
     store
@@ -996,190 +1174,91 @@ async fn rejected_staging_releases_ready_workspace(
         .await?;
     assert_eq!(
         store
-            .replacement_workspace_releases(
+            .workspace_releases(
                 candidate.identities().enrollment(),
                 candidate_connection.epoch()
             )
             .await?,
-        vec![ready.clone()]
+        vec![release_receipt(&ready, ready.manifest_id)]
     );
-    if reconnect_release {
-        let next = store
-            .open_connection_for_replacement_workspace_release(
-                candidate.identities().enrollment(),
-                session,
-                ready.placement_revision,
-                ready.manifest_id,
-            )
-            .await?;
+    if matches!(release_epoch, ReleaseEpoch::Fenced | ReleaseEpoch::Retained) {
+        let enrollment = candidate.identities().enrollment();
+        let release = release_receipt(&ready, ready.manifest_id);
+        let detail = serde_json::json!({"code":"cleanup_denied", "message":"retained cleanup failure", "payload":{}});
+        let failure = cleanup_failed.then_some(&detail);
+        let original_epoch = candidate_connection.epoch();
+        if matches!(release_epoch, ReleaseEpoch::Retained) {
+            store
+                .reconcile_workspace_release_outcome(enrollment, &release, failure)
+                .await?;
+            assert_eq!(
+                store
+                    .load_connection(enrollment)
+                    .await?
+                    .expect("retained head")
+                    .epoch(),
+                original_epoch
+            );
+        }
+        let successor = store.open_connection(enrollment).await?;
         assert!(
             store
-                .replacement_workspace_releases(
-                    candidate.identities().enrollment(),
-                    candidate_connection.epoch()
-                )
-                .await?
-                .is_empty()
+                .record_workspace_release_outcome(enrollment, original_epoch, &release, failure)
+                .await
+                .is_err()
         );
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_release_outcome WHERE manifest_id = $1",
+        )
+        .bind(ready.manifest_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
         assert_eq!(
-            store
-                .replacement_workspace_releases(candidate.identities().enrollment(), next.epoch())
-                .await?,
-            vec![ready.clone()]
+            recorded,
+            i64::from(matches!(release_epoch, ReleaseEpoch::Retained))
         );
+        for _ in 0..2 {
+            store
+                .record_workspace_release_outcome(enrollment, successor.epoch(), &release, failure)
+                .await?;
+        }
         assert!(
             store
-                .record_replacement_workspace_released(
-                    candidate.identities().enrollment(),
-                    candidate_connection.epoch(),
-                    session,
-                    ready.placement_revision,
-                    ready.runner,
-                    ready.manifest_id,
-                )
+                .record_workspace_release_outcome(enrollment, original_epoch, &release, failure)
                 .await
                 .is_err()
         );
-        let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_released WHERE authorization_id = $1")
-            .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
-        assert_eq!(recorded, 0);
-        store
-            .record_replacement_workspace_released(
-                candidate.identities().enrollment(),
-                store
-                    .load_connection(candidate.identities().enrollment())
-                    .await?
-                    .expect("release owner connection")
-                    .epoch(),
-                session,
-                ready.placement_revision,
-                ready.runner,
-                ready.manifest_id,
-            )
-            .await?;
-        let next = store
-            .open_connection_for_replacement_workspace_release(
-                candidate.identities().enrollment(),
-                session,
-                ready.placement_revision,
-                ready.manifest_id,
-            )
-            .await?;
-        assert!(
-            store
-                .record_replacement_workspace_released(
-                    candidate.identities().enrollment(),
-                    candidate_connection.epoch(),
-                    session,
-                    ready.placement_revision,
-                    ready.runner,
-                    ready.manifest_id,
-                )
-                .await
-                .is_err()
-        );
-        store
-            .record_replacement_workspace_released(
-                candidate.identities().enrollment(),
-                store
-                    .load_connection(candidate.identities().enrollment())
-                    .await?
-                    .expect("release owner connection")
-                    .epoch(),
-                session,
-                ready.placement_revision,
-                ready.runner,
-                ready.manifest_id,
-            )
-            .await?;
-        assert!(
-            store
-                .replacement_workspace_releases(candidate.identities().enrollment(), next.epoch())
-                .await?
-                .is_empty()
-        );
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_release_outcome WHERE manifest_id = $1",
+        )
+        .bind(ready.manifest_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(recorded, 1);
         return Ok(());
     }
-    store
-        .validate_replacement_workspace_release(
-            candidate.identities().enrollment(),
-            session,
-            ready.placement_revision,
-            ready.runner,
-            ready.manifest_id,
-        )
-        .await?;
-    if let Some(loss) = loss {
+    if matches!(
+        release_epoch,
+        ReleaseEpoch::Lost | ReleaseEpoch::HeartbeatLoss
+    ) {
         store
             .transition_connection(
                 candidate.identities().enrollment(),
                 candidate_connection.epoch(),
-                loss,
+                if matches!(release_epoch, ReleaseEpoch::HeartbeatLoss) {
+                    RunnerConnectionTransition::HeartbeatTimeout
+                } else {
+                    RunnerConnectionTransition::TransportClosed
+                },
             )
             .await?;
-        assert!(
-            store
-                .validate_replacement_workspace_release(
-                    candidate.identities().enrollment(),
-                    session,
-                    ready.placement_revision,
-                    ready.runner,
-                    ready.manifest_id,
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            store
-                .load_connection(candidate.identities().enrollment())
-                .await?
-                .expect("lost head")
-                .epoch(),
-            candidate_connection.epoch()
-        );
-        let before = store
-            .load_connection(candidate.identities().enrollment())
+        let successor = store
+            .open_connection(candidate.identities().enrollment())
             .await?;
-        let events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM runner_connection_event WHERE enrollment_id = $1",
-        )
-        .bind(candidate.identities().enrollment().into_uuid())
-        .fetch_one(&pool)
-        .await?;
+        assert_ne!(successor.epoch(), candidate_connection.epoch());
         assert!(
             store
-                .open_connection_for_replacement_workspace_release(
-                    candidate.identities().enrollment(),
-                    session,
-                    ready.placement_revision,
-                    ready.manifest_id,
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            store
-                .load_connection(candidate.identities().enrollment())
-                .await?,
-            before
-        );
-        let after_events: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM runner_connection_event WHERE enrollment_id = $1",
-        )
-        .bind(candidate.identities().enrollment().into_uuid())
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(
-            after_events, events,
-            "rejected release admission leaves no new epoch"
-        );
-        let reauthorized: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = $1")
-            .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
-        assert_eq!(reauthorized, 0);
-
-        assert!(
-            store
-                .replacement_workspace_releases(
+                .workspace_releases(
                     candidate.identities().enrollment(),
                     candidate_connection.epoch()
                 )
@@ -1188,85 +1267,876 @@ async fn rejected_staging_releases_ready_workspace(
         );
         assert!(
             store
-                .record_replacement_workspace_released(
+                .record_workspace_release_outcome(
                     candidate.identities().enrollment(),
                     store
                         .load_connection(candidate.identities().enrollment())
                         .await?
                         .expect("release owner connection")
                         .epoch(),
-                    session,
-                    ready.placement_revision,
-                    ready.runner,
-                    ready.manifest_id
+                    &release_receipt(&ready, ready.manifest_id),
+                    None
                 )
                 .await
                 .is_err()
         );
-        let released: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_released WHERE authorization_id = $1").bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        let released: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_release_outcome outcome JOIN runner_workspace_release release USING (manifest_id) WHERE release.authorization_id = $1 AND outcome.outcome = 'completed'").bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(released, 0);
+        use signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceReleaseState;
+        assert_eq!(
+            store
+                .workspace_release_state(
+                    candidate.identities().enrollment(),
+                    &release_receipt(&ready, ready.manifest_id)
+                )
+                .await?,
+            Some(RunnerWorkspaceReleaseState::Unowned)
+        );
+        let page =
+            signalbox_persistence::runner_protocol::status::read_runner_status(&pool, 100, None)
+                .await?;
+        assert!(
+            page.leaks
+                .iter()
+                .any(|(runner, leak)| *runner == ready.runner
+                    && leak.locator == ready.relative_path
+                    && leak.entry_digest.as_str() == ready_digest().as_str())
+        );
+        startup_report_matches_the_retained_release_leak(
+            &store,
+            &pool,
+            candidate.identities().enrollment(),
+            &ready,
+        )
+        .await?;
         return Ok(());
     }
     assert!(
         store
-            .record_replacement_workspace_released(
+            .record_workspace_release_outcome(
                 candidate.identities().enrollment(),
                 store
                     .load_connection(candidate.identities().enrollment())
                     .await?
                     .expect("release owner connection")
                     .epoch(),
-                session,
-                ready.placement_revision,
-                ready.runner,
-                WorkspaceManifestId::from_uuid(Uuid::now_v7())
+                &release_receipt(&ready, WorkspaceManifestId::from_uuid(Uuid::now_v7())),
+                None
             )
             .await
             .is_err()
     );
+    if !cleanup_failed {
+        assert_cleanable_report_has_no_leak(
+            &store,
+            &pool,
+            candidate.identities().enrollment(),
+            &ready,
+            false,
+        )
+        .await?;
+    }
+    let detail = serde_json::json!({"code":"rename-denied", "message":"cannot rename /private/work", "payload":{"path":"/private/work"}});
+    if cleanup_failed {
+        for _ in 0..2 {
+            store
+                .record_workspace_release_outcome(
+                    candidate.identities().enrollment(),
+                    store
+                        .load_connection(candidate.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
+                    &release_receipt(&ready, ready.manifest_id),
+                    Some(&detail),
+                )
+                .await?;
+        }
+        use signalbox_persistence::runner_protocol::workspaces::{
+            RunnerWorkspaceLeakKind, RunnerWorkspaceReleaseState,
+        };
+        assert_eq!(
+            store
+                .workspace_release_state(
+                    candidate.identities().enrollment(),
+                    &release_receipt(&ready, ready.manifest_id)
+                )
+                .await?,
+            Some(RunnerWorkspaceReleaseState::CleanupFailed(detail))
+        );
+        assert!(
+            store
+                .record_workspace_release_outcome(
+                    candidate.identities().enrollment(),
+                    store
+                        .load_connection(candidate.identities().enrollment())
+                        .await?
+                        .expect("release owner connection")
+                        .epoch(),
+                    &release_receipt(&ready, ready.manifest_id),
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .workspace_releases(
+                    candidate.identities().enrollment(),
+                    candidate_connection.epoch()
+                )
+                .await?
+                .is_empty()
+        );
+        let page =
+            signalbox_persistence::runner_protocol::status::read_runner_status(&pool, 100, None)
+                .await?;
+        assert!(
+            page.leaks
+                .iter()
+                .any(|(runner, leak)| *runner == ready.runner
+                    && leak.kind == RunnerWorkspaceLeakKind::CleanupFailed
+                    && leak.entry_digest.as_str() == ready_digest().as_str())
+        );
+        startup_report_matches_the_retained_release_leak(
+            &store,
+            &pool,
+            candidate.identities().enrollment(),
+            &ready,
+        )
+        .await?;
+        return Ok(());
+    }
     store
-        .record_replacement_workspace_released(
+        .record_workspace_release_outcome(
             candidate.identities().enrollment(),
             store
                 .load_connection(candidate.identities().enrollment())
                 .await?
                 .expect("release owner connection")
                 .epoch(),
-            session,
-            ready.placement_revision,
-            ready.runner,
-            ready.manifest_id,
+            &release_receipt(&ready, ready.manifest_id),
+            None,
         )
         .await?;
     store
-        .record_replacement_workspace_released(
+        .record_workspace_release_outcome(
             candidate.identities().enrollment(),
             store
                 .load_connection(candidate.identities().enrollment())
                 .await?
                 .expect("release owner connection")
                 .epoch(),
-            session,
-            ready.placement_revision,
-            ready.runner,
-            ready.manifest_id,
+            &release_receipt(&ready, ready.manifest_id),
+            None,
         )
         .await?;
     assert!(
         store
-            .replacement_workspace_releases(
+            .workspace_releases(
                 candidate.identities().enrollment(),
                 candidate_connection.epoch()
             )
             .await?
             .is_empty()
     );
+    assert_cleanable_report_has_no_leak(
+        &store,
+        &pool,
+        candidate.identities().enrollment(),
+        &ready,
+        true,
+    )
+    .await?;
+    Ok(())
+}
+
+fn ready_digest() -> signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest {
+    // Arbitrary canonical identity for typed persistence receipt fixtures.
+    signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest::try_new(
+        "d".repeat(64),
+    )
+    .expect("fixture digest")
+}
+
+fn release_receipt(
+    workspace: &ProvisionedWorkspace,
+    manifest: WorkspaceManifestId,
+) -> signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
+    signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
+        session: workspace.session,
+        placement_revision: workspace.placement_revision,
+        runner: workspace.runner,
+        manifest,
+    }
+}
+
+async fn startup_report_matches_the_retained_release_leak(
+    store: &RunnerProtocolStore,
+    pool: &PgPool,
+    enrollment: signalbox_domain::RunnerEnrollmentId,
+    ready: &ProvisionedWorkspace,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, Digest, LeakFact, LeakFactKind, PositiveU64, leak_report_digest,
+    };
+    let stored: String = sqlx::query_scalar(
+        "SELECT entry_digest FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+    )
+    .bind(ready.runner.into_uuid())
+    .bind(ready.relative_path.as_str())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        stored,
+        ready_digest().as_str(),
+        "release diagnostics retain the WorkspaceReady digest"
+    );
+    let facts = [LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: ready.relative_path.as_str().to_owned(),
+        entry_digest: Digest::try_new(ready_digest().as_str().to_owned())?,
+        session: Some(CanonicalUuid::from_uuid(ready.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(ready.placement_revision.get())?),
+    }];
+    let report = leak_report_digest(&facts)?;
+    let page = super::status::report_page(&report, 1, None, true, &facts);
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &page,
+        )
+        .await?;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+    )
+    .bind(ready.runner.into_uuid())
+    .bind(ready.relative_path.as_str())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        rows, 1,
+        "startup reconciles the existing release leak instead of duplicating it"
+    );
+    let trash = [LeakFact {
+        kind: LeakFactKind::RetiredPresent,
+        locator: format!("trash/{}", ready.manifest_id.into_uuid()),
+        // Arbitrary observed metadata digest after the ready manifest was deleted.
+        entry_digest: Digest::try_new("e".repeat(64))?,
+        session: None,
+        placement_revision: None,
+    }];
+    let report = leak_report_digest(&trash)?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &super::status::report_page(&report, 1, None, true, &trash),
+        )
+        .await?;
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(ready.runner.into_uuid())
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        rows, 1,
+        "manifest-free trash reconciles the retained release diagnostic"
+    );
+    let empty_digest = leak_report_digest(&[])?;
+    let empty = super::status::report_page(&empty_digest, 1, None, true, &[]);
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("current owner")
+                .epoch(),
+            &empty,
+        )
+        .await?;
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(ready.runner.into_uuid())
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        retained, 1,
+        "independent release outcome survives an empty report"
+    );
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn reconnect_reauthorizes_release_and_reconciles_completed_replay()
+async fn lost_offered_lease_retains_its_manifest_as_a_leak() -> Result<(), Box<dyn Error>> {
+    lost_live_lease_retains_manifest(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn lost_claimed_lease_retains_its_manifest_as_a_leak() -> Result<(), Box<dyn Error>> {
+    lost_live_lease_retains_manifest(true).await
+}
+
+async fn lost_live_lease_retains_manifest(claimed: bool) -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::runner_protocol::status::read_runner_status;
+    use signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceLeakKind;
+    let (_container, pool) = migrated_postgres().await?;
+    let workspace = private_workspace(
+        SessionId::from_uuid(uuid(SESSION)),
+        enrollment().runner(),
+        RunnerGeneration::try_from_u64(1).expect("first placement"),
+    );
+    let (store, enrolled, _, pin, epoch) = stored_active_pin_fixture_with_workspace(
+        &pool,
+        ActivePinEffectCase::EffectFree,
+        Some(workspace.clone()),
+    )
+    .await?;
+    if claimed {
+        store
+            .claim_tool_lease(enrolled.enrollment(), epoch, pin.lease.correlation())
+            .await?;
+    }
+    store
+        .transition_connection(
+            enrolled.enrollment(),
+            epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(enrolled.enrollment())
+        .await?
+        .expect("durable loss");
+    store
+        .propagate_connection_loss_session(loss, pin.placement.session())
+        .await?;
+    store
+        .propagate_connection_loss_session(loss, pin.placement.session())
+        .await?;
+    assert!(
+        store
+            .workspace_releases(enrolled.enrollment(), epoch)
+            .await?
+            .is_empty(),
+        "disconnected owners receive no release authority"
+    );
+    let page = read_runner_status(&pool, 100, None).await?;
+    let digest = signalbox_runner_wire::workspace_manifest_digest(
+        &signalbox_runner_wire::WorkspaceManifest::from_domain(
+            signalbox_runner_wire::ManifestLifecycle::Ready,
+            &workspace,
+        )?,
+    )?;
+    assert_eq!(
+        page.leaks.len(),
+        1,
+        "loss retains the orphaned workspace exactly once"
+    );
+    let (runner, leak) = &page.leaks[0];
+    assert_eq!(*runner, workspace.runner);
+    assert_eq!(leak.kind, RunnerWorkspaceLeakKind::RetiredPresent);
+    assert_eq!(leak.locator, workspace.relative_path);
+    assert_eq!(leak.entry_digest.as_str(), digest.as_str());
+    assert_eq!(leak.session, Some(workspace.session));
+    assert_eq!(leak.placement_revision, Some(workspace.placement_revision));
+    Ok(())
+}
+
+async fn assert_cleanable_report_has_no_leak(
+    store: &RunnerProtocolStore,
+    pool: &PgPool,
+    enrollment: signalbox_domain::RunnerEnrollmentId,
+    ready: &ProvisionedWorkspace,
+    completed: bool,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, Digest, LeakFact, LeakFactKind, PositiveU64, leak_report_digest,
+    };
+    let mut facts = vec![LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: ready.relative_path.as_str().to_owned(),
+        entry_digest: Digest::try_new(ready_digest().as_str().to_owned())?,
+        session: Some(CanonicalUuid::from_uuid(ready.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(ready.placement_revision.get())?),
+    }];
+    if completed {
+        // Successful cleanup removed the original trash directory, so a later entry
+        // using that manifest name is new evidence rather than retained cleanup.
+        facts.push(LeakFact {
+            kind: LeakFactKind::RetiredPresent,
+            locator: format!("trash/{}", ready.manifest_id.into_uuid()),
+            entry_digest: Digest::try_new("e".repeat(64))?,
+            session: None,
+            placement_revision: None,
+        });
+    }
+    facts.sort();
+    let report = leak_report_digest(&facts)?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &super::status::report_page(&report, 1, None, true, &facts),
+        )
+        .await?;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+    )
+    .bind(ready.runner.into_uuid())
+    .bind(ready.relative_path.as_str())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        rows, 0,
+        "pending and completed releases are reconciled by startup reporting"
+    );
+    if completed {
+        let trash_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+        )
+        .bind(ready.runner.into_uuid())
+        .bind(format!("trash/{}", ready.manifest_id.into_uuid()))
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            trash_rows, 1,
+            "trash recreated after completed cleanup remains visible"
+        );
+    }
+    Ok(())
+}
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_report_reconciles_current_initial_workspace() -> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, Digest, LeakFact, LeakFactKind, ManifestLifecycle, PositiveU64,
+        WorkspaceManifest, leak_report_digest, workspace_manifest_digest,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let workspace = private_workspace(
+        SessionId::from_uuid(uuid(SESSION)),
+        enrollment().runner(),
+        RunnerGeneration::try_from_u64(1).expect("first placement"),
+    );
+    let (store, enrolled, _, _, _) = stored_active_pin_fixture_with_workspace(
+        &pool,
+        ActivePinEffectCase::EffectFree,
+        Some(workspace.clone()),
+    )
+    .await?;
+    let ready_digest = workspace_manifest_digest(&WorkspaceManifest::from_domain(
+        ManifestLifecycle::Ready,
+        &workspace,
+    )?)?;
+    let mut fact = LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: workspace.relative_path.as_str().to_owned(),
+        entry_digest: ready_digest,
+        session: Some(CanonicalUuid::from_uuid(workspace.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(workspace.placement_revision.get())?),
+    };
+    let report = leak_report_digest(std::slice::from_ref(&fact))?;
+    store
+        .record_workspace_leak_page(
+            enrolled.enrollment(),
+            store
+                .load_connection(enrolled.enrollment())
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &super::status::report_page(&report, 1, None, true, std::slice::from_ref(&fact)),
+        )
+        .await?;
+    let leaks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(workspace.runner.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        leaks, 0,
+        "the current initial workspace is authoritative without a replacement receipt"
+    );
+
+    fact.entry_digest = Digest::try_new("e".repeat(64))?;
+    let report = leak_report_digest(std::slice::from_ref(&fact))?;
+    store
+        .record_workspace_leak_page(
+            enrolled.enrollment(),
+            store
+                .load_connection(enrolled.enrollment())
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &super::status::report_page(&report, 1, None, true, std::slice::from_ref(&fact)),
+        )
+        .await?;
+    let kinds: Vec<String> =
+        sqlx::query_scalar("SELECT kind FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(workspace.runner.into_uuid())
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        kinds,
+        ["manifest_conflict"],
+        "matching placement identity does not authenticate a changed digest"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_report_preserves_retired_initial_workspace_release_outcomes()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, None, true).await
+    use signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceReleaseState as ReleaseState;
+    use signalbox_runner_wire::{
+        CanonicalUuid, LeakFact, LeakFactKind, ManifestLifecycle, PositiveU64, WorkspaceManifest,
+        leak_report_digest, workspace_manifest_digest,
+    };
+    for outcome in [
+        ReleaseState::CleanupFailed(
+            serde_json::json!({"code":"cleanup_denied","message":"cannot delete","payload":{}}),
+        ),
+        ReleaseState::Unowned,
+        ReleaseState::Pending,
+        ReleaseState::Completed,
+    ] {
+        let (_container, pool) = migrated_postgres().await?;
+        let workspace = private_workspace(
+            SessionId::from_uuid(uuid(SESSION)),
+            enrollment().runner(),
+            RunnerGeneration::try_from_u64(1).expect("first placement"),
+        );
+        insert_session(&pool).await?;
+        insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+        let store = RunnerProtocolStore::new(pool.clone(), catalog());
+        let enrolled = enrollment();
+        store.insert_enrollment(&enrolled).await?;
+        let registration = store.register(&enrolled, advertisement()).await?;
+        let placement = SessionRunnerPlacement::new(
+            workspace.session,
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::Identity(workspace.runner),
+                working_directory: WorkingDirectorySelection::RunnerDefault,
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: workspace.sandbox,
+                permission_overrides: no_permission_overrides(),
+            },
+        );
+        store.store_placement(&placement, None, None).await?;
+        let pin = placement
+            .pin_and_offer_lease(
+                &enrolled,
+                registration.registration(),
+                workspace.working_directory.clone(),
+                Some(workspace.clone()),
+                authorized(INITIAL_PHYSICAL_ATTEMPT),
+                offer_request(),
+            )
+            .expect("initial workspace authorization");
+        let epoch = store.open_connection(enrolled.enrollment()).await?.epoch();
+        store.store_pin(&pin, &registration).await?;
+        let correlation = pin.lease.correlation();
+        let claimed = pin.lease.claim(correlation.clone()).expect("exact offer");
+        store.store_lease(&claimed).await?;
+        store
+            .store_lease(&claimed.complete(correlation).expect("exact claim"))
+            .await?;
+        let registration = store.register(&enrolled, narrowed_advertisement()).await?;
+        append_runner_registration_loss_projection(&pool, workspace.session).await?;
+        assert_eq!(
+            store
+                .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
+                    command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                    session: workspace.session,
+                })
+                .await?,
+            RunnerRecoveryOutcome::Recorded(signalbox_domain::AbandonLostRunnerResult::Abandoned)
+        );
+        let release = release_receipt(&workspace, workspace.manifest_id);
+        assert_eq!(
+            store
+                .workspace_releases(enrolled.enrollment(), epoch)
+                .await?,
+            std::slice::from_ref(&release)
+        );
+        match &outcome {
+            ReleaseState::CleanupFailed(detail) => {
+                store
+                    .record_workspace_release_outcome(
+                        enrolled.enrollment(),
+                        store
+                            .load_connection(enrolled.enrollment())
+                            .await?
+                            .expect("release owner connection")
+                            .epoch(),
+                        &release,
+                        Some(detail),
+                    )
+                    .await?
+            }
+            ReleaseState::Unowned => {
+                store
+                    .transition_connection(
+                        enrolled.enrollment(),
+                        epoch,
+                        RunnerConnectionTransition::TransportClosed,
+                    )
+                    .await?;
+            }
+            ReleaseState::Completed => {
+                store
+                    .record_workspace_release_outcome(
+                        enrolled.enrollment(),
+                        store
+                            .load_connection(enrolled.enrollment())
+                            .await?
+                            .expect("release owner connection")
+                            .epoch(),
+                        &release,
+                        None,
+                    )
+                    .await?
+            }
+            ReleaseState::Pending => {}
+        }
+        if matches!(outcome, ReleaseState::Unowned) {
+            store.open_connection(enrolled.enrollment()).await?;
+        }
+        let facts = [LeakFact {
+            kind: LeakFactKind::Unreconciled,
+            locator: workspace.relative_path.as_str().to_owned(),
+            entry_digest: workspace_manifest_digest(&WorkspaceManifest::from_domain(
+                ManifestLifecycle::Ready,
+                &workspace,
+            )?)?,
+            session: Some(CanonicalUuid::from_uuid(workspace.session.into_uuid())),
+            placement_revision: Some(PositiveU64::try_new(workspace.placement_revision.get())?),
+        }];
+        let report = leak_report_digest(&facts)?;
+        let mut page = super::status::report_page(&report, 1, None, true, &facts);
+        page.registration_revision = RunnerGeneration::try_from_u64(registration.revision().get())
+            .expect("nonzero registration");
+        store
+            .record_workspace_leak_page(
+                enrolled.enrollment(),
+                store
+                    .load_connection(enrolled.enrollment())
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page,
+            )
+            .await?;
+        let kinds: Vec<String> = sqlx::query_scalar(
+            "SELECT kind FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+        )
+        .bind(workspace.runner.into_uuid())
+        .bind(workspace.relative_path.as_str())
+        .fetch_all(&pool)
+        .await?;
+        let expected = match outcome {
+            ReleaseState::CleanupFailed(_) => vec!["cleanup_failed"],
+            ReleaseState::Unowned => vec!["retired_present"],
+            _ => vec![],
+        };
+        assert_eq!(
+            kinds, expected,
+            "startup must preserve the {outcome:?} release disposition"
+        );
+        let conflict = [LeakFact {
+            kind: LeakFactKind::ManifestConflict,
+            locator: format!("trash/{}", workspace.manifest_id.into_uuid()),
+            ..facts[0].clone()
+        }];
+        let report = leak_report_digest(&conflict)?;
+        let mut page = super::status::report_page(&report, 1, None, true, &conflict);
+        page.registration_revision = RunnerGeneration::try_from_u64(registration.revision().get())
+            .expect("nonzero registration");
+        store
+            .record_workspace_leak_page(
+                enrolled.enrollment(),
+                store
+                    .load_connection(enrolled.enrollment())
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page,
+            )
+            .await?;
+        let kind: String = sqlx::query_scalar(
+            "SELECT kind FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2",
+        )
+        .bind(workspace.runner.into_uuid())
+        .bind(&conflict[0].locator)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            kind, "manifest_conflict",
+            "a retained release cannot suppress a readable conflicting trash manifest"
+        );
+        let unreadable = [LeakFact {
+            kind: LeakFactKind::RetiredPresent,
+            locator: format!("trash/{}", workspace.manifest_id.into_uuid()),
+            // Arbitrary directory metadata after the manifest is absent.
+            entry_digest: signalbox_runner_wire::Digest::try_new("e".repeat(64))?,
+            session: None,
+            placement_revision: None,
+        }];
+        let report = leak_report_digest(&unreadable)?;
+        let mut page = super::status::report_page(&report, 1, None, true, &unreadable);
+        page.registration_revision = RunnerGeneration::try_from_u64(registration.revision().get())
+            .expect("nonzero registration");
+        store
+            .record_workspace_leak_page(
+                enrolled.enrollment(),
+                store
+                    .load_connection(enrolled.enrollment())
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page,
+            )
+            .await?;
+        let kinds: Vec<String> = sqlx::query_scalar(
+            "SELECT kind FROM runner_workspace_leak WHERE runner_id = $1 AND locator = $2 AND entry_digest = $3",
+        ).bind(workspace.runner.into_uuid()).bind(&unreadable[0].locator)
+            .bind(unreadable[0].entry_digest.as_str()).fetch_all(&pool).await?;
+        let expected = match outcome {
+            ReleaseState::Completed => vec!["retired_present"],
+            ReleaseState::CleanupFailed(_) | ReleaseState::Unowned | ReleaseState::Pending => {
+                vec![]
+            }
+        };
+        assert_eq!(
+            kinds, expected,
+            "only a pending or failed release explains manifest-free trash; {outcome:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_diagnostics_preserve_abandoned_lost_initial_workspace()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_runner_wire::{
+        CanonicalUuid, LeakFact, LeakFactKind, ManifestLifecycle, PositiveU64, WorkspaceManifest,
+        leak_report_digest, workspace_manifest_digest,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let workspace = private_workspace(
+        SessionId::from_uuid(uuid(SESSION)),
+        enrollment().runner(),
+        RunnerGeneration::try_from_u64(1).expect("initial placement"),
+    );
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let enrolled = enrollment();
+    store.insert_enrollment(&enrolled).await?;
+    let registration = store.register(&enrolled, advertisement()).await?;
+    let placement = SessionRunnerPlacement::new(
+        workspace.session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::Identity(workspace.runner),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: workspace.sandbox,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &enrolled,
+            registration.registration(),
+            workspace.working_directory.clone(),
+            Some(workspace.clone()),
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("initial workspace authorization");
+    let epoch = store.open_connection(enrolled.enrollment()).await?.epoch();
+    store.store_pin(&pin, &registration).await?;
+    let correlation = pin.lease.correlation();
+    let claimed = pin.lease.claim(correlation.clone()).expect("exact offer");
+    store.store_lease(&claimed).await?;
+    store
+        .store_lease(&claimed.complete(correlation).expect("exact claim"))
+        .await?;
+    store
+        .transition_connection(
+            enrolled.enrollment(),
+            epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(enrolled.enrollment())
+        .await?
+        .expect("retained connection loss");
+    store
+        .propagate_connection_loss_session(loss, pin.placement.session())
+        .await?;
+    assert_eq!(
+        store
+            .abandon_lost_runner(signalbox_domain::AbandonLostRunner {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                session: workspace.session,
+            })
+            .await?,
+        RunnerRecoveryOutcome::Recorded(signalbox_domain::AbandonLostRunnerResult::Abandoned)
+    );
+    let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_release")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(releases, 0);
+    let before: Vec<String> =
+        sqlx::query_scalar("SELECT kind FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(workspace.runner.into_uuid())
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(before, ["retired_present"]);
+    let epoch = store.open_connection(enrolled.enrollment()).await?.epoch();
+    let facts = [LeakFact {
+        kind: LeakFactKind::Unreconciled,
+        locator: workspace.relative_path.as_str().to_owned(),
+        entry_digest: workspace_manifest_digest(&WorkspaceManifest::from_domain(
+            ManifestLifecycle::Ready,
+            &workspace,
+        )?)?,
+        session: Some(CanonicalUuid::from_uuid(workspace.session.into_uuid())),
+        placement_revision: Some(PositiveU64::try_new(workspace.placement_revision.get())?),
+    }];
+    let report = leak_report_digest(&facts)?;
+    let page = super::status::report_page(&report, 1, None, true, &facts);
+    store
+        .record_workspace_leak_page(enrolled.enrollment(), epoch, &page)
+        .await?;
+    let after: Vec<String> =
+        sqlx::query_scalar("SELECT kind FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(workspace.runner.into_uuid())
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(after, ["retired_present"]);
+    Ok(())
 }

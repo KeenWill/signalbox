@@ -27,11 +27,9 @@ also advertises `worktree_per_session`. It executes `echo` in a plain child
 process under `ambient` and retains the claimed phase and terminal result in a
 versioned, fsynced, atomically published private journal. An initialized state
 root without that journal fails startup. Resume reconciles the retained lease
-phase and terminal result against durable daemon state. Provisioning resumes the
-exact retained workspace operation. Rejected staged workspaces retain accepted
-release and completion phases through daemon acknowledgement.
-Placement-retirement release, leak reconciliation, and sandbox supervision are
-listed under Planned.
+phase and terminal result against durable daemon state. Provisioning and release
+resume the exact retained workspace operation. Startup reconciles leak pages
+before execution. Sandbox supervision is listed under Planned.
 
 The daemon admits authenticated runner recovery after migrations and before the
 generic startup scan or blob checks. Ordinary enrollment waits until the process
@@ -126,8 +124,9 @@ Git as a plain child process with system and global configuration disabled and
 credential helpers cleared. Each command has one five-minute deadline covering
 output collection and process completion; expiration rejects acquisition as
 `repository_unavailable`. Credentialed and repository-free private-root
-acquisition are unavailable. Provisioning and release reject while an offer,
-resumed lease, execution, or journaled lease or result remains unsettled.
+acquisition are unavailable. Provisioning rejects while an offer, resumed lease,
+execution, or journaled lease or result remains unsettled. Release waits for
+that tool authority to settle before journal acceptance or cleanup.
 
 Repository workspaces live at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
@@ -139,16 +138,8 @@ upon an exact `workspace_recorded` acknowledgement. A repository records a
 commit, a branch and commit, or an `unborn_branch` with its name and no commit
 revision.
 
-An in-flight release keeps the same worker across physical connections.
-Authenticated resume opens its epoch and reauthorizes retained staging-release
-authority in one transaction before accepting completion. A rejected release
-admission leaves the prior connection head unchanged. The daemon retains that
-reauthorization without changing the original release record; unrelated stale
-release receipts still fail the current-epoch check.
-
-Retained staging-release authority cannot be reauthorized after durable
-connection loss. Live provisioning failure and release completion check the
-caller's connection epoch in the receipt transaction, including equal replay.
+An in-flight release keeps the same worker after a transport loss. The runner
+reaps it and journals its outcome before the next resume handshake.
 
 The runner retains the complete provisioning request, resolved clone-URL digest,
 and ready receipt in its private journal. Restart checks the configured mapping
@@ -165,17 +156,68 @@ exact stored daemon authorization under the unchanged registration, and the
 runner resends its authenticated receipt until acknowledgement activates the
 manifest and clears the pending operation. The separately published
 `active-workspaces.json` retains acknowledged ready facts and
-execution-directory identities until release is acknowledged; its aggregate size
+execution-directory identities until release is reconciled; its aggregate size
 is independent of the operation-journal frame limit. Startup authenticates these
 facts against the configuration and filesystem before reconnecting; a changed
 mapping or replaced directory fails as `manifest_conflict`. The daemon loads
 provisioning and release work only for the current connection epoch and
-serializes provisioning and lease delivery on each connection until the
-corresponding durable outcome is acknowledged. Expected acquisition refusals are
-journaled as `operation_failed` and retained through heartbeat and reconnect
+serializes provisioning, release, and lease delivery on each connection until
+the corresponding durable outcome is acknowledged. Expected acquisition refusals
+are journaled as `operation_failed` and retained through heartbeat and reconnect
 until acknowledged; the runner keeps serving. Provisioning dispatch also
 requires the authorization’s registration revision to match the current
 registration head.
+
+## Workspace release and leak reporting
+
+Live provisioning failures and release outcomes require the caller's current
+connection epoch in the storage transaction, including equal replay.
+Authenticated Resume reconciles retained completion or failure before opening
+the next epoch.
+
+The daemon issues cleanup for a retired manifest only to its connected owner,
+after its leases and results settle. Plain-directory placements have no manifest
+and receive no cleanup. Connection loss retires an outstanding release as
+unowned and retains a leak diagnostic. Loss that settles a live lease also
+retains its retired manifest as a `retired_present` leak. On reconnect,
+`fail_stale` clears that exact journaled release; ownership never transfers to a
+successor.
+
+The runner fsyncs `release_accepted` before marking the manifest `releasing`,
+renaming the placement below `trash/`, and deleting it through directory
+descriptors without following symlinks. Restart continues accepted deletion even
+when its manifest is gone. Completion is journaled before `workspace_released`
+and retained until the exact acknowledgement. Failed cleanup retains
+`workspace_cleanup_failed` until durable acknowledgement and exposes the
+surviving workspace as a `cleanup_failed` leak. Release diagnostics retain the
+manifest digest, so a startup report of the same workspace matches the retained
+leak. A readable releasing manifest, whether still in place or below `trash/`,
+retains its canonical workspace locator, ready-manifest digest, and session
+correlation in the startup report, matching the stored cleanup diagnostic.
+Readable trash manifests with inconsistent identity, path, or lifecycle are
+reported as manifest conflicts. Pending and completed releases, including
+retired initial placements, are reconciled by startup reporting. A canonical
+trash name without a readable manifest is reconciled only against an
+outstanding, cleanup-failed, or unowned release.
+
+Before accepting new provisioning or executing tools, startup reports ready and
+active manifests and unknown entries in bounded, digest-correlated pages.
+Unknown entries include direct root children other than the enrollment, journal
+and active-workspace documents and the managed `sessions/` and `trash/` trees. A
+complete report removes report-derived diagnostics absent from its retained
+facts; independent loss and release outcomes remain retained. Scanning waits for
+canceled staging cleanup to finish; successfully removed unpublished workspaces
+produce no leak fact. Promotion receipt persistence and provisioning wait until
+every startup page is acknowledged, keeping enrollment document publication
+outside the scan. The daemon reconciles exact retained ready facts, including
+the reconstructed ready manifest of a current initial placement and the retained
+source of an abandoned initial placement. An abandoned workspace whose owner was
+lost keeps its retired-present diagnostic. A live page's transaction validates
+the physical connection epoch before storage or equal replay. Authenticated
+Resume reconciles its retained page before opening an epoch. Unresolved
+diagnostics are stored before acknowledging each page. The final page verifies
+strict ordering and the complete digest over all retained facts. Reports remain
+visible without a resumable session and authorize no deletion.
 
 ## Boundary contracts
 
@@ -430,19 +472,11 @@ ready workspace, including a correlated receipt arriving after abandonment, is
 released only through its exact manifest correlation on the candidate's retained
 connection epoch. Suspicion retains that cleanup authority; loss does not
 transfer it. Release acknowledgement uses the same current-epoch fence as
-release dispatch. The runner journals the exact release before cleanup, verifies
-its protected manifest, marks it `releasing`, renames the placement into
-`trash/<manifest_id>`, and deletes through directory descriptors without
-following symlinks. An accepted journal authorizes completion after a partial
-trash deletion. The completion receipt remains journaled until its exact
-acknowledgement; resume rechecks pending release authority or records the
-retained completion. Cleanup storage errors retain the accepted journal. Lease
-offers, provisioning, and staged release run serially per runner.
+release dispatch.
 
 ## Planned
 
-- General failure spooling and placement-release, failure, and leak
-  reconnect-inventory reconciliation over the wire:
+- General operation-failure evidence over the wire:
   [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
@@ -451,8 +485,6 @@ offers, provisioning, and staged release run serially per runner.
 - Initial repository-placement provisioning admission and credentialed or
   restricted repository acquisition:
   [runner protocol design](../design/runner-protocol.md).
-- Placement-retirement release, cleanup-failure projection, and startup leak
-  reconciliation: [runner protocol design](../design/runner-protocol.md).
 - The restricted sandbox and ambient supervision under bubblewrap, with confined
   file tools: [runner protocol design](../design/runner-protocol.md).
 - The restricted-namespace HTTPS egress broker:

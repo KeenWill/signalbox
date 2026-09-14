@@ -21,6 +21,15 @@ pub struct WorkspaceReleaseWorker {
 }
 
 impl WorkspaceReleaseWorker {
+    /// Finishes and journals cleanup before resume can reconcile its retained release.
+    #[doc(hidden)]
+    pub async fn reap(&mut self, state: &mut RunnerStateRoot) -> Result<(), RunnerConnectionError> {
+        let (correlation, succeeded) = (&mut self.task).await.map_err(|_| {
+            RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage)
+        })?;
+        record_release_completion(state, correlation, succeeded)
+    }
+
     pub(super) fn new(
         task: tokio::task::JoinHandle<(signalbox_runner_wire::ReleaseCorrelation, bool)>,
     ) -> Self {
@@ -71,14 +80,33 @@ pub(super) async fn workspace_finished(
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
-    /// Restores the exact release executor retained across a reconnect.
-    #[doc(hidden)]
-    pub fn restore_workspace_release_worker(&mut self, worker: WorkspaceReleaseWorker) {
-        debug_assert!(self.workspace.is_none());
-        self.workspace = Some(WorkspaceExecution::Releasing(worker));
+fn record_release_completion(
+    state: &mut RunnerStateRoot,
+    correlation: signalbox_runner_wire::ReleaseCorrelation,
+    succeeded: bool,
+) -> Result<(), RunnerConnectionError> {
+    if succeeded {
+        state.complete_release(&correlation)?;
+    } else {
+        use signalbox_runner_wire::{
+            DetailName, FailureCategory, FailureDetail, OperationCorrelation, OperationFailure,
+        };
+        state.fail_release(OperationFailure {
+            correlation: OperationCorrelation::Release(correlation),
+            category: FailureCategory::WorkspaceCleanupFailed,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("workspace-cleanup-failed".to_owned())
+                    .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+                "The accepted workspace cleanup failed".to_owned(),
+                serde_json::json!({}),
+            )
+            .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+        })?;
     }
+    Ok(())
+}
 
+impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
     /// Removes an in-flight release executor so reconnect does not duplicate it.
     #[doc(hidden)]
     pub fn take_workspace_release_worker(&mut self) -> Option<WorkspaceReleaseWorker> {
@@ -181,16 +209,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
             )
             .await?;
         }
-        if let Some((correlation, phase)) = state.retained_release()
-            && phase == signalbox_runner_wire::ReleasePhase::ReleaseCompleted
-        {
-            send_message(
-                &mut self.io,
-                Message::WorkspaceReleased(signalbox_runner_wire::WorkspaceReleased {
-                    correlation: correlation.clone(),
-                }),
-            )
-            .await?;
+        if let Some((correlation, phase, failure)) = state.retained_release() {
+            if let Some(failure) = failure {
+                send_message(
+                    &mut self.io,
+                    Message::OperationFailed(signalbox_runner_wire::OperationFailed {
+                        failure: failure.clone(),
+                    }),
+                )
+                .await?;
+            } else if phase == signalbox_runner_wire::ReleasePhase::ReleaseCompleted {
+                send_message(
+                    &mut self.io,
+                    Message::WorkspaceReleased(signalbox_runner_wire::WorkspaceReleased {
+                        correlation: correlation.clone(),
+                    }),
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -206,13 +242,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
                 correlation,
                 succeeded,
             } => {
-                if succeeded {
-                    state.complete_release(&correlation)?;
-                } else {
-                    return Err(RunnerConnectionError::Workspace(
-                        crate::WorkspaceProvisionError::Storage,
-                    ));
-                }
+                record_release_completion(state, correlation, succeeded)?;
             }
         }
         self.workspace = Some(WorkspaceExecution::Ready);
@@ -223,13 +253,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         &mut self,
         state: &mut RunnerStateRoot,
         correlation: signalbox_runner_wire::ReleaseCorrelation,
+        failed: bool,
     ) -> Result<(), RunnerConnectionError> {
-        if self.last_release_recorded.as_ref() == Some(&correlation) {
+        if self.last_release_recorded.as_ref() == Some(&(correlation.clone(), failed)) {
             return Ok(());
         }
-        state.acknowledge_release(&correlation)?;
+        state.acknowledge_release(&correlation, failed)?;
         self.workspace = None;
-        self.last_release_recorded = Some(correlation);
+        self.last_release_recorded = Some((correlation, failed));
         Ok(())
     }
 
@@ -312,6 +343,49 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
     }
 }
 
+pub(super) fn heartbeat_phase(
+    state: &RunnerStateRoot,
+) -> Option<signalbox_runner_wire::HeartbeatWorkspacePhase> {
+    use signalbox_runner_wire::{
+        HeartbeatWorkspacePhase as H, ProvisionPhase as P, ReleasePhase as R,
+        WorkspaceFailureCorrelation as F, WorkspaceOperation as W,
+    };
+    let inventory = state.reconnect_inventory();
+    if let Some(failure) = state.retained_provision_failure()
+        && let signalbox_runner_wire::OperationCorrelation::Provision(correlation) =
+            &failure.correlation
+    {
+        return Some(H::FailureUnrecorded {
+            correlation: F::Provision(correlation.clone()),
+        });
+    }
+    if let Some((correlation, _, Some(_))) = state.retained_release() {
+        return Some(H::FailureUnrecorded {
+            correlation: F::Release(correlation.clone()),
+        });
+    }
+    inventory
+        .workspace_operation
+        .map(|operation| match operation {
+            W::Provision {
+                correlation,
+                phase: P::Provisioning,
+            } => H::Provisioning { correlation },
+            W::Provision {
+                correlation,
+                phase: P::ReadyUnrecorded,
+            } => H::ReadyUnrecorded { correlation },
+            W::Release {
+                correlation,
+                phase: R::ReleaseAccepted,
+            } => H::ReleaseAccepted { correlation },
+            W::Release {
+                correlation,
+                phase: R::ReleaseCompleted,
+            } => H::ReleaseCompleted { correlation },
+        })
+}
+
 pub(super) fn apply_workspace_directives(
     state: &mut RunnerStateRoot,
     directives: &signalbox_runner_wire::ReconnectDirectives,
@@ -319,14 +393,43 @@ pub(super) fn apply_workspace_directives(
     let Some(directive) = &directives.workspace_operation else {
         return Ok(());
     };
-    if let Some((correlation, phase)) = state.retained_release() {
+    if let Some((correlation, phase, failure)) = state.retained_release() {
         use signalbox_runner_wire::{DirectiveAction as A, ReleasePhase as P};
         let correlation = correlation.clone();
+        let failed = failure.is_some();
         match directive.action {
-            A::Await if phase == P::ReleaseAccepted => {}
-            A::Resend if phase == P::ReleaseCompleted => {}
-            A::DiscardAsRecorded if phase == P::ReleaseCompleted => {
-                state.acknowledge_release(&correlation)?
+            A::Await if phase == P::ReleaseAccepted && !failed => {}
+            A::Resend
+                if phase == P::ReleaseCompleted
+                    || (failed
+                        && directives
+                            .operation_failure
+                            .as_ref()
+                            .is_some_and(|failure| failure.action == A::Resend)) => {}
+            A::DiscardAsRecorded
+                if phase == P::ReleaseCompleted
+                    || (failed
+                        && directives
+                            .operation_failure
+                            .as_ref()
+                            .is_some_and(|failure| failure.action == A::DiscardAsRecorded)) =>
+            {
+                state.acknowledge_release(&correlation, failed)?
+            }
+            A::FailStale
+                if directives
+                    .operation_failure
+                    .as_ref()
+                    .is_none_or(|failure| failure.action == A::FailStale) =>
+            {
+                let signalbox_runner_wire::OperationCorrelation::Release(expected) =
+                    &directive.correlation
+                else {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::ResumeDirectives,
+                    ));
+                };
+                state.discard_reconciled_release(expected)?;
             }
             _ => {
                 return Err(RunnerConnectionError::Violation(

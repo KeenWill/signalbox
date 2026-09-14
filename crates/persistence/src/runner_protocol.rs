@@ -47,6 +47,7 @@ pub use resume::{RunnerLeaseResumeEvidence, RunnerLeaseResumeOutcome};
 mod provisioning;
 mod recovery;
 pub mod status;
+pub mod workspaces;
 pub(crate) use recovery::retire_replacement_for_terminal_batch;
 pub use recovery::{RunnerRecoveryError, RunnerRecoveryOutcome};
 
@@ -609,33 +610,7 @@ impl RunnerProtocolStore {
         &self,
         enrollment: RunnerEnrollmentId,
     ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
-        self.open_connection_with_release(enrollment, None).await
-    }
-
-    /// Opens an epoch and reauthorizes its retained staging release in one transaction.
-    pub async fn open_connection_for_replacement_workspace_release(
-        &self,
-        enrollment: RunnerEnrollmentId,
-        session: SessionId,
-        revision: RunnerGeneration,
-        manifest: WorkspaceManifestId,
-    ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
-        self.open_connection_with_release(enrollment, Some((session, revision, manifest)))
-            .await
-    }
-
-    async fn open_connection_with_release(
-        &self,
-        enrollment: RunnerEnrollmentId,
-        release: Option<(SessionId, RunnerGeneration, WorkspaceManifestId)>,
-    ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
-        if let Some((session, _, _)) = release {
-            sqlx::query(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
-                .bind(session.into_uuid())
-                .fetch_one(&mut *transaction)
-                .await?;
-        }
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment.into_uuid())
             .fetch_optional(&mut *transaction)
@@ -711,17 +686,6 @@ impl RunnerProtocolStore {
         if prior_was_suspect {
             append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot)
                 .await?;
-        }
-        if let Some((session, revision, manifest)) = release {
-            Self::reauthorize_replacement_workspace_release_in(
-                transaction.as_mut(),
-                enrollment,
-                epoch,
-                session,
-                revision,
-                manifest,
-            )
-            .await?;
         }
         match commit_mutation(transaction).await {
             Ok(()) => Ok(snapshot),
@@ -1212,6 +1176,7 @@ impl RunnerProtocolStore {
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
         }
+        workspaces::retain_placement_leak(&mut transaction, &prior).await?;
         outbox::append(
             transaction.as_mut(),
             OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {
@@ -3574,6 +3539,7 @@ async fn append_runner_connection_loss_epoch(
         .bind(Decimal::from(loss_epoch.get()))
         .execute(&mut *connection)
         .await?;
+    workspaces::retire_releases_on_loss(connection, enrollment, snapshot.epoch()).await?;
     let connection_event_ordinal = NonZeroU64::new(snapshot.event_ordinal())
         .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     Ok(Some(RunnerConnectionLossSnapshot {
@@ -4612,6 +4578,7 @@ async fn insert_placement_record(
         .execute(&mut *transaction)
         .await?;
     }
+    workspaces::retain_retired_placement(transaction, placement.session(), event_ordinal).await?;
     Ok(())
 }
 

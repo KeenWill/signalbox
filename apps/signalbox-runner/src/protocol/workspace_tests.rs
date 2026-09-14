@@ -36,9 +36,17 @@ fn connection(
         execution: None,
         last_recorded: None,
         workspace: None,
-        last_release_recorded: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
+        last_release_recorded: None,
+        startup_report: leaks::StartupReport::Disabled,
+        leak_sent: false,
+        last_leak_recorded: None,
+        deferred_dispatch: None,
+        deferred_release: None,
+        deferred_provision: None,
+        deferred_promotion: None,
+        offer_claimed: false,
         receipt,
         advertisement: config.advertisement().clone(),
         configuration: Some(config),
@@ -483,6 +491,35 @@ async fn failed_anonymous_clone(missing_revision: bool) {
     };
     let (mut runner, ()) = tokio::join!(resumed, daemon);
     assert!(state.reconnect_inventory().workspace_operation.is_none());
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("start reconciliation after refusal");
+    runner.serve_one(&mut state).await.expect("startup scan");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("startup page");
+    let Message::WorkspaceLeakPage(report) =
+        receive_message(&mut hub).await.expect("startup report")
+    else {
+        panic!("startup page")
+    };
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceLeakRecorded(signalbox_runner_wire::WorkspaceLeakRecorded {
+                correlation: report.page.correlation,
+                page_digest: report.page.page_digest,
+            }),
+        )
+        .await
+        .expect("startup acknowledgement");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("finish reconciliation");
+
     let mut next = request;
     next.correlation.authorization_id = identity();
     next.correlation.session_id = identity();
@@ -585,8 +622,193 @@ async fn release_journal_survives_disconnect_and_clears_only_on_exact_acknowledg
 }
 
 #[tokio::test]
-async fn release_worker_moves_to_the_reconnected_transport() {
-    use signalbox_runner_wire::{ReleaseCorrelation, WorkspaceReleased};
+async fn startup_report_without_a_session_is_retained_until_its_exact_page_is_recorded() {
+    use signalbox_runner_wire::WorkspaceLeakRecorded;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let operation = provision(&receipt);
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(directory.path().join("state/sessions"))
+        .expect("private sessions directory");
+    std::fs::write(directory.path().join("state/sessions/orphan"), b"unknown")
+        .expect("unowned entry");
+    for index in 0..64 {
+        std::fs::write(
+            directory
+                .path()
+                .join(format!("state/sessions/orphan-{index}")),
+            b"unknown",
+        )
+        .expect("page-spanning unknown entries");
+    }
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt).with_configuration(configuration());
+    let mut hub = BufReader::new(hub);
+    runner.serve_one(&mut state).await.expect("scan completes");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("publish page");
+    let Message::WorkspaceLeakPage(report) = receive_message(&mut hub).await.expect("page") else {
+        panic!("leak page")
+    };
+    assert_eq!(report.page.facts.len(), 64);
+    assert!(report.page.facts[0].session.is_none());
+    assert!(!runner.startup_report.complete());
+    runner
+        .serve_message(&mut state, Message::WorkspaceProvision(operation.clone()))
+        .await
+        .expect("provisioning is deferred during startup reconciliation");
+    runner
+        .serve_message(&mut state, Message::WorkspaceProvision(operation.clone()))
+        .await
+        .expect("an exact deferred replay is accepted");
+    let mut different = operation.clone();
+    different.correlation.authorization_id = identity();
+    assert!(
+        runner
+            .serve_message(&mut state, Message::WorkspaceProvision(different))
+            .await
+            .is_err()
+    );
+    assert_eq!(runner.deferred_provision.as_ref(), Some(&operation));
+    assert!(state.retained_provision().is_none());
+    assert!(runner.workspace.is_none());
+    let mut wrong = WorkspaceLeakRecorded {
+        correlation: report.page.correlation.clone(),
+        page_digest: signalbox_runner_wire::Digest::try_new("f".repeat(64))
+            .expect("different digest"),
+    };
+    assert!(
+        runner
+            .serve_message(&mut state, Message::WorkspaceLeakRecorded(wrong.clone()))
+            .await
+            .is_err()
+    );
+    assert!(state.retained_leak_page().is_some());
+    wrong.page_digest = report.page.page_digest;
+    runner
+        .serve_message(&mut state, Message::WorkspaceLeakRecorded(wrong.clone()))
+        .await
+        .expect("exact acknowledgement");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("startup settled");
+    assert!(!runner.startup_report.complete());
+    assert!(state.retained_provision().is_none());
+    assert!(runner.workspace.is_none());
+    let Message::WorkspaceLeakPage(next) = receive_message(&mut hub).await.expect("next page")
+    else {
+        panic!("second page")
+    };
+    assert_eq!(next.page.facts.len(), 1);
+    runner
+        .serve_message(&mut state, Message::WorkspaceLeakRecorded(wrong))
+        .await
+        .expect("duplicate prior page acknowledgement");
+    assert_eq!(state.retained_leak_page(), Some(&next.page));
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceLeakRecorded(WorkspaceLeakRecorded {
+                correlation: next.page.correlation,
+                page_digest: next.page.page_digest,
+            }),
+        )
+        .await
+        .expect("last page acknowledged");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("complete startup report");
+    assert!(runner.startup_report.complete());
+    assert!(state.retained_leak_page().is_none());
+    assert_eq!(
+        state
+            .retained_provision()
+            .map(|(provision, _ready)| provision),
+        Some(&operation)
+    );
+    assert!(runner.deferred_provision.is_none());
+    assert!(runner.workspace.is_some());
+}
+
+#[tokio::test]
+async fn cleanup_failure_is_journaled_and_acknowledgement_preserves_the_survivor() {
+    use signalbox_runner_wire::{
+        FailureCategory, OperationCorrelation, OperationFailureRecorded, ReleaseCorrelation,
+    };
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let ready = prepared_repository(&state, provision(&receipt)).await;
+    let correlation = ReleaseCorrelation {
+        session_id: ready.correlation.session_id,
+        placement_revision: ready.correlation.placement_revision,
+        runner_id: receipt.runner_id(),
+        manifest_id: ready.ready.manifest.manifest_id,
+    };
+    let trash = directory.path().join("state/trash");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&trash)
+        .expect("private trash");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(trash.join(correlation.manifest_id.to_string()))
+        .expect("conflicting release destination");
+    state
+        .record_release(correlation.clone())
+        .expect("accepted release");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt.clone());
+    let mut hub = BufReader::new(hub);
+    runner
+        .serve_one(&mut state)
+        .await
+        .expect("failed cleanup is evidence");
+    let Message::OperationFailed(failed) = receive_message(&mut hub).await.expect("failure frame")
+    else {
+        panic!("cleanup failure")
+    };
+    assert_eq!(
+        failed.failure.category,
+        FailureCategory::WorkspaceCleanupFailed
+    );
+    assert_eq!(
+        state.reconnect_inventory().operation_failure,
+        Some(failed.failure.clone())
+    );
+    drop(runner);
+    drop(state);
+    let mut state = RunnerStateRoot::open(&directory.path().join("state")).expect("restart");
+    assert_eq!(
+        state.reconnect_inventory().operation_failure,
+        Some(failed.failure)
+    );
+    let (stream, _hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt);
+    runner
+        .serve_message(
+            &mut state,
+            Message::OperationFailureRecorded(OperationFailureRecorded {
+                correlation: OperationCorrelation::Release(correlation),
+            }),
+        )
+        .await
+        .expect("durable failure acknowledgement");
+    assert!(state.reconnect_inventory().workspace_operation.is_none());
+    assert!(Path::new(&ready.working_directory).is_dir());
+}
+
+#[tokio::test]
+async fn release_worker_is_reaped_before_stale_resume_reconciliation() {
+    use signalbox_runner_wire::{ReleaseCorrelation, ReleasePhase};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -619,31 +841,67 @@ async fn release_worker_moves_to_the_reconnected_transport() {
 
     let (first_stream, first_hub) = tokio::io::duplex(MAX_FRAME_BYTES);
     let mut first = connection(first_stream, receipt.clone());
-    first.restore_workspace_release_worker(worker);
+    first.workspace = Some(workspaces::WorkspaceExecution::Releasing(worker));
     started_receiver.await.expect("worker started");
     drop(first_hub);
     assert!(matches!(
         first.serve_one(&mut state).await,
         Err(RunnerConnectionError::PeerClosed)
     ));
-    let worker = first
+    let mut worker = first
         .take_workspace_release_worker()
         .expect("disconnect retains release worker");
     drop(first);
 
-    let (second_stream, second_hub) = tokio::io::duplex(MAX_FRAME_BYTES);
-    let mut second = connection(second_stream, receipt);
-    let mut second_hub = BufReader::new(second_hub);
-    second.restore_workspace_release_worker(worker);
     finish_sender.send(()).expect("finish retained worker");
-    let complete = second.serve_one(&mut state);
-    let receive = receive_message(&mut second_hub);
-    let (completed, released) = tokio::join!(complete, receive);
-    completed.expect("retained worker completes on new transport");
+    worker
+        .reap(&mut state)
+        .await
+        .expect("journal cleanup before resume");
     assert_eq!(
-        released.expect("release receipt"),
-        Message::WorkspaceReleased(WorkspaceReleased { correlation })
+        state.retained_release().expect("completed cleanup").1,
+        ReleasePhase::ReleaseCompleted
     );
+    let (second_stream, second_hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut second_hub = BufReader::new(second_hub);
+    let config = configuration();
+    let resume = RunnerConnection::establish(second_stream, &mut state, config.advertisement());
+    let daemon = async {
+        let Message::Resume(request) = receive_message(&mut second_hub).await.expect("resume")
+        else {
+            panic!("resume request")
+        };
+        assert!(matches!(
+            request.inventory.workspace_operation,
+            Some(signalbox_runner_wire::WorkspaceOperation::Release {
+                phase: ReleasePhase::ReleaseCompleted,
+                ..
+            })
+        ));
+        send_message(
+            &mut second_hub,
+            Message::Resumed(Box::new(Resumed {
+                registration_revision: receipt.registration_revision(),
+                connection_epoch: positive(),
+                directives: ReconnectDirectives {
+                    workspace_operation: Some(Directive {
+                        correlation: OperationCorrelation::Release(correlation),
+                        action: DirectiveAction::FailStale,
+                    }),
+                    ..Default::default()
+                },
+            })),
+        )
+        .await
+        .expect("stale reconciliation");
+    };
+    let (second, ()) = tokio::join!(resume, daemon);
+    let mut second = second.expect("reconnect after cleanup and stale reconciliation");
+    second
+        .ensure_workspace(&mut state)
+        .expect("no second cleanup");
+    assert!(second.workspace.is_none());
+    assert!(state.retained_release().is_none());
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
@@ -977,12 +1235,213 @@ async fn duplicate_provision_failure_acknowledgement_preserves_a_later_failure()
 }
 
 #[tokio::test]
+async fn stale_release_reconciliation_survives_restart_and_preserves_the_leak_page() {
+    use signalbox_runner_wire::{
+        DetailName, FailureCategory, FailureDetail, OperationFailure, ReleaseCorrelation,
+        ReleasePhase,
+    };
+    for (phase, failed) in [
+        (ReleasePhase::ReleaseAccepted, false),
+        (ReleasePhase::ReleaseCompleted, false),
+        (ReleasePhase::ReleaseAccepted, true),
+    ] {
+        let directory = tempfile::tempdir().expect("temporary parent");
+        let mut state = enrolled(&directory);
+        let receipt = state.state().receipt().expect("receipt").clone();
+        let correlation = ReleaseCorrelation {
+            session_id: identity(),
+            placement_revision: positive(),
+            runner_id: receipt.runner_id(),
+            manifest_id: identity(),
+        };
+        state
+            .record_release(correlation.clone())
+            .expect("accepted release");
+        if phase == ReleasePhase::ReleaseCompleted {
+            state
+                .complete_release(&correlation)
+                .expect("completed release");
+        }
+        if failed {
+            state
+                .fail_release(OperationFailure {
+                    correlation: OperationCorrelation::Release(correlation.clone()),
+                    category: FailureCategory::WorkspaceCleanupFailed,
+                    detail: FailureDetail::try_new(
+                        DetailName::try_new("cleanup-refused".to_owned()).expect("detail name"),
+                        "cleanup refused".to_owned(),
+                        serde_json::json!({}),
+                    )
+                    .expect("bounded detail"),
+                })
+                .expect("failed release");
+        }
+        let page = crate::workspace::leaks::pages(receipt.registration_revision(), &[])
+            .expect("empty startup report")
+            .pop_front()
+            .expect("final page");
+        state
+            .record_leak_page(page.clone())
+            .expect("independent report");
+        drop(state);
+        let mut state = RunnerStateRoot::open(&directory.path().join("state")).expect("restart");
+        let operation = OperationCorrelation::Release(correlation.clone());
+        for wrong_correlation in [true, false] {
+            let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+            let mut hub = BufReader::new(hub);
+            let config = configuration();
+            let resume = RunnerConnection::establish(stream, &mut state, config.advertisement());
+            let daemon = async {
+                let Message::Resume(request) = receive_message(&mut hub).await.expect("resume")
+                else {
+                    panic!("resume request")
+                };
+                assert!(request.inventory.workspace_operation.is_some());
+                let mut exact = correlation.clone();
+                if wrong_correlation {
+                    exact.manifest_id = identity();
+                }
+                send_message(
+                    &mut hub,
+                    Message::Resumed(Box::new(Resumed {
+                        registration_revision: receipt.registration_revision(),
+                        connection_epoch: positive(),
+                        directives: ReconnectDirectives {
+                            workspace_operation: Some(Directive {
+                                correlation: OperationCorrelation::Release(exact),
+                                action: DirectiveAction::FailStale,
+                            }),
+                            operation_failure: failed.then(|| Directive {
+                                correlation: operation.clone(),
+                                action: DirectiveAction::FailStale,
+                            }),
+                            leak_page: Some(Directive {
+                                correlation: page.correlation.clone(),
+                                action: DirectiveAction::Resend,
+                            }),
+                            ..Default::default()
+                        },
+                    })),
+                )
+                .await
+                .expect("stale release decision");
+            };
+            let (runner, ()) = tokio::join!(resume, daemon);
+            if wrong_correlation {
+                assert!(runner.is_err());
+                assert_eq!(
+                    state.retained_release().expect("exact release retained").0,
+                    &correlation
+                );
+            } else {
+                assert!(runner.is_ok(), "stale release must not prevent reconnect");
+                assert!(state.retained_release().is_none());
+            }
+            assert_eq!(state.retained_leak_page(), Some(&page));
+        }
+        drop(state);
+        let state = RunnerStateRoot::open(&directory.path().join("state")).expect("second restart");
+        assert!(state.reconnect_inventory().workspace_operation.is_none());
+        assert!(state.reconnect_inventory().operation_failure.is_none());
+        assert_eq!(state.retained_leak_page(), Some(&page));
+    }
+}
+
+#[tokio::test]
+async fn provisioning_waits_for_the_startup_scan_and_its_page_acknowledgement() {
+    use signalbox_runner_wire::WorkspaceLeakRecorded;
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let mut state = enrolled(&directory);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(directory.path().join("state/sessions"))
+        .expect("private sessions directory");
+    std::fs::write(
+        directory.path().join("state/sessions/old-entry"),
+        b"unknown",
+    )
+    .expect("pre-existing entry");
+    let store = state.workspace_store().expect("workspace store");
+    let runner_id = receipt.runner_id();
+    let (started, entered) = std::sync::mpsc::channel();
+    let (proceed, paused) = std::sync::mpsc::channel();
+    let scan = tokio::task::spawn_blocking(move || {
+        let _ = started.send(());
+        let _ = paused.recv();
+        store.startup_leaks(runner_id)
+    });
+    entered
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("scan entered");
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut hub = BufReader::new(hub);
+    let mut runner = connection(stream, receipt.clone()).with_configuration(configuration());
+    runner.startup_report = leaks::StartupReport::Scanning(scan);
+    let operation = provision(&receipt);
+    let session = operation.correlation.session_id;
+    runner
+        .serve_message(&mut state, Message::WorkspaceProvision(operation.clone()))
+        .await
+        .expect("provision is deferred while startup scans");
+    assert!(
+        state.retained_provision().is_none(),
+        "a scan cannot overlap accepted provisioning"
+    );
+    assert!(
+        !directory
+            .path()
+            .join("state/sessions")
+            .join(session.to_string())
+            .exists()
+    );
+    proceed.send(()).expect("finish startup scan");
+    runner.serve_one(&mut state).await.expect("scan completes");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("publish startup page");
+    let Message::WorkspaceLeakPage(report) = receive_message(&mut hub).await.expect("startup page")
+    else {
+        panic!("startup report")
+    };
+    assert_eq!(report.page.facts.len(), 1);
+    assert_eq!(report.page.facts[0].locator, "sessions/old-entry");
+    assert!(
+        state.retained_provision().is_none(),
+        "provisioning also waits for the report acknowledgement"
+    );
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceLeakRecorded(WorkspaceLeakRecorded {
+                correlation: report.page.correlation,
+                page_digest: report.page.page_digest,
+            }),
+        )
+        .await
+        .expect("report acknowledged");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("release deferred provision");
+    assert_eq!(
+        state
+            .retained_provision()
+            .expect("provision accepted after reconciliation")
+            .0,
+        &operation
+    );
+}
+
+#[tokio::test]
 async fn provisioning_rejects_all_unsettled_tool_authority() {
     check_workspace_tool_exclusion(false).await;
 }
 
 #[tokio::test]
-async fn release_rejects_all_unsettled_tool_authority() {
+async fn release_waits_for_all_unsettled_tool_authority() {
     check_workspace_tool_exclusion(true).await;
 }
 
@@ -1057,15 +1516,26 @@ async fn check_workspace_tool_exclusion(release: bool) {
         } else {
             Message::WorkspaceProvision(operation)
         };
-        assert!(
-            matches!(
-                runner.serve_message(&mut state, message).await,
-                Err(RunnerConnectionError::Violation(
-                    ProtocolViolation::LeaseMismatch
-                ))
-            ),
-            "{authority:?}"
-        );
+        let result = runner.serve_message(&mut state, message).await;
+        if release {
+            assert!(matches!(result, Ok(None)), "{authority:?}");
+            assert!(runner.deferred_release.is_some(), "{authority:?}");
+            runner
+                .advance_local(&mut state)
+                .await
+                .expect("deferred release stays blocked");
+            assert!(runner.deferred_release.is_some(), "{authority:?}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::LeaseMismatch
+                    ))
+                ),
+                "{authority:?}"
+            );
+        }
         assert_eq!(state.reconnect_inventory(), before, "{authority:?}");
         assert!(runner.workspace.is_none(), "{authority:?}");
     }
@@ -1167,4 +1637,90 @@ async fn restart_authenticates_pending_ready_before_and_after_activation() {
             .expect("exact published ready facts authenticate");
         assert_eq!(state.retained_provision(), Some((&request, Some(&ready))));
     }
+}
+
+#[tokio::test]
+async fn promotion_waits_for_the_startup_scan_and_report_acknowledgement() {
+    use signalbox_runner_wire::WorkspaceLeakRecorded;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let root = directory.path().join("state");
+    let mut state = RunnerStateRoot::open(&root).expect("private root");
+    let receipt = EnrollmentReceipt::new(
+        state.state().request_id(),
+        identity(),
+        identity(),
+        identity(),
+        positive(),
+        advertisement_digest(configuration().advertisement()).expect("digest"),
+        EnrollmentAuthority::ReplacementPending,
+    );
+    state
+        .record_receipt(receipt.clone())
+        .expect("pending receipt");
+    let enrollment_before =
+        std::fs::read(root.join("enrollment-state.json")).expect("enrollment document");
+    let store = state.workspace_store().expect("workspace store");
+    let runner_id = receipt.runner_id();
+    let (proceed, paused) = tokio::sync::oneshot::channel();
+    let scan = tokio::spawn(async move {
+        paused.await.expect("scan released");
+        store.scan_startup_leaks(runner_id).await
+    });
+    let (stream, hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut hub = BufReader::new(hub);
+    let mut runner = connection(stream, receipt.clone()).with_configuration(configuration());
+    runner.startup_report = leaks::StartupReport::Scanning(scan);
+    let promoted = signalbox_runner_wire::Enrolled {
+        request_id: receipt.request_id(),
+        enrollment_id: receipt.enrollment_id(),
+        runner_id: receipt.runner_id(),
+        authentication_id: receipt.authentication_id(),
+        registration_revision: receipt.registration_revision(),
+        advertisement_digest: receipt.advertisement_digest().clone(),
+        connection_epoch: positive(),
+    };
+    runner
+        .serve_message(&mut state, Message::Enrolled(promoted))
+        .await
+        .expect("promotion deferred");
+    assert_eq!(state.state().receipt(), Some(&receipt));
+    assert_eq!(runner.receipt, receipt);
+    assert_eq!(
+        std::fs::read(root.join("enrollment-state.json")).expect("enrollment document"),
+        enrollment_before
+    );
+    proceed.send(()).expect("finish scan");
+    runner.serve_one(&mut state).await.expect("scan completes");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("publish startup page");
+    let Message::WorkspaceLeakPage(report) = receive_message(&mut hub).await.expect("startup page")
+    else {
+        panic!("startup report");
+    };
+    assert!(
+        report.page.facts.is_empty(),
+        "runner state publications produce no diagnostic"
+    );
+    assert_eq!(state.state().receipt(), Some(&receipt));
+    runner
+        .serve_message(
+            &mut state,
+            Message::WorkspaceLeakRecorded(WorkspaceLeakRecorded {
+                correlation: report.page.correlation,
+                page_digest: report.page.page_digest,
+            }),
+        )
+        .await
+        .expect("report acknowledged");
+    runner
+        .advance_local(&mut state)
+        .await
+        .expect("apply deferred promotion");
+    assert_eq!(runner.receipt.authority(), EnrollmentAuthority::Active);
+    assert_eq!(state.state().receipt(), Some(&runner.receipt));
+    drop(state);
+    let reopened = RunnerStateRoot::open(&root).expect("restart after promotion");
+    assert_eq!(reopened.state().receipt(), Some(&runner.receipt));
 }
