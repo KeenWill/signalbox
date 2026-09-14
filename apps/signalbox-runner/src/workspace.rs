@@ -385,6 +385,12 @@ impl RunnerWorkspaceStore {
                 return Err(PrepareRepositoryWorkspaceError::Storage(open_error));
             }
         };
+        let mut cleanup = StagingCleanup {
+            parent: &session,
+            name: &staging_name,
+            directory: &staging,
+            published: false,
+        };
         let repository = open_or_create_directory(&staging, REPOSITORY_WORKSPACE_DIRECTORY)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let staging_execution_path = self
@@ -457,6 +463,7 @@ impl RunnerWorkspaceStore {
             return read_ready_repository_workspace(&placement, request, &execution_path)
                 .map_err(PrepareRepositoryWorkspaceError::Storage);
         }
+        cleanup.published = true;
         session
             .sync_all()
             .map_err(RunnerWorkspaceError::CommitAmbiguous)
@@ -466,6 +473,28 @@ impl RunnerWorkspaceStore {
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         read_ready_repository_workspace(&placement, request, &execution_path)
             .map_err(PrepareRepositoryWorkspaceError::Storage)
+    }
+}
+
+struct StagingCleanup<'a> {
+    parent: &'a File,
+    name: &'a str,
+    directory: &'a File,
+    published: bool,
+}
+
+impl Drop for StagingCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            let result = self
+                .directory
+                .try_clone()
+                .map_err(RunnerWorkspaceError::Io)
+                .and_then(|directory| release::finish_deletion(self.parent, self.name, directory));
+            if let Err(error) = result {
+                eprintln!("unpublished workspace staging cleanup failed: {error}");
+            }
+        }
     }
 }
 

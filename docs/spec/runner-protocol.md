@@ -136,11 +136,16 @@ commit, a branch and commit, or an `unborn_branch` with its name and no commit
 revision.
 
 An in-flight release keeps the same worker across physical connections.
+Authenticated resume reauthorizes the exact retained staging release under the
+new connection epoch before its completion is accepted. The daemon retains that
+reauthorization without changing the original release record; unrelated stale
+release receipts still fail the current-epoch check.
 
 The runner retains the complete provisioning request and ready receipt in its
 private journal. Restart recomputes the fixed path and authenticates the root
-and manifest, preserving session files. Equal replay retains the manifest
-identity and ready receipt. A changed repository mapping fails as
+and manifest, preserving session files. A cleanup guard removes unpublished
+repository staging on preparation failure or cancellation. Equal replay retains
+the manifest identity and ready receipt. A changed repository mapping fails as
 `manifest_conflict`. Reconnect admits only the exact stored daemon authorization
 under the unchanged registration, and the runner resends its authenticated
 receipt until acknowledgement activates the manifest and clears the journal. The

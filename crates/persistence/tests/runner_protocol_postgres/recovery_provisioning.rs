@@ -593,26 +593,27 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_rejected_staging_releases_only_its_exact_ready_workspace()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, false).await
+    rejected_staging_releases_ready_workspace(false, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_abandonment_releases_a_late_correlated_workspace_receipt()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(true, false).await
+    rejected_staging_releases_ready_workspace(true, false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
 -> Result<(), Box<dyn Error>> {
-    rejected_staging_releases_ready_workspace(false, true).await
+    rejected_staging_releases_ready_workspace(false, true, false).await
 }
 
 async fn rejected_staging_releases_ready_workspace(
     late_ready: bool,
     successor_epoch: bool,
+    reconnect_release: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
@@ -751,6 +752,71 @@ async fn rejected_staging_releases_ready_workspace(
             .await?,
         vec![ready.clone()]
     );
+    if reconnect_release {
+        store
+            .transition_connection(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await?;
+        let next = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert_ne!(next.epoch(), candidate_connection.epoch());
+        store
+            .reauthorize_replacement_workspace_release(
+                candidate.identities().enrollment(),
+                next.epoch(),
+                session,
+                ready.placement_revision,
+                ready.manifest_id,
+            )
+            .await?;
+        assert_eq!(
+            store
+                .replacement_workspace_releases(candidate.identities().enrollment())
+                .await?,
+            vec![ready.clone()]
+        );
+        store
+            .record_replacement_workspace_released(
+                candidate.identities().enrollment(),
+                session,
+                ready.placement_revision,
+                ready.runner,
+                ready.manifest_id,
+            )
+            .await?;
+        let next = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        store
+            .reauthorize_replacement_workspace_release(
+                candidate.identities().enrollment(),
+                next.epoch(),
+                session,
+                ready.placement_revision,
+                ready.manifest_id,
+            )
+            .await?;
+        store
+            .record_replacement_workspace_released(
+                candidate.identities().enrollment(),
+                session,
+                ready.placement_revision,
+                ready.runner,
+                ready.manifest_id,
+            )
+            .await?;
+        assert!(
+            store
+                .replacement_workspace_releases(candidate.identities().enrollment())
+                .await?
+                .is_empty()
+        );
+        return Ok(());
+    }
     if successor_epoch {
         store
             .transition_connection(
@@ -822,4 +888,11 @@ async fn rejected_staging_releases_ready_workspace(
             .is_empty()
     );
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn reconnect_reauthorizes_release_and_reconciles_completed_replay()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(false, false, true).await
 }

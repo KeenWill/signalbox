@@ -645,7 +645,9 @@ across transactions. A typed provisioning refusal and its exact detail commit
 with the command rejection before acknowledgement; equal replay rereads that
 evidence. Rejected staging workspaces retain exact manifest and connection-epoch
 cleanup authority, and a release receipt records completion only under that
-authority.
+authority. Authenticated resume appends reauthorization for the exact retained
+release and current connection epoch. The original release remains immutable;
+completion checks the most recent retained authorization.
 
 Runner status reads current enrollment authority, enrollment-request receipts,
 current session placements, and retained replacement-provisioning failures in

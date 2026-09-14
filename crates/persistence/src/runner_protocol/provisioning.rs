@@ -6,6 +6,52 @@ use signalbox_domain::{
 };
 
 impl RunnerProtocolStore {
+    /// Reauthorizes an exact journaled staging release on its owner's current connection.
+    pub async fn reauthorize_replacement_workspace_release(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        session: SessionId,
+        revision: RunnerGeneration,
+        manifest: WorkspaceManifestId,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+            .bind(session.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let authorization: Option<Uuid> = sqlx::query_scalar("SELECT operation.authorization_id
+            FROM runner_replacement_provisioning_authorization operation
+            JOIN replace_lost_runner_result result USING (command_id)
+            JOIN runner_replacement_workspace_ready ready USING (authorization_id)
+            JOIN runner_replacement_workspace_release cleanup USING (authorization_id)
+            JOIN runner_enrollment enrollment ON enrollment.enrollment_id = operation.registration_enrollment_id
+            JOIN runner_connection_authority_head head ON head.enrollment_id = enrollment.enrollment_id
+            JOIN runner_connection_event event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
+            WHERE enrollment.enrollment_id = $1 AND head.connection_epoch = $2 AND event.state_kind = 'connected'
+                AND enrollment.state_kind <> 'revoked' AND operation.session_id = $3
+                AND operation.placement_revision = $4 AND operation.runner_id = enrollment.runner_id AND ready.manifest_id = $5
+                AND result.result_kind = 'rejected'
+                AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption consumption WHERE consumption.authorization_id = operation.authorization_id)")
+            .bind(enrollment.into_uuid()).bind(Decimal::from(epoch.get())).bind(session.into_uuid())
+            .bind(Decimal::from(revision.get())).bind(manifest.into_uuid())
+            .fetch_optional(&mut *transaction).await?;
+        let authorization = authorization.ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ))?;
+        sqlx::query("INSERT INTO runner_replacement_workspace_release_reauthorization (authorization_id,connection_epoch) VALUES ($1,$2) ON CONFLICT DO NOTHING")
+            .bind(authorization).bind(Decimal::from(epoch.get())).execute(&mut *transaction).await?;
+        commit_mutation(transaction).await
+    }
+
     /// Loads only this candidate's command-retired, manifest-backed staging workspaces.
     pub async fn replacement_workspace_releases(
         &self,
@@ -16,10 +62,12 @@ impl RunnerProtocolStore {
             JOIN replace_lost_runner_result AS result USING (command_id)
             JOIN runner_replacement_workspace_ready AS ready USING (authorization_id)
             JOIN runner_replacement_workspace_release AS cleanup USING (authorization_id)
+            LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
+                FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
             JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
             WHERE operation.registration_enrollment_id = $1 AND result.result_kind = 'rejected'
-              AND cleanup.connection_epoch = head.connection_epoch
-              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < cleanup.connection_epoch)
+              AND COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch) = head.connection_epoch
+              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
               AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_released AS released WHERE released.authorization_id = operation.authorization_id)")
             .bind(enrollment.into_uuid()).fetch_all(&mut *connection).await?;
         let mut workspaces = Vec::new();
@@ -61,12 +109,14 @@ impl RunnerProtocolStore {
             JOIN replace_lost_runner_result AS result USING (command_id)
             JOIN runner_replacement_workspace_ready AS ready USING (authorization_id)
             JOIN runner_replacement_workspace_release AS cleanup USING (authorization_id)
+            LEFT JOIN LATERAL (SELECT max(connection_epoch) AS connection_epoch
+                FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = cleanup.authorization_id) reauthorization ON true
             JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
             WHERE operation.registration_enrollment_id = $1 AND operation.session_id = $2
               AND operation.placement_revision = $3 AND operation.runner_id = $4
               AND ready.manifest_id = $5 AND result.result_kind = 'rejected'
-              AND cleanup.connection_epoch = head.connection_epoch
-              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < cleanup.connection_epoch)
+              AND COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch) = head.connection_epoch
+              AND (head.latest_loss_epoch IS NULL OR head.latest_loss_epoch < COALESCE(reauthorization.connection_epoch, cleanup.connection_epoch))
               AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_consumption AS consumption WHERE consumption.authorization_id = operation.authorization_id)")
             .bind(enrollment.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
             .bind(runner.into_uuid()).bind(manifest.into_uuid()).fetch_optional(&mut *transaction).await?;

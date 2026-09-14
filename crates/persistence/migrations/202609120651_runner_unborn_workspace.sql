@@ -21,3 +21,13 @@ ALTER TABLE runner_replacement_provisioning_authorization
     DROP CONSTRAINT runner_replacement_repository_recovery_pair,
     ADD CONSTRAINT runner_replacement_repository_recovery_pair
         CHECK ((repository_key IS NULL) = (checkout_revision IS NULL AND checkout_branch IS NULL));
+
+CREATE TABLE runner_replacement_workspace_release_reauthorization (
+    authorization_id uuid NOT NULL REFERENCES runner_replacement_workspace_release(authorization_id),
+    connection_epoch numeric(20,0) NOT NULL CHECK (connection_epoch >= 1),
+    PRIMARY KEY (authorization_id, connection_epoch)
+);
+
+CREATE TRIGGER runner_replacement_workspace_release_reauthorization_is_append_only
+    BEFORE UPDATE OR DELETE ON runner_replacement_workspace_release_reauthorization
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();

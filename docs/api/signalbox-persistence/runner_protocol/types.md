@@ -615,6 +615,14 @@ impl runner_protocol::RunnerProtocolStore {
     ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
 }
 impl runner_protocol::RunnerProtocolStore {
+    pub async fn reauthorize_replacement_workspace_release(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        session: signalbox_domain::SessionId,
+        revision: signalbox_domain::RunnerGeneration,
+        manifest: signalbox_domain::WorkspaceManifestId,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn replacement_workspace_releases(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
