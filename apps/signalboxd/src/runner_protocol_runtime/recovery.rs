@@ -231,13 +231,18 @@ impl PostgresRunnerRegistrationService {
                     error,
                 )
             };
-            let epoch = self
-                .store
-                .load_connection(enrollment)
-                .await
-                .map_err(stored_error)?
-                .ok_or_else(rejected)?
-                .epoch();
+            let epoch = match epoch {
+                Some(epoch) => {
+                    RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(rejected)?
+                }
+                None => self
+                    .store
+                    .load_connection(enrollment)
+                    .await
+                    .map_err(stored_error)?
+                    .ok_or_else(rejected)?
+                    .epoch(),
+            };
             self.store
                 .record_tool_lease_failure(
                     enrollment,
