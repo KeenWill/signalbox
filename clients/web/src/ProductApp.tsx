@@ -235,6 +235,7 @@ function CommandPalette({
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   const focusSearchAfterClose = useRef(false)
+  const commandAfterClose = useRef<ProductCommandId | null>(null)
   return (
     <Dialog.Root
       open={open}
@@ -249,6 +250,13 @@ function CommandPalette({
           aria-describedby="product-palette-description"
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
+            if (commandAfterClose.current) {
+              event.preventDefault()
+              const command = commandAfterClose.current
+              commandAfterClose.current = null
+              invokeProductCommand(command, context)
+              return
+            }
             if (focusSearchAfterClose.current) {
               event.preventDefault()
               focusSearchAfterClose.current = false
@@ -296,13 +304,15 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    commandAfterClose.current =
+                      command.id === 'session.title.suggest' ? command.id : null
                     focusSearchAfterClose.current = command.id === 'search.focus'
                     focusTimelineAfterClose.current =
                       command.id.startsWith('selection.') &&
                       productCommandAvailable(command.id, context)
                     if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
                     invokeProductCommand('surface.escape', context)
-                    invokeProductCommand(command.id, context)
+                    if (!commandAfterClose.current) invokeProductCommand(command.id, context)
                   }}
                 >
                   <span>
@@ -607,6 +617,9 @@ export function ProductApp({
     attempt: number
   } | null>(null)
   const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
+  const [catalogSuggestCommand, setCatalogSuggestCommand] = useState<{ run: () => void } | null>(
+    null,
+  )
   const [retainedNavigationLock, setNavigationDisabled] = useState(
     () => loadRetainedCommand('production') !== null,
   )
@@ -693,6 +706,8 @@ export function ProductApp({
       ...surfaceContext,
       dispatch,
       getState: store.getState,
+      suggestSessionTitle:
+        surface === 'sessions' && !sessionState.workspace ? catalogSuggestCommand?.run : undefined,
       timelineIds: surfaceContext === null ? timelineIds : surfaceContext.timelineIds,
       artifactPreviewIds: [],
       artifactOriginalIds: [],
@@ -774,6 +789,7 @@ export function ProductApp({
     bootstrap.isSuccess,
     dispatch,
     importsCommandContext,
+    catalogSuggestCommand,
     navigate,
     navigationDisabled,
     sessionState,
@@ -923,6 +939,8 @@ export function ProductApp({
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
       <SessionCatalogSurface
+        commandContext={context}
+        onSuggestCommand={setCatalogSuggestCommand}
         returnSessionId={catalogReturnSessionId.current}
         onReturnFocusConsumed={consumeCatalogReturnFocus}
         needsAttention={sessionState.needsAttention === true}

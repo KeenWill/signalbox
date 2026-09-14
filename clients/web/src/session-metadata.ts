@@ -1,6 +1,7 @@
 import {
   decodeWebApiErrorResponse,
   decodeWebSessionTitleRequest,
+  decodeWebSessionTitleSuggestion,
   type WebSessionCatalogSnapshot,
   type WebSessionTitleRequest,
 } from './generated/web-contract.mjs'
@@ -82,5 +83,23 @@ export async function renameSession(sessionId: string, request: WebSessionTitleR
     throw failure
   } finally {
     clearTimeout(deadline)
+  }
+}
+
+export async function suggestSessionTitle(sessionId: string) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title/suggest`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: '{}',
+  })
+  const body = await readBoundedJson(response)
+  if (!response.ok) {
+    throw new ProductRequestError(response.status, decodeWebApiErrorResponse(body))
+  }
+  try {
+    return decodeWebSessionTitleSuggestion(body)
+  } catch (failure) {
+    throw new Error('The suggested name could not be read. Try again.', { cause: failure })
   }
 }

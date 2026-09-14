@@ -73,10 +73,18 @@ async fn a_replaced_connection_cannot_record_or_replay_workspace_ready()
     provision_with_candidate_capabilities(ProvisionCase::StaleReady).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn changed_registration_cannot_dispatch_a_prior_workspace_authorization()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::RegistrationChanged).await
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProvisionCase {
     Supported,
     Reconnected,
+    RegistrationChanged,
     StaleReady,
     RetiredWorkspace,
     UnbornRepository,
@@ -165,6 +173,7 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         case,
         ProvisionCase::Supported
             | ProvisionCase::Reconnected
+            | ProvisionCase::RegistrationChanged
             | ProvisionCase::StaleReady
             | ProvisionCase::RetiredWorkspace
             | ProvisionCase::UnbornRepository
@@ -469,6 +478,69 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
             )
             .await?;
     }
+    if case == ProvisionCase::RegistrationChanged {
+        let active = store
+            .load_enrollment(candidate.identities().enrollment())
+            .await?
+            .expect("promoted owner");
+        store.register(&active, narrowed_advertisement()).await?;
+        append_runner_registration_loss_projection(&pool, session).await?;
+        let restored = store.register(&active, advertisement()).await?;
+        let retry = signalbox_domain::ReplaceLostRunner {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            revision: None,
+        };
+        assert_eq!(
+            store.replace_lost_runner(retry).await?,
+            RunnerRecoveryOutcome::Pending
+        );
+        let pending = store
+            .replacement_provisioning(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch(),
+            )
+            .await?;
+        assert_eq!(pending.len(), 1);
+        let updated = store
+            .resume_registration(
+                candidate.request(),
+                candidate.identities(),
+                restored.revision(),
+                advertisement().with_default_working_directory(Some(
+                    RunnerWorkingDirectory::try_new("/updated-workspace".to_owned())
+                        .expect("changed directory"),
+                )),
+            )
+            .await?;
+        assert_ne!(
+            updated.registration().revision().get(),
+            pending[0].registration_revision.get()
+        );
+        let next = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert!(
+            store
+                .replacement_provisioning(candidate.identities().enrollment(), next.epoch())
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .replacement_provisioning_authorization(pending[0].authorization)
+                .await?,
+            Some(pending[0].clone())
+        );
+        assert_eq!(
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?
+                .expect("live successor")
+                .state(),
+            RunnerConnectionState::Connected
+        );
+    }
     if case == ProvisionCase::UnbornRepository {
         let persisted: (String, Option<String>, String) = sqlx::query_as("SELECT workspace_recovery_kind, workspace_revision, workspace_branch_name FROM runner_session_placement_record WHERE session_id = $1 AND workspace_manifest_id = $2")
             .bind(session.into_uuid()).bind(ready.manifest_id.into_uuid()).fetch_one(&pool).await?;
@@ -542,6 +614,16 @@ fn private_workspace(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
 -> Result<(), Box<dyn Error>> {
+    provisioning_failure_fixture(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provisioning_failure_rejects_fenced_frames_and_replays() -> Result<(), Box<dyn Error>> {
+    provisioning_failure_fixture(true).await
+}
+
+async fn provisioning_failure_fixture(fenced: bool) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -577,7 +659,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
             authorized(INITIAL_PHYSICAL_ATTEMPT),
             offer_request(),
         )
-        .unwrap();
+        .expect("retained provisioning fixture authority");
     let connection = store
         .open_connection(predecessor.identities().enrollment())
         .await?;
@@ -617,13 +699,52 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
     let detail = serde_json::json!({"code": "fixture_refusal", "message": "workspace unavailable", "payload": {}});
     let kind = signalbox_domain::RunnerProvisioningFailureKind::SandboxUnavailable;
 
+    let old_epoch = candidate_connection.epoch();
+    let candidate_connection = if fenced {
+        let current = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert!(
+            store
+                .record_replacement_provisioning_failure(authorization, old_epoch, kind, &detail)
+                .await
+                .is_err()
+        );
+        let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_provisioning_failure WHERE authorization_id = $1")
+            .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(retained, 0);
+        current
+    } else {
+        candidate_connection
+    };
     store
-        .record_replacement_provisioning_failure(authorization, kind, &detail)
+        .record_replacement_provisioning_failure(
+            authorization,
+            candidate_connection.epoch(),
+            kind,
+            &detail,
+        )
         .await?;
     store
-        .record_replacement_provisioning_failure(authorization, kind, &detail)
+        .record_replacement_provisioning_failure(
+            authorization,
+            candidate_connection.epoch(),
+            kind,
+            &detail,
+        )
         .await?;
 
+    if fenced {
+        assert!(
+            store
+                .record_replacement_provisioning_failure(authorization, old_epoch, kind, &detail)
+                .await
+                .is_err()
+        );
+    }
+    store
+        .reconcile_replacement_provisioning_failure(authorization, kind, &detail)
+        .await?;
     let rejected =
         RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
             signalbox_domain::RunnerRecoveryRejection::ProvisioningFailed,
@@ -637,6 +758,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
         store
             .record_replacement_provisioning_failure(
                 authorization,
+                candidate_connection.epoch(),
                 kind,
                 &serde_json::json!({"changed": true})
             )
@@ -647,7 +769,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
         store
             .load_enrollment(candidate.identities().enrollment())
             .await?
-            .unwrap()
+            .expect("retained provisioning fixture authority")
             .state(),
         RunnerEnrollmentState::Pending
     );
@@ -940,6 +1062,17 @@ async fn rejected_staging_releases_ready_workspace(
     let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
+    store
+        .transition_connection(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+            RunnerConnectionTransition::DaemonShutdown,
+        )
+        .await?;
+    let candidate_connection = store
+        .open_connection(candidate.identities().enrollment())
+        .await?;
+    assert!(candidate_connection.epoch().get() > 1);
     let command = signalbox_domain::ReplaceLostRunner {
         command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
         session,
@@ -1418,6 +1551,28 @@ async fn startup_report_matches_the_retained_release_leak(
     assert_eq!(
         rows, 1,
         "manifest-free trash reconciles the retained release diagnostic"
+    );
+    let empty_digest = leak_report_digest(&[])?;
+    let empty = super::status::report_page(&empty_digest, 1, None, true, &[]);
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("current owner")
+                .epoch(),
+            &empty,
+        )
+        .await?;
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak WHERE runner_id = $1")
+            .bind(ready.runner.into_uuid())
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(
+        retained, 1,
+        "independent release outcome survives an empty report"
     );
     Ok(())
 }

@@ -6,10 +6,33 @@ use signalbox_domain::{
 };
 
 impl RunnerProtocolStore {
-    /// Records an exact provisioning refusal and settles its owning command atomically.
+    /// Records a live provisioning refusal under its caller's current epoch.
     pub async fn record_replacement_provisioning_failure(
         &self,
         authorization: &RunnerReplacementProvisioning,
+        epoch: RunnerConnectionEpoch,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &serde_json::Value,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_replacement_provisioning_failure(authorization, Some(epoch), kind, detail)
+            .await
+    }
+
+    /// Reconciles authenticated Resume failure evidence before opening its next epoch.
+    pub async fn reconcile_replacement_provisioning_failure(
+        &self,
+        authorization: &RunnerReplacementProvisioning,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &serde_json::Value,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        self.store_replacement_provisioning_failure(authorization, None, kind, detail)
+            .await
+    }
+
+    async fn store_replacement_provisioning_failure(
+        &self,
+        authorization: &RunnerReplacementProvisioning,
+        epoch: Option<RunnerConnectionEpoch>,
         kind: signalbox_domain::RunnerProvisioningFailureKind,
         detail: &serde_json::Value,
     ) -> Result<(), RunnerProtocolStoreError> {
@@ -25,6 +48,29 @@ impl RunnerProtocolStore {
             .bind(authorization.session.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(authorization.enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(authorization.enrollment.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if let Some(epoch) = epoch {
+            let current =
+                load_connection_head_in(transaction.as_mut(), authorization.enrollment).await?;
+            if !current.is_some_and(|head| {
+                head.epoch() == epoch
+                    && matches!(
+                        head.state(),
+                        RunnerConnectionState::Connected | RunnerConnectionState::Suspect
+                    )
+            }) {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::CorrelationMismatch,
+                ));
+            }
+        }
         let row = sqlx::query("SELECT * FROM runner_replacement_provisioning_authorization WHERE authorization_id = $1")
             .bind(authorization.authorization.into_uuid()).fetch_one(&mut *transaction).await?;
         if decode_authorization(&row)? != *authorization {
@@ -79,6 +125,7 @@ impl RunnerProtocolStore {
         let rows = sqlx::query(
             "SELECT operation.* FROM runner_replacement_provisioning_authorization AS operation
              JOIN runner_replacement_stage AS stage USING (command_id)
+             JOIN runner_current_registration AS registration ON registration.enrollment_id = operation.registration_enrollment_id AND registration.registration_revision = operation.registration_revision
              JOIN runner_connection_authority_head AS head ON head.enrollment_id = operation.registration_enrollment_id
              JOIN runner_connection_event AS event ON event.enrollment_id = head.enrollment_id AND event.connection_epoch = head.connection_epoch AND event.event_ordinal = head.connection_event_ordinal
              WHERE operation.registration_enrollment_id = $1 AND head.connection_epoch = $2
@@ -333,7 +380,7 @@ pub(super) async fn release_rejected_replacement_workspace(
         SELECT operation.runner_id,ready.relative_path,ready.manifest_digest,'retired_present',operation.session_id,operation.placement_revision
         FROM runner_replacement_provisioning_authorization operation JOIN runner_replacement_workspace_ready ready USING (authorization_id)
         WHERE operation.command_id = $1 AND NOT EXISTS (SELECT 1 FROM runner_workspace_release release WHERE release.manifest_id = ready.manifest_id)
-        ON CONFLICT DO NOTHING")
+        ON CONFLICT (runner_id,locator,entry_digest) DO UPDATE SET report_derived = false")
         .bind(command.into_uuid()).execute(connection).await?;
     Ok(())
 }

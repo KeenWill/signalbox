@@ -91,6 +91,7 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
         store
             .record_replacement_provisioning_failure(
                 &authorization,
+                candidate_connection.epoch(),
                 signalbox_domain::RunnerProvisioningFailureKind::SandboxUnavailable,
                 &detail,
             )
@@ -632,5 +633,100 @@ async fn startup_diagnostics_resume_reconciles_before_opening_an_epoch()
         .fetch_one(&pool)
         .await?;
     assert_eq!(retained, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn complete_startup_reports_replace_only_report_derived_diagnostics()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    let epoch = store.open_connection(enrollment).await?.epoch();
+    let original = report_fact(0);
+    let mut changed = original.clone();
+    changed.entry_digest = report_fact(1).entry_digest;
+    changed.kind = signalbox_runner_wire::LeakFactKind::ManifestConflict;
+    let empty_digest = signalbox_runner_wire::leak_report_digest(&[])?;
+    let empty = report_page(&empty_digest, 1, None, true, &[]);
+    store
+        .record_workspace_leak_page(enrollment, epoch, &empty)
+        .await?;
+    for fact in [&original, &changed, &original] {
+        let facts = [fact.clone()];
+        let digest = signalbox_runner_wire::leak_report_digest(&facts)?;
+        let page = report_page(&digest, 1, None, true, &facts);
+        store
+            .record_workspace_leak_page(enrollment, epoch, &page)
+            .await?;
+        let retained: Vec<String> = sqlx::query_scalar(
+            "SELECT entry_digest FROM runner_workspace_leak WHERE runner_id = $1",
+        )
+        .bind(receipt.identities().runner().into_uuid())
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(retained, [fact.entry_digest.as_str()]);
+    }
+    store
+        .record_workspace_leak_page(enrollment, epoch, &empty)
+        .await?;
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(retained, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn incomplete_startup_report_keeps_prior_diagnostics() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    let epoch = store.open_connection(enrollment).await?.epoch();
+    let old = [report_fact(0)];
+    let old_digest = signalbox_runner_wire::leak_report_digest(&old)?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            epoch,
+            &report_page(&old_digest, 1, None, true, &old),
+        )
+        .await?;
+    // A non-final protocol page carries exactly 64 facts.
+    let facts: Vec<_> = (1..=65).map(report_fact).collect();
+    let digest = signalbox_runner_wire::leak_report_digest(&facts)?;
+    let first = report_page(&digest, 1, None, false, &facts[..64]);
+    store
+        .record_workspace_leak_page(enrollment, epoch, &first)
+        .await?;
+    let retained: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_workspace_leak WHERE locator = $1)",
+    )
+    .bind(&old[0].locator)
+    .fetch_one(&pool)
+    .await?;
+    assert!(retained);
+    let prior = signalbox_runner_wire::Digest::try_new(first.page_digest.as_str().to_owned())?;
+    let last = report_page(&digest, 2, Some(&prior), true, &facts[64..]);
+    store
+        .record_workspace_leak_page(enrollment, epoch, &last)
+        .await?;
+    let retained: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runner_workspace_leak WHERE locator = $1)",
+    )
+    .bind(&old[0].locator)
+    .fetch_one(&pool)
+    .await?;
+    assert!(!retained);
     Ok(())
 }
