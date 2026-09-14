@@ -150,6 +150,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn replacement_releases(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceRelease>>;
     /// Acknowledges one exact completed staging cleanup.
     fn workspace_released(
@@ -167,6 +168,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn replacement_operations(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>>;
 
     /// Retains an exact ready receipt and installs it when its boundary is available.
@@ -1336,8 +1338,9 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn replacement_releases(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceRelease>> {
-        Box::pin(self.replacement_releases_durably(enrollment))
+        Box::pin(self.replacement_releases_durably(enrollment, epoch))
     }
     fn workspace_released(
         &self,
@@ -1356,8 +1359,9 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn replacement_operations(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>> {
-        Box::pin(self.replacement_operations_durably(enrollment))
+        Box::pin(self.replacement_operations_durably(enrollment, epoch))
     }
 
     fn workspace_ready(
@@ -2414,7 +2418,7 @@ where
                             write_message(&mut writer, Message::Enrolled(receipt)).await?;
                             sent_promotion = true;
                         }
-                        let operation = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next();
+                        let operation = service.replacement_operations(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next();
                         if let Some(operation) = operation
                             && busy_lease.is_none() && busy_provision.is_none() && busy_release.is_none()
                             && sent_provisions.insert(operation.correlation.authorization_id)
@@ -2423,7 +2427,7 @@ where
                             write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
                         }
                         if busy_lease.is_none() && busy_provision.is_none() && busy_release.is_none()
-                            && let Some(release) = service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next() {
+                            && let Some(release) = service.replacement_releases(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next() {
                             busy_release = Some(release.correlation.clone());
                             write_message(&mut writer, Message::WorkspaceRelease(release)).await?;
                         }
@@ -3116,6 +3120,7 @@ mod tests {
         fn replacement_releases(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
         ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceRelease>> {
             Box::pin(async { Ok(Vec::new()) })
         }
@@ -3148,6 +3153,7 @@ mod tests {
         fn replacement_operations(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
         ) -> RunnerRegistrationFuture<'_, Vec<signalbox_runner_wire::WorkspaceProvision>> {
             Box::pin(std::future::ready(Ok(self
                 .queued_work

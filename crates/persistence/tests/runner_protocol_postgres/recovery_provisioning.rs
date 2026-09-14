@@ -35,9 +35,16 @@ async fn unborn_repository_placement_and_replacement_receipt_round_trip_without_
     provision_with_candidate_capabilities(ProvisionCase::UnbornRepository).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_replaced_connection_cannot_load_workspace_provisioning() -> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::Reconnected).await
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProvisionCase {
     Supported,
+    Reconnected,
     UnbornRepository,
     Unsupported,
     RevisionWithoutRepository,
@@ -111,7 +118,7 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         )
     };
     let candidate = store.enroll_pristine(request).await?.into_receipt();
-    let candidate_connection = store
+    let mut candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
     let command = signalbox_domain::ReplaceLostRunner {
@@ -122,7 +129,7 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     };
     if !matches!(
         case,
-        ProvisionCase::Supported | ProvisionCase::UnbornRepository
+        ProvisionCase::Supported | ProvisionCase::UnbornRepository | ProvisionCase::Reconnected
     ) {
         let rejected =
             RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
@@ -150,8 +157,24 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         store.replace_lost_runner(command.clone()).await?,
         RunnerRecoveryOutcome::Pending
     );
+    if case == ProvisionCase::Reconnected {
+        let prior_epoch = candidate_connection.epoch();
+        candidate_connection = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert_ne!(candidate_connection.epoch(), prior_epoch);
+        assert!(
+            store
+                .replacement_provisioning(candidate.identities().enrollment(), prior_epoch)
+                .await?
+                .is_empty()
+        );
+    }
     let operations = store
-        .replacement_provisioning(candidate.identities().enrollment())
+        .replacement_provisioning(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+        )
         .await?;
     if case == ProvisionCase::Supported {
         let mut malformed = pool.begin().await?;
@@ -175,7 +198,10 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     );
     assert_eq!(
         store
-            .replacement_provisioning(candidate.identities().enrollment())
+            .replacement_provisioning(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch()
+            )
             .await?,
         operations
     );
@@ -391,7 +417,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
         .enroll_pristine(enrollment_request())
         .await?
         .into_receipt();
-    store
+    let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
     let command = signalbox_domain::ReplaceLostRunner {
@@ -405,7 +431,10 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
     );
 
     let operations = store
-        .replacement_provisioning(candidate.identities().enrollment())
+        .replacement_provisioning(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+        )
         .await?;
     let authorization = &operations[0];
     let detail = serde_json::json!({"code": "fixture_refusal", "message": "workspace unavailable", "payload": {}});
@@ -447,7 +476,10 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
     );
     assert!(
         store
-            .replacement_provisioning(candidate.identities().enrollment())
+            .replacement_provisioning(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch()
+            )
             .await?
             .is_empty()
     );
@@ -521,7 +553,7 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
         .enroll_pristine(enrollment_request())
         .await?
         .into_receipt();
-    store
+    let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
     let command = signalbox_domain::ReplaceLostRunner {
@@ -535,7 +567,10 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
     );
 
     let operations = store
-        .replacement_provisioning(candidate.identities().enrollment())
+        .replacement_provisioning(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+        )
         .await?;
     let authorization = &operations[0];
     let ready = private_workspace(
@@ -577,7 +612,10 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
     );
     assert!(
         store
-            .replacement_workspace_releases(candidate.identities().enrollment())
+            .replacement_workspace_releases(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch()
+            )
             .await?
             .is_empty()
     );
@@ -667,7 +705,7 @@ async fn rejected_staging_releases_ready_workspace(
         .enroll_pristine(enrollment_request())
         .await?
         .into_receipt();
-    store
+    let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
     let command = signalbox_domain::ReplaceLostRunner {
@@ -681,7 +719,10 @@ async fn rejected_staging_releases_ready_workspace(
     );
 
     let operations = store
-        .replacement_provisioning(candidate.identities().enrollment())
+        .replacement_provisioning(
+            candidate.identities().enrollment(),
+            candidate_connection.epoch(),
+        )
         .await?;
     let authorization = &operations[0];
     let ready = private_workspace(
@@ -748,7 +789,10 @@ async fn rejected_staging_releases_ready_workspace(
         .await?;
     assert_eq!(
         store
-            .replacement_workspace_releases(candidate.identities().enrollment())
+            .replacement_workspace_releases(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch()
+            )
             .await?,
         vec![ready.clone()]
     );
@@ -773,9 +817,18 @@ async fn rejected_staging_releases_ready_workspace(
                 ready.manifest_id,
             )
             .await?;
+        assert!(
+            store
+                .replacement_workspace_releases(
+                    candidate.identities().enrollment(),
+                    candidate_connection.epoch()
+                )
+                .await?
+                .is_empty()
+        );
         assert_eq!(
             store
-                .replacement_workspace_releases(candidate.identities().enrollment())
+                .replacement_workspace_releases(candidate.identities().enrollment(), next.epoch())
                 .await?,
             vec![ready.clone()]
         );
@@ -811,7 +864,7 @@ async fn rejected_staging_releases_ready_workspace(
             .await?;
         assert!(
             store
-                .replacement_workspace_releases(candidate.identities().enrollment())
+                .replacement_workspace_releases(candidate.identities().enrollment(), next.epoch())
                 .await?
                 .is_empty()
         );
@@ -840,7 +893,10 @@ async fn rejected_staging_releases_ready_workspace(
         assert_ne!(successor.epoch(), candidate_connection.epoch());
         assert!(
             store
-                .replacement_workspace_releases(candidate.identities().enrollment())
+                .replacement_workspace_releases(
+                    candidate.identities().enrollment(),
+                    successor.epoch()
+                )
                 .await?
                 .is_empty()
         );
@@ -892,7 +948,10 @@ async fn rejected_staging_releases_ready_workspace(
         .await?;
     assert!(
         store
-            .replacement_workspace_releases(candidate.identities().enrollment())
+            .replacement_workspace_releases(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch()
+            )
             .await?
             .is_empty()
     );

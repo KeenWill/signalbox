@@ -634,6 +634,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn replacement_workspace_releases(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
     ) -> result::Result<
         vec::Vec<signalbox_domain::ProvisionedWorkspace>,
         runner_protocol::RunnerProtocolStoreError,
@@ -662,6 +663,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn replacement_provisioning(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
     ) -> result::Result<
         vec::Vec<signalbox_domain::RunnerReplacementProvisioning>,
         runner_protocol::RunnerProtocolStoreError,

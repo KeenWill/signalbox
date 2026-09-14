@@ -80,10 +80,21 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn replacement_releases_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> Result<Vec<signalbox_runner_wire::WorkspaceRelease>, RunnerRegistrationFailure> {
+        let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceRelease,
+                AvailableCorrelation::ConnectionEpoch(epoch),
+                RejectionCode::CorrelationMismatch,
+            )
+        })?;
         let workspaces = self
             .store
-            .replacement_workspace_releases(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
+            .replacement_workspace_releases(
+                RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                epoch,
+            )
             .await
             .map_err(|error| {
                 store_failure(
@@ -213,10 +224,18 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn replacement_operations_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> Result<Vec<WorkspaceProvision>, RunnerRegistrationFailure> {
+        let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceProvision,
+                AvailableCorrelation::ConnectionEpoch(epoch),
+                RejectionCode::CorrelationMismatch,
+            )
+        })?;
         let operations = self
             .store
-            .replacement_provisioning(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
+            .replacement_provisioning(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()), epoch)
             .await
             .map_err(|error| {
                 store_failure(
