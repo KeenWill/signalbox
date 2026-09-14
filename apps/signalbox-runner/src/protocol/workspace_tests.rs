@@ -245,6 +245,63 @@ async fn restart_rejects_a_changed_repository_mapping_before_cloning() {
 }
 
 #[tokio::test]
+async fn restart_rejects_a_changed_repository_mapping_after_ready() {
+    use signalbox_runner_wire::clone_url_digest;
+    let directory = tempfile::tempdir().expect("temporary parent");
+    let original_url = "https://github.com/KeenWill/signalbox.git";
+    let changed_url = "https://github.com/KeenWill/changed-repository.git";
+    let original = configuration();
+    let changed = crate::RunnerConfiguration::parse(
+        &include_str!("../../../../config/signalbox-runner.example.toml")
+            .replace("credential_profile = \"github-runner\"", "")
+            .replace(original_url, changed_url),
+    )
+    .expect("changed anonymous mapping");
+    let mut state = enrolled_with_configuration(&directory, &original);
+    let receipt = state.state().receipt().expect("receipt").clone();
+    let request = provision(&receipt);
+    state
+        .record_provision(request.clone(), clone_url_digest(original_url))
+        .expect("journal before workspace preparation");
+    let ready = prepared_repository(&state, request.clone()).await;
+    state
+        .record_workspace_ready(ready.clone())
+        .expect("retained ready receipt");
+    drop(state);
+
+    let root = directory.path().join("state");
+    let mut state = RunnerStateRoot::open(&root).expect("restart with retained ready receipt");
+    assert!(matches!(
+        state.authenticate_active_workspaces(&changed),
+        Err(crate::WorkspaceProvisionError::ManifestConflict)
+    ));
+    let (stream, _hub) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let mut runner = connection(stream, receipt).with_configuration(changed);
+    assert!(matches!(
+        runner.ensure_workspace(&mut state),
+        Err(RunnerConnectionError::Workspace(
+            crate::WorkspaceProvisionError::ManifestConflict
+        ))
+    ));
+    assert_eq!(state.retained_provision(), Some((&request, Some(&ready))));
+    assert!(state.retained_provision_failure().is_none());
+    drop(state);
+    let reopened = RunnerStateRoot::open(&root).expect("restart preserves the ready receipt");
+    assert_eq!(
+        reopened.retained_provision(),
+        Some((&request, Some(&ready)))
+    );
+    assert_eq!(
+        reopened.retained_provision_clone_url_digest(),
+        Some(&clone_url_digest(original_url))
+    );
+    assert!(reopened.retained_provision_failure().is_none());
+    reopened
+        .authenticate_active_workspaces(&original)
+        .expect("restoring the original mapping authenticates the retained receipt");
+}
+
+#[tokio::test]
 async fn anonymous_clone_failure_is_retained_while_the_runner_keeps_serving() {
     failed_anonymous_clone(false).await;
 }
