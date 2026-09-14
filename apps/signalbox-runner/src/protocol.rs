@@ -889,7 +889,7 @@ where
             signalbox_runner_wire::DetailName::try_new(code.to_owned())
                 .map_err(|_| lease_mismatch())?,
             "The runner cannot admit the offered operation".to_owned(),
-            serde_json::json!({"working_directory":offer.correlation.working_directory.as_str()}),
+            serde_json::json!({}),
         )
         .map_err(|_| lease_mismatch())?;
         state.record_offer_refusal(signalbox_runner_wire::OperationFailure {

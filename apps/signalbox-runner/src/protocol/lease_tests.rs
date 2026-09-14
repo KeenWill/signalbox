@@ -802,15 +802,9 @@ async fn refused_offer_is_retained_until_acknowledgement_and_runner_keeps_servin
     let parent = TempDir::new().expect("fixture parent");
     let (mut state, mut connection, mut hub, mut offer) = fixture(&parent);
     let valid_directory = offer.correlation.working_directory.clone();
-    offer.correlation.working_directory = WorkingDirectory::try_new(
-        parent
-            .path()
-            .join("absent")
-            .to_str()
-            .expect("fixture path")
-            .to_owned(),
-    )
-    .expect("absolute path");
+    offer.correlation.working_directory =
+        WorkingDirectory::try_new(format!("/{}", "absent".repeat(500)))
+            .expect("oversized failure diagnostic path");
     connection
         .serve_message(&mut state, Message::LeaseOffer(offer.clone()))
         .await
