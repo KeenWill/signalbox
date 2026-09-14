@@ -591,13 +591,16 @@ impl RunnerStateRoot {
             .acknowledge_leak_page(&self.directory, correlation)
     }
 
-    /// Authenticates retained ready mappings and acknowledged identities before reconnecting.
+    /// Authenticates retained ready placements and acknowledged identities before reconnecting.
     pub fn authenticate_active_workspaces(
         &self,
         configuration: &crate::RunnerConfiguration,
     ) -> Result<(), crate::WorkspaceProvisionError> {
         use crate::WorkspaceProvisionError;
-        if let Some((request, Some(_))) = self.journal.provision() {
+        let store = self
+            .workspace_store()
+            .map_err(|_| WorkspaceProvisionError::Storage)?;
+        if let Some((request, Some(ready))) = self.journal.provision() {
             let checked = crate::workspace::provision::CheckedProvision::check(
                 configuration,
                 request.clone(),
@@ -608,10 +611,10 @@ impl RunnerStateRoot {
             {
                 return Err(WorkspaceProvisionError::ManifestConflict);
             }
+            store
+                .authenticate_pending_ready(ready)
+                .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
         }
-        let store = self
-            .workspace_store()
-            .map_err(|_| WorkspaceProvisionError::Storage)?;
         for active in self.active_workspaces.records.values() {
             if self.journal.release().is_some_and(|(release, _, _)| {
                 release.manifest_id == active.ready.ready.manifest.manifest_id
