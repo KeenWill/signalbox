@@ -71,13 +71,6 @@ prove that namespace and bind behavior. File tools use descriptor-relative
 traversal beneath the writable root and refuse symlinks, magic links, device
 nodes, sockets, and path escape.
 
-For `ambient` the runner uses one labeled bubblewrap supervisor but binds the
-invoking user's filesystem and shares host networking, so it supervises without
-confining. Its full user powers include read access to every same-user-readable
-path, including ungranted runner credential files and daemon model-provider
-credential files when their paths are discoverable. Explicit profile selection
-accepts that exposure.
-
 ### Egress broker
 
 The restricted network namespace has no host interface. A namespace-local shim

@@ -1,6 +1,7 @@
 //! Enrollment, liveness, and serial pure-tool execution runtime for `signalbox-runner`.
 
 mod active_workspaces;
+mod ambient;
 mod configuration;
 mod executor;
 mod journal;
@@ -8,6 +9,7 @@ mod protocol;
 mod state;
 mod workspace;
 
+pub use ambient::{AMBIENT_PROBE_ARGUMENT, run_ambient_probe_child};
 pub use executor::{ECHO_CHILD_ARGUMENT, run_echo_child};
 pub use workspace::provision::WorkspaceProvisionError;
 

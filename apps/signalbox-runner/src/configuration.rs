@@ -315,6 +315,11 @@ impl RunnerConfiguration {
         &self.bubblewrap_path
     }
 
+    /// Proves ambient supervision before the runner connects or enrolls.
+    pub async fn verify_ambient_supervisor(&self) -> std::io::Result<()> {
+        crate::ambient::verify(&self.bubblewrap_path).await
+    }
+
     /// Borrows the explicit read-only path inventory.
     pub fn read_only_paths(&self) -> &[PathBuf] {
         &self.read_only_paths
