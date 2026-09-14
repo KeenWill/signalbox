@@ -757,6 +757,27 @@ rust_selection_test(
     test = "//apps/signalboxd:unit_tests",
 )
 
+rust_selection_test(
+    name = "runner_ambient_supervision",
+    args = ["ambient::tests", "--test-threads=1"],
+    tags = ["external", "manual", "no-sandbox"],
+    test = "//apps/signalbox-runner:unit_tests",
+)
+
+rust_selection_test(
+    name = "runner_ambient_execution",
+    args = ["runner_execution::", "--ignored", "--test-threads=1"],
+    tags = ["external", "manual", "no-sandbox"],
+    test = "//apps/signalboxd:offline_tool_loop",
+)
+
+rust_selection_test(
+    name = "runner_ambient_restart",
+    args = ["--ignored", "--test-threads=1"],
+    tags = ["external", "manual", "no-sandbox"],
+    test = "//apps/signalboxd:runner_end_to_end",
+)
+
 test_suite(
     name = "host_integration_tests",
     tags = ["manual"],
@@ -766,6 +787,10 @@ test_suite(
         ":git_administration_sandbox",
         ":git_push_agent_sandbox",
         ":git_push_workspace_trust_sandbox",
+        ":runner_ambient_execution",
+        ":runner_ambient_restart",
+        ":runner_ambient_supervision",
+        "//apps/signalbox-runner:ambient_registration",
         "//crates/file-media-adapters-audio:adapters",
         "//crates/file-media-processor-runtime:isolation",
         "//crates/tools-exec:bwrap",

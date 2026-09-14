@@ -1,6 +1,6 @@
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_quality_tests", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_COMPILE_DATA = ["//:config/signalbox-runner.example.toml"]
 
@@ -30,7 +30,7 @@ rust_binary(
 rust_unit_test(
     name = "unit_tests",
     # Forking fixture children can retain another test's root lock until exec.
-    args = ["--test-threads=1"],
+    args = ["--test-threads=1", "--skip", "ambient::tests"],
     crate = ":signalbox_runner",
 )
 
@@ -42,6 +42,25 @@ rust_unit_test(
 rust_doc_test(
     name = "doc_tests",
     crate = ":signalbox_runner",
+)
+
+rust_integration_test(
+    name = "ambient_registration",
+    args = ["--test-threads=1"],
+    crate_root = "tests/ambient_registration.rs",
+    data = [":signalbox-runner"],
+    env = {
+        "NEXTEST_BIN_EXE_signalbox_runner": "$(rootpath :signalbox-runner)",
+        "TMPDIR": "/tmp",
+    },
+    rustc_env = {
+        "CARGO_BIN_EXE_signalbox-runner": "$(rootpath :signalbox-runner)",
+    },
+    tags = ["external", "manual", "no-sandbox"],
+    deps = [
+        "//crates/runner-wire:signalbox_runner_wire",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
 )
 
 rust_quality_tests(documented_crates = [

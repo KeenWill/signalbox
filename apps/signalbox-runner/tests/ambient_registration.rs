@@ -70,7 +70,7 @@ async fn check_registration(wrapper: Option<&str>, admitted: bool) -> Result<(),
         repositories = {}
     };
     fs::write(&configuration, toml::to_string(&document)?)?;
-    let mut runner = Command::new(env!("CARGO_BIN_EXE_signalbox-runner"))
+    let mut runner = Command::new(signalbox_test_bin::test_bin_path!("signalbox-runner"))
         .arg("--config")
         .arg(configuration)
         .env_clear()

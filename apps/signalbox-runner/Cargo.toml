@@ -41,5 +41,8 @@ uuid = { version = "1.24.0", default-features = false, features = [
 ] }
 url = "2.5.8"
 
+[dev-dependencies]
+signalbox-test-bin = { path = "../../crates/test-bin" }
+
 [lints]
 workspace = true

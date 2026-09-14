@@ -86,14 +86,14 @@ The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
 `gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
 facilities stay hosted for now, although this may change over time.
 
-| Job                                               | Why                                                                         |
-| ------------------------------------------------- | --------------------------------------------------------------------------- |
-| `bazel.yml` `bazel-host-integration`              | cgroup delegation and Bubblewrap namespaces, including SSH push trust tests |
-| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                                   |
-| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures               |
-| `devenv-lock.yml` `relock`                        | Nix                                                                         |
-| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)                       |
-| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                                       |
+| Job                                               | Why                                                                     |
+| ------------------------------------------------- | ----------------------------------------------------------------------- |
+| `bazel.yml` `bazel-host-integration`              | cgroup delegation, Bubblewrap, SSH push trust, and ambient runner tests |
+| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                               |
+| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures           |
+| `devenv-lock.yml` `relock`                        | Nix                                                                     |
+| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)                   |
+| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                                   |
 
 The `bazel-postgres` job uses the canonical routing expression with
 `signalbox-integration-tests`, or `ubuntu-latest` for fork and named bot pull
@@ -171,12 +171,12 @@ first sample establishes a baseline. This captures test containers even when
 their cgroups are outside the runner pod. The report excludes the runner and
 Docker daemon; do not add it to pod totals without checking cgroup placement.
 Linux Docker working-memory statistics exclude inactive file cache; charged
-memory includes it. Short-lived
-containers, their final CPU increments and peaks between samples can be missed,
-and sampling failures are reported as gaps. Sampling errors do not change the
-suite command's exit status. Interrupted collection is unmeasured. Per-shard
-JSON samples and the test-result cache report are retained together for seven
-days, so actual executions, cache hits and retries can be analyzed separately.
+memory includes it. Short-lived containers, their final CPU increments and peaks
+between samples can be missed, and sampling failures are reported as gaps.
+Sampling errors do not change the suite command's exit status. Interrupted
+collection is unmeasured. Per-shard JSON samples and the test-result cache
+report are retained together for seven days, so actual executions, cache hits
+and retries can be analyzed separately.
 
 ## Bazel scratch
 
