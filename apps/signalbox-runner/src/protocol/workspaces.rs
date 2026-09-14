@@ -6,6 +6,7 @@ use signalbox_runner_wire::{WorkspaceProvision, WorkspaceReady, WorkspaceRecorde
 
 pub(super) enum WorkspaceExecution {
     Preparing(tokio::task::JoinHandle<Result<WorkspaceReady, crate::WorkspaceProvisionError>>),
+    Releasing(tokio::task::JoinHandle<(signalbox_runner_wire::ReleaseCorrelation, bool)>),
     Ready,
 }
 
@@ -17,14 +18,33 @@ impl Drop for WorkspaceExecution {
     }
 }
 
+pub(super) enum WorkspaceCompletion {
+    Ready(Box<Result<WorkspaceReady, crate::WorkspaceProvisionError>>),
+    Released {
+        correlation: signalbox_runner_wire::ReleaseCorrelation,
+        succeeded: bool,
+    },
+}
+
 pub(super) async fn workspace_finished(
     workspace: &mut Option<WorkspaceExecution>,
-) -> Result<Result<WorkspaceReady, crate::WorkspaceProvisionError>, RunnerConnectionError> {
-    let Some(WorkspaceExecution::Preparing(task)) = workspace else {
-        return std::future::pending().await;
-    };
-    task.await
-        .map_err(|_| RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage))
+) -> Result<WorkspaceCompletion, RunnerConnectionError> {
+    match workspace {
+        Some(WorkspaceExecution::Preparing(task)) => task
+            .await
+            .map_err(|_| RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage))
+            .map(|result| WorkspaceCompletion::Ready(Box::new(result))),
+        Some(WorkspaceExecution::Releasing(task)) => {
+            let (correlation, succeeded) = task.await.map_err(|_| {
+                RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage)
+            })?;
+            Ok(WorkspaceCompletion::Released {
+                correlation,
+                succeeded,
+            })
+        }
+        _ => std::future::pending().await,
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
@@ -50,6 +70,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         }
         if state.retained_provision_failure().is_some() {
             self.workspace = Some(WorkspaceExecution::Ready);
+            return Ok(());
+        }
+        if state.retained_release().is_some() {
+            self.workspace = if let Some(accepted) = state.accepted_release() {
+                let store = state.workspace_store()?;
+                Some(WorkspaceExecution::Releasing(tokio::task::spawn_blocking(
+                    move || {
+                        let correlation = accepted.correlation().clone();
+                        (correlation, store.release(&accepted).is_ok())
+                    },
+                )))
+            } else {
+                Some(WorkspaceExecution::Ready)
+            };
             return Ok(());
         }
         let Some((request, _)) = state.retained_provision() else {
@@ -81,6 +115,57 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
             )
             .await?;
         }
+        if let Some((correlation, phase)) = state.retained_release()
+            && phase == signalbox_runner_wire::ReleasePhase::ReleaseCompleted
+        {
+            send_message(
+                &mut self.io,
+                Message::WorkspaceReleased(signalbox_runner_wire::WorkspaceReleased {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn finish_workspace(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        completion: WorkspaceCompletion,
+    ) -> Result<(), RunnerConnectionError> {
+        match completion {
+            WorkspaceCompletion::Ready(ready) => self.finish_provision(state, *ready)?,
+            WorkspaceCompletion::Released {
+                correlation,
+                succeeded,
+            } => {
+                if succeeded {
+                    state.complete_release(&correlation)?;
+                } else {
+                    return Err(RunnerConnectionError::Workspace(
+                        crate::WorkspaceProvisionError::Storage,
+                    ));
+                }
+            }
+        }
+        self.workspace = Some(WorkspaceExecution::Ready);
+        self.send_retained_workspace(state).await
+    }
+
+    pub(super) fn acknowledge_release(
+        &mut self,
+        state: &mut RunnerStateRoot,
+        correlation: signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerConnectionError> {
+        if self.last_release_recorded.as_ref() == Some(&correlation)
+            && state.retained_release().is_none()
+        {
+            return Ok(());
+        }
+        state.acknowledge_release(&correlation)?;
+        self.workspace = None;
+        self.last_release_recorded = Some(correlation);
         Ok(())
     }
 
@@ -161,4 +246,47 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
         self.last_workspace_recorded = Some(recorded);
         Ok(())
     }
+}
+
+pub(super) fn apply_workspace_directives(
+    state: &mut RunnerStateRoot,
+    directives: &signalbox_runner_wire::ReconnectDirectives,
+) -> Result<(), RunnerConnectionError> {
+    let Some(directive) = &directives.workspace_operation else {
+        return Ok(());
+    };
+    if let Some((correlation, phase)) = state.retained_release() {
+        use signalbox_runner_wire::{DirectiveAction as A, ReleasePhase as P};
+        let correlation = correlation.clone();
+        match directive.action {
+            A::Await if phase == P::ReleaseAccepted => {}
+            A::Resend if phase == P::ReleaseCompleted => {}
+            A::DiscardAsRecorded if phase == P::ReleaseCompleted => {
+                state.acknowledge_release(&correlation)?
+            }
+            _ => {
+                return Err(RunnerConnectionError::Violation(
+                    ProtocolViolation::ResumeDirectives,
+                ));
+            }
+        }
+    } else {
+        use signalbox_runner_wire::DirectiveAction as A;
+        let failure = directives.operation_failure.as_ref();
+        match directive.action {
+            A::Await if failure.is_none() => {}
+            A::Resend if failure.is_some_and(|failure| failure.action == A::Resend) => {}
+            A::DiscardAsRecorded
+                if failure.is_some_and(|failure| failure.action == A::DiscardAsRecorded) =>
+            {
+                state.acknowledge_provision_failure(&directive.correlation)?
+            }
+            _ => {
+                return Err(RunnerConnectionError::Violation(
+                    ProtocolViolation::ResumeDirectives,
+                ));
+            }
+        }
+    }
+    Ok(())
 }

@@ -15,9 +15,8 @@ pub use configuration::{
     RunnerConfigurationPath, RunnerCredentialConfiguration, RunnerRepositoryConfiguration,
 };
 pub use protocol::{
-    ConnectionEnd, EnrollmentOutcome, MessageKind, ProtocolViolation, RecoveryGap,
-    RecoveryUnavailable, RunnerConnection, RunnerConnectionError, ServeOutcome, SocketConnectError,
-    connect_verified,
+    ConnectionEnd, EnrollmentOutcome, MessageKind, ProtocolViolation, RunnerConnection,
+    RunnerConnectionError, ServeOutcome, SocketConnectError, connect_verified,
 };
 pub use state::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,

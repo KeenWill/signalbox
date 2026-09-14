@@ -11,8 +11,8 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
     LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message, OperationCorrelation,
-    OperationFailure, ProvisionPhase, ReconnectInventory, RetainedResult, WorkspaceOperation,
-    WorkspaceProvision, WorkspaceReady, WorkspaceRecorded,
+    OperationFailure, ProvisionPhase, ReconnectInventory, ReleaseCorrelation, ReleasePhase,
+    RetainedResult, WorkspaceOperation, WorkspaceProvision, WorkspaceReady, WorkspaceRecorded,
 };
 use std::{
     fs::File,
@@ -34,6 +34,10 @@ pub(crate) struct Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum JournalEntry {
+    Release {
+        correlation: ReleaseCorrelation,
+        phase: ReleasePhase,
+    },
     Lease {
         phase: LeasePhase,
         result: Option<RetainedResult>,
@@ -43,6 +47,15 @@ enum JournalEntry {
         ready: Option<WorkspaceReady>,
         failure: Option<Box<OperationFailure>>,
     },
+}
+
+/// Cleanup capability obtained only from a durably accepted journal entry.
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedWorkspaceRelease(ReleaseCorrelation);
+impl AcceptedWorkspaceRelease {
+    pub(crate) fn correlation(&self) -> &ReleaseCorrelation {
+        &self.0
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,6 +88,13 @@ impl Journal {
                             >= request.correlation.registration_revision => {}
                 _ => return Err(RunnerStateError::CorruptState),
             }
+        }
+        if let Some((correlation, _)) = self.release()
+            && !state
+                .receipt()
+                .is_some_and(|receipt| receipt.runner_id() == correlation.runner_id)
+        {
+            return Err(RunnerStateError::CorruptState);
         }
         Ok(())
     }
@@ -136,6 +156,13 @@ impl Journal {
 
     pub(crate) fn reconnect_inventory(&self) -> ReconnectInventory {
         match self.entries.first() {
+            Some(JournalEntry::Release { correlation, phase }) => ReconnectInventory {
+                workspace_operation: Some(WorkspaceOperation::Release {
+                    correlation: correlation.clone(),
+                    phase: *phase,
+                }),
+                ..ReconnectInventory::default()
+            },
             None => ReconnectInventory::default(),
             Some(JournalEntry::Lease { phase, result }) => ReconnectInventory {
                 lease: Some(phase.clone()),
@@ -214,6 +241,71 @@ impl Journal {
         write_document(directory, DocumentKind::Journal, &encoded)?;
         *self = document.journal;
         Ok(())
+    }
+
+    pub(crate) fn release(&self) -> Option<(&ReleaseCorrelation, ReleasePhase)> {
+        match self.entries.first() {
+            Some(JournalEntry::Release { correlation, phase }) => Some((correlation, *phase)),
+            _ => None,
+        }
+    }
+    pub(crate) fn accepted_release(&self) -> Option<AcceptedWorkspaceRelease> {
+        self.release().and_then(|(correlation, phase)| {
+            (phase == ReleasePhase::ReleaseAccepted)
+                .then(|| AcceptedWorkspaceRelease(correlation.clone()))
+        })
+    }
+    pub(crate) fn record_release(
+        &mut self,
+        directory: &File,
+        correlation: ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.release() {
+            Some((prior, _)) if prior == &correlation => return Ok(()),
+            Some(_) => return Err(RunnerStateError::InvalidTransition),
+            None if !self.entries.is_empty() => return Err(RunnerStateError::InvalidTransition),
+            None => {}
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Release {
+                    correlation,
+                    phase: ReleasePhase::ReleaseAccepted,
+                }],
+            },
+        )
+    }
+    pub(crate) fn complete_release(
+        &mut self,
+        directory: &File,
+        correlation: &ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .release()
+            .is_some_and(|(prior, _)| prior == correlation)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Release {
+                    correlation: correlation.clone(),
+                    phase: ReleasePhase::ReleaseCompleted,
+                }],
+            },
+        )
+    }
+    pub(crate) fn acknowledge_release(
+        &mut self,
+        directory: &File,
+        correlation: &ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if self.release() != Some((correlation, ReleasePhase::ReleaseCompleted)) {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.publish(directory, Self::default())
     }
 
     pub(crate) fn provision(&self) -> Option<(&WorkspaceProvision, Option<&WorkspaceReady>)> {

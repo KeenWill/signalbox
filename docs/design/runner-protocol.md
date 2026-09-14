@@ -81,9 +81,6 @@ re-adoption. Restricted acquisition clones inside the restricted profile. Each
 placement has exactly one writable root, whether a repository, selected plain
 directory, or private root. Confinement is defined over that root.
 
-After `active`, the manifest advances to `releasing`; deletion is represented by
-absence rather than another lifecycle token.
-
 Runners are not cleanup authorities. Only the runner that provisioned a
 workspace can delete it; a replaced, revoked, or dead runner leaves its
 workspace on disk. No cleanup authority resumes for a retired identity, and no
@@ -104,19 +101,11 @@ connection is already lost enqueues no release, and losing a connection that
 still owed one retires that release as unowned; either way the workspace becomes
 a recorded leak.
 
-The runner fsyncs a `release_accepted` journal entry carrying the complete
-release correlation before it does anything irreversible. Only then does it mark
-release in the manifest, atomically rename the placement below `trash/`, fsync,
-and delete it by descriptor-relative traversal that unlinks symlinks instead of
-following them. It advances the entry to `release_completed` and resends
-`workspace_released` until the daemon replies `workspace_release_recorded`,
-which frees the journaled release and the runner's single workspace-operation
-slot. A crash resumes from the journal rather than from a manifest the runner
-may already have deleted: `release_accepted` resumes the deletion and then
-reports, and `release_completed` resends the correlation. A release whose rename
-or deletion keeps failing reports `workspace_cleanup_failed`; its
-acknowledgement retires the release journal with the failure, and the surviving
-placement is reported as a `cleanup_failed` leak.
+[Workspace publication](../spec/runner-protocol.md#workspace-publication) owns
+the accepted release journal, descriptor cleanup, and completion exchange. A
+release whose rename or deletion keeps failing reports
+`workspace_cleanup_failed`; its acknowledgement retires the release journal with
+the failure, and the surviving placement is reported as a `cleanup_failed` leak.
 
 Startup reconciles every ready or active manifest with the daemon before any
 execution and reports every unknown, retired-but-present, conflicting, or

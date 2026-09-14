@@ -389,3 +389,131 @@ fn activated_private_root_reopens_with_its_files_and_same_ready_receipt() {
         b"retained session files"
     );
 }
+
+fn enrolled_workspace_root() -> (TempDir, RunnerStateRoot) {
+    let (parent, mut state) = fixture_root();
+    let identity = |value| CanonicalUuid::from_uuid(Uuid::from_u128(value));
+    state
+        .record_receipt(crate::EnrollmentReceipt::new(
+            state.state().request_id(),
+            identity(RUNNER + 10),
+            identity(RUNNER),
+            identity(RUNNER + 11),
+            PositiveU64::try_new(1).expect("first registration"),
+            Digest::try_new("a".repeat(64)).expect("fixture digest"),
+            crate::EnrollmentAuthority::Active,
+        ))
+        .expect("enrolled workspace owner");
+    (parent, state)
+}
+
+fn release_correlation(prepared: &PreparedWorkspace) -> signalbox_runner_wire::ReleaseCorrelation {
+    signalbox_runner_wire::ReleaseCorrelation {
+        session_id: prepared.manifest.session,
+        placement_revision: prepared.manifest.placement_revision,
+        runner_id: prepared.manifest.runner,
+        manifest_id: prepared.manifest.manifest_id,
+    }
+}
+
+#[test]
+fn release_unlinks_symlinks_and_removes_inaccessible_directories() {
+    let (parent, mut state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = store
+        .prepare_private_root(&request(RUNNER))
+        .expect("private workspace");
+    let work = Path::new(prepared.execution_directory.as_str());
+    let victim = parent.path().join("outside");
+    fs::write(&victim, b"preserve outside bytes").expect("outside fixture");
+    std::os::unix::fs::symlink(&victim, work.join("link")).expect("workspace symlink");
+    let sealed = work.join("sealed");
+    fs::create_dir(&sealed).expect("nested directory");
+    fs::write(sealed.join("content"), b"remove nested bytes").expect("nested fixture");
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o0)).expect("remove directory access");
+    let correlation = release_correlation(&prepared);
+    state
+        .record_release(correlation.clone())
+        .expect("accepted journal committed");
+    let accepted = state.accepted_release().expect("journal cleanup authority");
+    store.release(&accepted).expect("descriptor cleanup");
+    assert!(!work.exists());
+    assert_eq!(
+        fs::read(&victim).expect("outside remains"),
+        b"preserve outside bytes"
+    );
+    state
+        .complete_release(&correlation)
+        .expect("completion journal committed");
+    drop(store);
+    drop(state);
+    let mut reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
+    assert_eq!(
+        reopened.retained_release().map(|(_, phase)| phase),
+        Some(signalbox_runner_wire::ReleasePhase::ReleaseCompleted)
+    );
+    reopened
+        .acknowledge_release(&correlation)
+        .expect("exact completion acknowledgement");
+    assert!(reopened.retained_release().is_none());
+}
+
+#[test]
+fn accepted_release_restarts_after_trash_manifest_was_deleted() {
+    let (parent, mut state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = store
+        .prepare_private_root(&request(RUNNER))
+        .expect("private workspace");
+    let correlation = release_correlation(&prepared);
+    state
+        .record_release(correlation.clone())
+        .expect("accepted journal committed");
+    let placement = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    let renamed = trash.join(correlation.manifest_id.to_string());
+    fs::rename(placement, &renamed).expect("simulate completed rename");
+    fs::remove_file(renamed.join(MANIFEST_FILE)).expect("simulate partial deletion");
+    drop(store);
+    drop(state);
+    let reopened = RunnerStateRoot::open(&parent.path().join("runner-state")).expect("restart");
+    let store = reopened
+        .workspace_store()
+        .expect("reopened workspace store");
+    let accepted = reopened
+        .accepted_release()
+        .expect("retained journal authority");
+    store
+        .release(&accepted)
+        .expect("journal authorizes remaining deletion");
+    store
+        .release(&accepted)
+        .expect("completed deletion replays");
+    assert!(!renamed.exists());
+}
+
+#[test]
+fn release_requires_the_provisioning_runner_and_exact_manifest() {
+    let (_parent, mut state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = store
+        .prepare_private_root(&request(RUNNER))
+        .expect("private workspace");
+    let mut correlation = release_correlation(&prepared);
+    correlation.runner_id = CanonicalUuid::from_uuid(Uuid::from_u128(OTHER_RUNNER));
+    assert!(state.record_release(correlation).is_err());
+    let mut correlation = release_correlation(&prepared);
+    correlation.manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    state
+        .record_release(correlation)
+        .expect("accepted different manifest correlation");
+    assert!(matches!(
+        store.release(&state.accepted_release().expect("journal authority")),
+        Err(RunnerWorkspaceError::ManifestConflict)
+    ));
+    assert!(Path::new(prepared.execution_directory.as_str()).exists());
+}

@@ -28,8 +28,10 @@ process under `ambient` and retains the claimed phase and terminal result in a
 versioned, fsynced, atomically published private journal. An initialized state
 root without that journal fails startup. Resume reconciles the retained lease
 phase and terminal result against durable daemon state. Provisioning resumes the
-exact retained workspace operation; release, leak reconciliation, and sandbox
-supervision are listed under Planned.
+exact retained workspace operation. Rejected staged workspaces retain accepted
+release and completion phases through daemon acknowledgement.
+Placement-retirement release, leak reconciliation, and sandbox supervision are
+listed under Planned.
 
 The daemon admits authenticated runner recovery after migrations and before the
 generic startup scan or blob checks. Ordinary enrollment waits until the process
@@ -395,12 +397,20 @@ directory. A rejected command's ready workspace, including a correlated receipt
 arriving after abandonment, is released only through its exact manifest
 correlation on the candidate's retained connection epoch. Suspicion retains that
 cleanup authority; loss does not transfer it. Release acknowledgement uses the
-same current-epoch fence as release dispatch.
+same current-epoch fence as release dispatch. The runner journals the exact
+release before cleanup, verifies its protected manifest, marks it `releasing`,
+renames the placement into `trash/<manifest_id>`, and deletes through directory
+descriptors without following symlinks. An accepted journal authorizes
+completion after a partial trash deletion. The completion receipt remains
+journaled until its exact acknowledgement; resume rechecks pending release
+authority or records the retained completion. Cleanup storage errors retain the
+accepted journal. Lease offers, provisioning, and staged release run serially
+per runner.
 
 ## Planned
 
-- Failure spooling and release, failure, and leak reconnect-inventory
-  reconciliation over the wire:
+- General failure spooling and placement-release, failure, and leak
+  reconnect-inventory reconciliation over the wire:
   [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
@@ -409,8 +419,8 @@ same current-epoch fence as release dispatch.
 - Initial repository-placement provisioning admission and credentialed or
   restricted repository acquisition:
   [runner protocol design](../design/runner-protocol.md).
-- Workspace release and startup leak reconciliation:
-  [runner protocol design](../design/runner-protocol.md).
+- Placement-retirement release, cleanup-failure projection, and startup leak
+  reconciliation: [runner protocol design](../design/runner-protocol.md).
 - The restricted sandbox and ambient supervision under bubblewrap, with confined
   file tools: [runner protocol design](../design/runner-protocol.md).
 - The restricted-namespace HTTPS egress broker:

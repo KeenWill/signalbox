@@ -588,98 +588,139 @@ impl PostgresRunnerRegistrationService {
         }
         let workspace_directive = if let Some(operation) = &request.inventory.workspace_operation {
             use signalbox_runner_wire::{OperationCorrelation, WorkspaceOperation};
-            let WorkspaceOperation::Provision {
-                correlation: provision,
-                ..
+            if let WorkspaceOperation::Release {
+                correlation: release,
+                phase,
             } = operation
-            else {
-                return Err(invalid_inventory());
-            };
-            if request.inventory.lease.is_some() || request.inventory.result.is_some() {
-                return Err(invalid_inventory());
-            }
-            let authorization = self
-                .store
-                .replacement_provisioning_authorization(
-                    signalbox_domain::RunnerProvisioningAuthorizationId::from_uuid(
-                        provision.authorization_id.into_uuid(),
-                    ),
-                )
-                .await
-                .map_err(|error| {
-                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
-                })?
-                .ok_or_else(invalid_inventory)?;
-            if authorization.enrollment != identities.enrollment()
-                || recovery::provision_message(&authorization)?.correlation != *provision
             {
-                return Err(invalid_inventory());
-            }
-            let enrollment = self
-                .store
-                .load_enrollment(identities.enrollment())
-                .await
-                .map_err(|error| {
-                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
-                })?
-                .ok_or_else(invalid_inventory)?;
-            let registration = self
-                .store
-                .load_current_registration(&enrollment)
-                .await
-                .map_err(|error| {
-                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
-                })?
-                .ok_or_else(invalid_inventory)?;
-            if registration.revision().get() != authorization.registration_revision.get()
-                || signalbox_domain::RunnerAdvertisement::new(
-                    registration.registration().classes().cloned(),
-                    registration.registration().tool_names().cloned(),
-                    registration
-                        .registration()
-                        .profiles()
-                        .map(|profile| profile.name().clone()),
-                    registration.registration().workspaces(),
-                    registration.registration().sandboxes(),
-                    registration.registration().repositories().cloned(),
-                )
-                .with_default_working_directory(
-                    registration
-                        .registration()
-                        .default_working_directory()
-                        .cloned(),
-                ) != advertisement
-            {
-                return Err(invalid_inventory());
-            }
-            let operation_correlation = OperationCorrelation::Provision(provision.clone());
-            let action = if let Some(failure) = &request.inventory.operation_failure {
-                if failure.correlation != operation_correlation
-                    || !matches!(
-                        operation,
-                        WorkspaceOperation::Provision {
-                            phase: signalbox_runner_wire::ProvisionPhase::Provisioning,
-                            ..
-                        }
-                    )
+                if request.inventory.lease.is_some()
+                    || request.inventory.result.is_some()
+                    || request.inventory.operation_failure.is_some()
                 {
                     return Err(invalid_inventory());
                 }
-                self.provisioning_failed_durably(
-                    request.enrollment_id,
-                    signalbox_runner_wire::OperationFailed {
-                        failure: failure.clone(),
-                    },
-                )
-                .await?;
-                DirectiveAction::DiscardAsRecorded
+                let action = match phase {
+                    signalbox_runner_wire::ReleasePhase::ReleaseAccepted => {
+                        let pending = self
+                            .replacement_releases_durably(request.enrollment_id)
+                            .await?;
+                        if !pending
+                            .iter()
+                            .any(|pending| pending.correlation == *release)
+                        {
+                            return Err(invalid_inventory());
+                        }
+                        DirectiveAction::Await
+                    }
+                    signalbox_runner_wire::ReleasePhase::ReleaseCompleted => {
+                        self.workspace_released_durably(
+                            request.enrollment_id,
+                            signalbox_runner_wire::WorkspaceReleased {
+                                correlation: release.clone(),
+                            },
+                        )
+                        .await?;
+                        DirectiveAction::DiscardAsRecorded
+                    }
+                };
+                Some(Directive {
+                    correlation: OperationCorrelation::Release(release.clone()),
+                    action,
+                })
             } else {
-                DirectiveAction::Await
-            };
-            Some(signalbox_runner_wire::Directive {
-                correlation: operation_correlation,
-                action,
-            })
+                let WorkspaceOperation::Provision {
+                    correlation: provision,
+                    ..
+                } = operation
+                else {
+                    return Err(invalid_inventory());
+                };
+                if request.inventory.lease.is_some() || request.inventory.result.is_some() {
+                    return Err(invalid_inventory());
+                }
+                let authorization = self
+                    .store
+                    .replacement_provisioning_authorization(
+                        signalbox_domain::RunnerProvisioningAuthorizationId::from_uuid(
+                            provision.authorization_id.into_uuid(),
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                    })?
+                    .ok_or_else(invalid_inventory)?;
+                if authorization.enrollment != identities.enrollment()
+                    || recovery::provision_message(&authorization)?.correlation != *provision
+                {
+                    return Err(invalid_inventory());
+                }
+                let enrollment = self
+                    .store
+                    .load_enrollment(identities.enrollment())
+                    .await
+                    .map_err(|error| {
+                        store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                    })?
+                    .ok_or_else(invalid_inventory)?;
+                let registration = self
+                    .store
+                    .load_current_registration(&enrollment)
+                    .await
+                    .map_err(|error| {
+                        store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+                    })?
+                    .ok_or_else(invalid_inventory)?;
+                if registration.revision().get() != authorization.registration_revision.get()
+                    || signalbox_domain::RunnerAdvertisement::new(
+                        registration.registration().classes().cloned(),
+                        registration.registration().tool_names().cloned(),
+                        registration
+                            .registration()
+                            .profiles()
+                            .map(|profile| profile.name().clone()),
+                        registration.registration().workspaces(),
+                        registration.registration().sandboxes(),
+                        registration.registration().repositories().cloned(),
+                    )
+                    .with_default_working_directory(
+                        registration
+                            .registration()
+                            .default_working_directory()
+                            .cloned(),
+                    ) != advertisement
+                {
+                    return Err(invalid_inventory());
+                }
+                let operation_correlation = OperationCorrelation::Provision(provision.clone());
+                let action = if let Some(failure) = &request.inventory.operation_failure {
+                    if failure.correlation != operation_correlation
+                        || !matches!(
+                            operation,
+                            WorkspaceOperation::Provision {
+                                phase: signalbox_runner_wire::ProvisionPhase::Provisioning,
+                                ..
+                            }
+                        )
+                    {
+                        return Err(invalid_inventory());
+                    }
+                    self.provisioning_failed_durably(
+                        request.enrollment_id,
+                        signalbox_runner_wire::OperationFailed {
+                            failure: failure.clone(),
+                        },
+                    )
+                    .await?;
+                    DirectiveAction::DiscardAsRecorded
+                } else {
+                    DirectiveAction::Await
+                };
+                Some(signalbox_runner_wire::Directive {
+                    correlation: operation_correlation,
+                    action,
+                })
+            }
         } else {
             None
         };
@@ -1940,6 +1981,15 @@ where
             .map(|lease| lease.correlation.clone()),
         _ => None,
     };
+    let mut busy_release = match &first.message {
+        Message::Resume(request) => match &request.inventory.workspace_operation {
+            Some(signalbox_runner_wire::WorkspaceOperation::Release { correlation, .. }) => {
+                Some(correlation.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     let mut busy_provision = match &first.message {
         Message::Resume(request) => match &request.inventory.workspace_operation {
             Some(signalbox_runner_wire::WorkspaceOperation::Provision { correlation, .. }) => {
@@ -1998,6 +2048,7 @@ where
                         })
                     {
                         busy_provision = None;
+                        busy_release = None;
                     }
                     if let Err(error) =
                         write_message(&mut writer, Message::Resumed(Box::new(response))).await
@@ -2108,7 +2159,10 @@ where
                     Message::WorkspaceReleased(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReleased, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
                         match service.workspace_released(context.enrollment, receipt).await {
-                            Ok(recorded) => write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?,
+                            Ok(recorded) => {
+                                if busy_release.as_ref() == Some(&recorded.correlation) { busy_release = None; }
+                                write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?;
+                            },
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
                     }
@@ -2277,7 +2331,7 @@ where
                     }
                 }
             }
-            () = lease_changed(&mut lease_changes), if busy_provision.is_none() && busy_lease.is_none() => {
+            () = lease_changed(&mut lease_changes), if busy_provision.is_none() && busy_lease.is_none() && busy_release.is_none() => {
                 if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
                     let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
                     if sent_lease != Some(identity) {
@@ -2299,13 +2353,15 @@ where
                         }
                         let operation = service.replacement_operations(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next();
                         if let Some(operation) = operation
-                            && busy_lease.is_none() && busy_provision.is_none()
+                            && busy_lease.is_none() && busy_provision.is_none() && busy_release.is_none()
                             && sent_provisions.insert(operation.correlation.authorization_id)
                         {
                             busy_provision = Some(operation.correlation.authorization_id);
                             write_message(&mut writer, Message::WorkspaceProvision(operation)).await?;
                         }
-                        for release in service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                        if busy_lease.is_none() && busy_provision.is_none() && busy_release.is_none()
+                            && let Some(release) = service.replacement_releases(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)?.into_iter().next() {
+                            busy_release = Some(release.correlation.clone());
                             write_message(&mut writer, Message::WorkspaceRelease(release)).await?;
                         }
                     }

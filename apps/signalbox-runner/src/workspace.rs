@@ -1,6 +1,7 @@
 //! Descriptor-relative managed workspace storage below the locked runner root.
 
 pub(crate) mod provision;
+mod release;
 
 use std::{
     error::Error,

@@ -148,6 +148,7 @@ fn fixture(
         last_recorded: None,
         configuration: None,
         workspace: None,
+        last_release_recorded: None,
         last_workspace_recorded: None,
         last_provision_failure: None,
         receipt,

@@ -486,6 +486,44 @@ impl RunnerStateRoot {
         self.journal.reconnect_inventory()
     }
 
+    pub(crate) fn retained_release(
+        &self,
+    ) -> Option<(
+        &signalbox_runner_wire::ReleaseCorrelation,
+        signalbox_runner_wire::ReleasePhase,
+    )> {
+        self.journal.release()
+    }
+    pub(crate) fn accepted_release(&self) -> Option<crate::journal::AcceptedWorkspaceRelease> {
+        self.journal.accepted_release()
+    }
+    pub(crate) fn record_release(
+        &mut self,
+        correlation: signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .state
+            .receipt()
+            .is_some_and(|receipt| receipt.runner_id() == correlation.runner_id)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.journal.record_release(&self.directory, correlation)
+    }
+    pub(crate) fn complete_release(
+        &mut self,
+        correlation: &signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.complete_release(&self.directory, correlation)
+    }
+    pub(crate) fn acknowledge_release(
+        &mut self,
+        correlation: &signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_release(&self.directory, correlation)
+    }
+
     pub(crate) fn retained_provision(
         &self,
     ) -> Option<(

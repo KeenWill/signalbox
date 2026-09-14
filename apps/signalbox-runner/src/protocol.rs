@@ -284,33 +284,6 @@ pub enum ServeOutcome {
     ShutdownReady,
 }
 
-/// Closed local recovery gap; no wire recovery facts are fabricated.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryGap {
-    ReleaseNotBuilt,
-}
-
-/// Typed proof that recovery is deliberately unavailable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RecoveryUnavailable {
-    gap: RecoveryGap,
-}
-
-impl RecoveryUnavailable {
-    /// Returns the exact representational gap preventing recovery.
-    pub const fn gap(self) -> RecoveryGap {
-        self.gap
-    }
-}
-
-impl fmt::Display for RecoveryUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runner workspace release is unavailable")
-    }
-}
-
-impl Error for RecoveryUnavailable {}
-
 /// Closed peer or local lifecycle violation with exact evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolViolation {
@@ -458,7 +431,6 @@ pub enum RunnerConnectionError {
     },
     Violation(ProtocolViolation),
     InvalidLocalFrame(ValueError),
-    RecoveryUnavailable(RecoveryUnavailable),
     Workspace(crate::WorkspaceProvisionError),
 }
 
@@ -480,7 +452,6 @@ impl fmt::Display for RunnerConnectionError {
             } => write!(formatter, "daemon rejected {offending_kind} with {code:?}"),
             Self::Violation(error) => write!(formatter, "runner protocol violation: {error}"),
             Self::InvalidLocalFrame(_) => formatter.write_str("runner local frame is invalid"),
-            Self::RecoveryUnavailable(error) => error.fmt(formatter),
             Self::Workspace(error) => error.fmt(formatter),
         }
     }
@@ -494,7 +465,6 @@ impl Error for RunnerConnectionError {
             Self::Read(error) | Self::Write(error) => Some(error),
             Self::Violation(error) => Some(error),
             Self::InvalidLocalFrame(error) => Some(error),
-            Self::RecoveryUnavailable(error) => Some(error),
             Self::Workspace(error) => Some(error),
             Self::PeerClosed | Self::PeerRejected { .. } => None,
         }
@@ -533,6 +503,7 @@ pub struct RunnerConnection<S> {
     last_recorded: Option<LeaseCorrelation>,
     configuration: Option<crate::RunnerConfiguration>,
     workspace: Option<workspaces::WorkspaceExecution>,
+    last_release_recorded: Option<signalbox_runner_wire::ReleaseCorrelation>,
     last_workspace_recorded: Option<signalbox_runner_wire::WorkspaceRecorded>,
     last_provision_failure: Option<signalbox_runner_wire::OperationCorrelation>,
     receipt: EnrollmentReceipt,
@@ -545,7 +516,7 @@ pub struct RunnerConnection<S> {
 enum RunnerEvent {
     Message(Message),
     Result(RetainedResult),
-    WorkspaceReady(Result<signalbox_runner_wire::WorkspaceReady, crate::WorkspaceProvisionError>),
+    Workspace(workspaces::WorkspaceCompletion),
 }
 
 struct RunnerExecution {
@@ -696,28 +667,7 @@ where
                         }
                     }
                 }
-                if let Some(directive) = &resumed.directives.workspace_operation {
-                    let failed = resumed.directives.operation_failure.as_ref();
-                    match directive.action {
-                        DirectiveAction::Await if failed.is_none() => {}
-                        DirectiveAction::Resend
-                            if failed.is_some_and(|failure| {
-                                failure.action == DirectiveAction::Resend
-                            }) => {}
-                        DirectiveAction::DiscardAsRecorded
-                            if failed.is_some_and(|failure| {
-                                failure.action == DirectiveAction::DiscardAsRecorded
-                            }) =>
-                        {
-                            state.acknowledge_provision_failure(&directive.correlation)?
-                        }
-                        _ => {
-                            return Err(RunnerConnectionError::Violation(
-                                ProtocolViolation::ResumeDirectives,
-                            ));
-                        }
-                    }
-                }
+                workspaces::apply_workspace_directives(state, &resumed.directives)?;
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 if let Some(correlation) = &resumed_lease {
                     send_message(
@@ -744,6 +694,7 @@ where
             last_recorded: None,
             configuration: None,
             workspace: None,
+            last_release_recorded: None,
             last_workspace_recorded: None,
             last_provision_failure: None,
             receipt,
@@ -778,13 +729,6 @@ where
     /// Returns the hub-issued epoch of this physical connection.
     pub const fn connection_epoch(&self) -> PositiveU64 {
         self.connection_epoch
-    }
-
-    /// Reports the recovery design gap without constructing wire recovery facts.
-    pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
-        RecoveryUnavailable {
-            gap: RecoveryGap::ReleaseNotBuilt,
-        }
     }
 
     /// Sends one shutdown order naming this exact physical connection epoch.
@@ -905,7 +849,7 @@ where
         tokio::select! {
             message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => message.map(RunnerEvent::Message),
             result = execution_finished(&mut self.execution) => result.map(RunnerEvent::Result),
-            ready = workspaces::workspace_finished(&mut self.workspace) => ready.map(RunnerEvent::WorkspaceReady),
+            ready = workspaces::workspace_finished(&mut self.workspace) => ready.map(RunnerEvent::Workspace),
         }
     }
 
@@ -916,9 +860,8 @@ where
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match event {
             RunnerEvent::Message(message) => self.serve_message(state, message).await,
-            RunnerEvent::WorkspaceReady(ready) => {
-                self.finish_provision(state, ready)?;
-                self.send_retained_workspace(state).await?;
+            RunnerEvent::Workspace(completion) => {
+                self.finish_workspace(state, completion).await?;
                 Ok(None)
             }
             RunnerEvent::Result(result) => {
@@ -1019,14 +962,21 @@ where
                 Ok(None)
             }
             Message::WorkspaceRelease(release) => {
-                if release.correlation.runner_id != self.receipt.runner_id() {
+                if release.correlation.runner_id != self.receipt.runner_id()
+                    || self.execution.is_some()
+                {
                     return Err(RunnerConnectionError::Violation(
                         ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
                 }
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                state.record_release(release.correlation)?;
+                self.ensure_workspace(state)?;
+                self.send_retained_workspace(state).await?;
+                Ok(None)
+            }
+            Message::WorkspaceReleaseRecorded(recorded) => {
+                self.acknowledge_release(state, recorded.correlation)?;
+                Ok(None)
             }
             Message::LeaseOffer(offer) => {
                 self.validate_connection_correlation(
@@ -1035,7 +985,7 @@ where
                 )?;
                 if self.pending_offer.is_some()
                     || state.reconnect_inventory().lease.is_some()
-                    || state.retained_provision().is_some()
+                    || state.reconnect_inventory().workspace_operation.is_some()
                     || offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
                     || self
                         .advertisement
@@ -1730,40 +1680,6 @@ mod tests {
                 connection_epoch: epoch,
                 reason: ShutdownReason::RunnerShutdown,
             })
-        );
-    }
-
-    #[tokio::test]
-    async fn recovery_seam_names_the_unborn_head_gap() {
-        let parent = TempDir::new().expect("a temporary parent is available");
-        let mut state = state_root(&parent);
-        let receipt = issued_receipt(state.state().request_id());
-        state
-            .record_receipt(receipt)
-            .expect("the issued receipt is journaled");
-        let advertisement = empty_advertisement();
-        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
-        let mut hub_io = BufReader::new(hub_io);
-
-        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
-        let hub = async {
-            let _resume = receive_hub_message(&mut hub_io).await;
-            send_hub_message(
-                &mut hub_io,
-                Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
-                    connection_epoch: positive(CONNECTION_EPOCH),
-                    directives: ReconnectDirectives::default(),
-                })),
-            )
-            .await;
-        };
-        let (connection, ()) = tokio::join!(runner, hub);
-        let connection = connection.expect("the production connection is established");
-
-        assert_eq!(
-            connection.recovery_unavailable().gap(),
-            RecoveryGap::ReleaseNotBuilt
         );
     }
 

@@ -5077,6 +5077,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-domain",
+ "signalbox-file-media-linux-sandbox",
  "signalbox-runner-wire",
  "signalbox-tools-basic",
  "tempfile",
