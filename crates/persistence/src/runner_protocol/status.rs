@@ -332,8 +332,9 @@ pub async fn read_runner_status(
         };
         let rows = sqlx::query(
             "SELECT * FROM runner_workspace_leak
-            WHERE ($1::uuid IS NULL OR (runner_id, locator, entry_digest) > ($1, $2, $3))
-            ORDER BY runner_id, locator, entry_digest LIMIT $4",
+            WHERE ($1::uuid IS NULL OR
+                (runner_id, locator COLLATE \"C\", entry_digest COLLATE \"C\") > ($1, $2, $3))
+            ORDER BY runner_id, locator COLLATE \"C\", entry_digest COLLATE \"C\" LIMIT $4",
         )
         .bind(runner)
         .bind(locator)
