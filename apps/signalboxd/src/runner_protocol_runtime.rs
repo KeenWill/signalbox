@@ -4940,6 +4940,63 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn release_resume_rejects_an_unissued_manifest_without_opening_an_epoch() {
+        use signalbox_runner_wire::{ReleaseCorrelation, ReleasePhase, WorkspaceOperation};
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let RunnerEnrollmentResponse::Active(enrolled) = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("enrollment")
+        else {
+            panic!("active enrollment")
+        };
+        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
+        let before = store
+            .load_connection(enrollment)
+            .await
+            .expect("connection")
+            .expect("current epoch");
+        let failure = service
+            .resume(Resume {
+                request_id: enrolled.request_id,
+                digest_version: DIGEST_VERSION,
+                enrollment_id: enrolled.enrollment_id,
+                runner_id: enrolled.runner_id,
+                authentication_id: enrolled.authentication_id,
+                advertisement: empty_advertisement(),
+                prior_registration_revision: enrolled.registration_revision,
+                inventory: signalbox_runner_wire::ReconnectInventory {
+                    workspace_operation: Some(WorkspaceOperation::Release {
+                        correlation: ReleaseCorrelation {
+                            manifest_id: identity(2),
+                            session_id: identity(3),
+                            placement_revision: PositiveU64::try_new(1).expect("first placement"),
+                            runner_id: enrolled.runner_id,
+                        },
+                        phase: ReleasePhase::ReleaseAccepted,
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .expect_err("unissued release authority");
+        assert_eq!(
+            store
+                .load_connection(enrollment)
+                .await
+                .expect("retained connection"),
+            Some(before)
+        );
+        assert_eq!(failure.code, RejectionCode::CorrelationMismatch);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn startup_marks_a_prior_process_connection_lost_before_admission() {
         let (_container, _database_url, store) = postgres_store().await;
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
