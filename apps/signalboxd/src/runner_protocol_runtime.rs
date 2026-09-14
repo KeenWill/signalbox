@@ -2352,6 +2352,11 @@ where
                 if let Some(offer) = service.pending_tool_offer(context.enrollment, context.epoch).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
                     let identity = (offer.correlation.lease_id, offer.correlation.lease_generation);
                     if sent_lease != Some(identity) {
+                        if !sent_promotion && let Some(receipt) = service.promotion_receipt(context.enrollment).await.map_err(RunnerProtocolRuntimeError::Lifecycle)? {
+                            if receipt.connection_epoch != context.epoch { return Ok(()); }
+                            write_message(&mut writer, Message::Enrolled(receipt)).await?;
+                            sent_promotion = true;
+                        }
                         busy_lease = Some(offer.correlation.clone());
                         write_message(&mut writer, Message::LeaseOffer(offer)).await?;
                         sent_lease = Some(identity);
@@ -3035,6 +3040,8 @@ mod tests {
         provision: signalbox_runner_wire::WorkspaceProvision,
         offer: signalbox_runner_wire::LeaseOffer,
         changes: watch::Sender<()>,
+        promoted: std::sync::atomic::AtomicBool,
+        connection: Option<signalbox_persistence::runner_protocol::RunnerConnectionSnapshot>,
     }
 
     impl RunnerRegistrationService for EnrollmentService {
@@ -3058,7 +3065,11 @@ mod tests {
             &self,
             _enrollment: CanonicalUuid,
         ) -> RunnerRegistrationFuture<'_, Option<Enrolled>> {
-            Box::pin(async { Ok(None) })
+            Box::pin(std::future::ready(Ok(self
+                .queued_work
+                .as_ref()
+                .filter(|work| work.promoted.load(std::sync::atomic::Ordering::SeqCst))
+                .map(|_| self.response.clone()))))
         }
         fn replacement_releases(
             &self,
@@ -3109,19 +3120,44 @@ mod tests {
             receipt: signalbox_runner_wire::WorkspaceReady,
         ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>
         {
-            Box::pin(std::future::ready(Err(RunnerRegistrationFailure::new(
-                RunnerInboundFrameKind::WorkspaceReady,
-                AvailableCorrelation::Provision(receipt.correlation),
-                RejectionCode::Unavailable,
-            ))))
+            Box::pin(async move {
+                if let Some(work) = &self.queued_work
+                    && receipt.correlation == work.provision.correlation
+                {
+                    work.promoted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    work.changes.send_replace(());
+                    return Ok(Some(signalbox_runner_wire::WorkspaceRecorded {
+                        correlation: receipt.correlation,
+                        manifest_id: receipt.ready.manifest.manifest_id,
+                        manifest_digest: receipt.ready.manifest_digest,
+                    }));
+                }
+                Err(RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::WorkspaceReady,
+                    AvailableCorrelation::Provision(receipt.correlation),
+                    RejectionCode::Unavailable,
+                ))
+            })
         }
         fn enroll(
             &self,
             _request: Enroll,
         ) -> RunnerRegistrationFuture<'_, RunnerEnrollmentResponse> {
-            Box::pin(std::future::ready(Ok(RunnerEnrollmentResponse::Active(
-                self.response.clone(),
-            ))))
+            let response = self.response.clone();
+            Box::pin(std::future::ready(Ok(if self.queued_work.is_some() {
+                RunnerEnrollmentResponse::Pending(signalbox_runner_wire::ReplacementPending {
+                    request_id: response.request_id,
+                    enrollment_id: response.enrollment_id,
+                    runner_id: response.runner_id,
+                    authentication_id: response.authentication_id,
+                    registration_revision: response.registration_revision,
+                    connection_epoch: response.connection_epoch,
+                    advertisement_digest: response.advertisement_digest,
+                })
+            } else {
+                RunnerEnrollmentResponse::Active(response)
+            })))
         }
 
         fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed> {
@@ -3151,6 +3187,11 @@ mod tests {
             epoch: PositiveU64,
             _transition: RunnerConnectionTransition,
         ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome> {
+            if let Some(connection) = self.queued_work.as_ref().and_then(|work| work.connection) {
+                return Box::pin(std::future::ready(Ok(
+                    RunnerConnectionTransitionOutcome::Current(connection),
+                )));
+            }
             let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get())
                 .expect("the wire epoch is positive");
             Box::pin(std::future::ready(Ok(
@@ -3619,6 +3660,8 @@ mod tests {
         let work = Arc::new(QueuedRunnerWork {
             provision: provision.clone(),
             changes,
+            promoted: std::sync::atomic::AtomicBool::new(false),
+            connection: None,
             offer: LeaseOffer {
                 correlation,
                 effect_class: EffectClass::Pure,
@@ -3649,7 +3692,7 @@ mod tests {
         .expect("enroll");
         assert!(matches!(
             read_frame(&mut reader).await.expect("receipt").message,
-            Message::Enrolled(_)
+            Message::ReplacementPending(_)
         ));
         assert!(matches!(
             read_frame(&mut reader).await.expect("challenge").message,
@@ -3666,6 +3709,166 @@ mod tests {
                 .await
                 .is_err(),
             "a second session's offer must remain queued while provisioning is unsettled"
+        );
+        drop(reader);
+        drop(writer);
+        server
+            .await
+            .expect("connection task joined")
+            .expect("closed peer is handled");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn provisioning_and_promotion_precede_a_later_lease_offer_for_another_session() {
+        use signalbox_runner_wire::{
+            EffectClass, LeaseOffer, ProvisionCorrelation, ResultBounds, SandboxProfile,
+            WorkspaceProvision,
+        };
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let (_container, _database_url, store) = postgres_store().await;
+        let durable = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let RunnerEnrollmentResponse::Active(response) = durable
+            .enroll(Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("durable connection fixture")
+        else {
+            panic!("active connection fixture")
+        };
+        let connection = store
+            .load_connection(RunnerEnrollmentId::from_uuid(
+                response.enrollment_id.into_uuid(),
+            ))
+            .await
+            .expect("connection query")
+            .expect("durable connection");
+        let mut correlation = canonical_lease_correlation();
+        correlation.runner_id = response.runner_id;
+        let provision = WorkspaceProvision {
+            correlation: ProvisionCorrelation {
+                authorization_id: identity(5),
+                session_id: identity(6),
+                runner_id: response.runner_id,
+                placement_revision: correlation.placement_revision,
+                registration_revision: response.registration_revision,
+                repository: None,
+                sandbox_profile: SandboxProfile::Ambient,
+                credential_profile: None,
+            },
+            recovery: None,
+        };
+        assert_ne!(provision.correlation.session_id, correlation.session_id);
+        let (changes, _) = watch::channel(());
+        let work = Arc::new(QueuedRunnerWork {
+            provision: provision.clone(),
+            changes,
+            promoted: std::sync::atomic::AtomicBool::new(false),
+            connection: Some(connection),
+            offer: LeaseOffer {
+                correlation,
+                effect_class: EffectClass::Pure,
+                credential_profile: None,
+                grant_revision: None,
+                normalized_arguments: serde_json::json!({"text":"echo"}),
+                result_bounds: ResultBounds::version_one(),
+            },
+        });
+        let service = EnrollmentService {
+            response,
+            queued_work: Some(Arc::clone(&work)),
+        };
+        let (server, client) = UnixStream::pair().expect("local wire");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve_connection(server, service, shutdown));
+        let (reader, mut writer) = client.into_split();
+        let mut reader = BufReader::new(reader);
+        write_message(
+            &mut writer,
+            Message::Enroll(Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement,
+            }),
+        )
+        .await
+        .expect("enroll");
+        assert!(matches!(
+            read_frame(&mut reader).await.expect("receipt").message,
+            Message::ReplacementPending(_)
+        ));
+        assert!(matches!(
+            read_frame(&mut reader).await.expect("challenge").message,
+            Message::Heartbeat(_)
+        ));
+        assert_eq!(
+            read_frame(&mut reader).await.expect("provision").message,
+            Message::WorkspaceProvision(provision.clone())
+        );
+        work.changes.send_replace(());
+        // The notification arrives while the first workspace is still awaiting its ready receipt.
+        assert!(
+            timeout(Duration::from_millis(50), read_frame(&mut reader))
+                .await
+                .is_err(),
+            "a second session's offer must remain queued while provisioning is unsettled"
+        );
+        let manifest = signalbox_runner_wire::WorkspaceManifest {
+            lifecycle: signalbox_runner_wire::ManifestLifecycle::Ready,
+            manifest_id: identity(7),
+            session: provision.correlation.session_id,
+            placement_revision: provision.correlation.placement_revision,
+            runner: provision.correlation.runner_id,
+            repository: None,
+            canonical_clone_url_digest: None,
+            credential_profile: None,
+            sandbox_profile: SandboxProfile::Ambient,
+            relative_path: format!(
+                "sessions/{}/{}/work",
+                provision.correlation.session_id,
+                provision.correlation.placement_revision.get()
+            ),
+            recovery: None,
+        };
+        let digest =
+            signalbox_runner_wire::workspace_manifest_digest(&manifest).expect("ready digest");
+        write_message(
+            &mut writer,
+            Message::WorkspaceReady(signalbox_runner_wire::WorkspaceReady {
+                correlation: provision.correlation,
+                working_directory: format!("/runner/{}", manifest.relative_path),
+                ready: signalbox_runner_wire::ReadyManifest {
+                    manifest,
+                    manifest_digest: digest,
+                },
+            }),
+        )
+        .await
+        .expect("ready receipt promotes successor and wakes lease delivery");
+        assert!(matches!(
+            read_frame(&mut reader)
+                .await
+                .expect("workspace acknowledgement")
+                .message,
+            Message::WorkspaceRecorded(_)
+        ));
+        assert!(matches!(
+            read_frame(&mut reader)
+                .await
+                .expect("promotion precedes execution authority")
+                .message,
+            Message::Enrolled(_)
+        ));
+        assert_eq!(
+            read_frame(&mut reader)
+                .await
+                .expect("queued lease after promotion")
+                .message,
+            Message::LeaseOffer(work.offer.clone())
         );
         drop(reader);
         drop(writer);
