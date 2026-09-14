@@ -1,6 +1,7 @@
 ALTER TABLE runner_replacement_workspace_ready
     ADD COLUMN manifest_digest text NOT NULL CHECK (manifest_digest ~ '^[0-9a-f]{64}$');
 
+DROP TABLE runner_replacement_workspace_release_reauthorization;
 DROP TABLE runner_replacement_workspace_released;
 DROP TABLE runner_replacement_workspace_release;
 

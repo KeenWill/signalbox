@@ -547,3 +547,56 @@ fn startup_inventory_reports_manifests_and_strays_without_following_links() {
     page.validate().expect("canonical page");
     assert!(Path::new(prepared.execution_directory.as_str()).exists());
 }
+
+#[tokio::test]
+async fn failed_repository_preparation_removes_its_unpublished_staging_tree() {
+    let (parent, state) = fixture_root();
+    let store = state.workspace_store().expect("workspace store");
+    let request = repository_request();
+    let result = store
+        .prepare_repository_workspace(&request, |target| async move {
+            fs::write(
+                target.path().join("partial-clone"),
+                PREPARED_REPOSITORY_BYTES,
+            )?;
+            Err::<Recovery, io::Error>(io::Error::other("checkout refused"))
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(PrepareRepositoryWorkspaceError::Preparation(_))
+    ));
+    let session = parent
+        .path()
+        .join("runner-state/sessions")
+        .join(request.session().to_string());
+    assert_eq!(fs::read_dir(session).expect("session directory").count(), 0);
+}
+
+#[tokio::test]
+async fn aborted_repository_preparation_removes_its_unpublished_staging_tree() {
+    let (parent, state) = fixture_root();
+    let store = state.workspace_store().expect("workspace store");
+    let request = repository_request();
+    let session = parent
+        .path()
+        .join("runner-state/sessions")
+        .join(request.session().to_string());
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let worker = tokio::spawn(async move {
+        store
+            .prepare_repository_workspace(&request, |target| async move {
+                fs::write(
+                    target.path().join("partial-clone"),
+                    PREPARED_REPOSITORY_BYTES,
+                )?;
+                started.send(()).expect("preparation entered");
+                std::future::pending::<Result<Recovery, io::Error>>().await
+            })
+            .await
+    });
+    entered.await.expect("staging exists");
+    worker.abort();
+    assert!(worker.await.expect_err("worker aborted").is_cancelled());
+    assert_eq!(fs::read_dir(session).expect("session directory").count(), 0);
+}

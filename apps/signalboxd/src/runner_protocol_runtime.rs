@@ -3026,6 +3026,7 @@ mod tests {
         offer: signalbox_runner_wire::LeaseOffer,
         changes: watch::Sender<()>,
         promoted: std::sync::atomic::AtomicBool,
+        workspace_recorded: bool,
         connection: Option<signalbox_persistence::runner_protocol::RunnerConnectionSnapshot>,
     }
 
@@ -3095,6 +3096,7 @@ mod tests {
             Box::pin(std::future::ready(Ok(self
                 .queued_work
                 .as_ref()
+                .filter(|work| !work.workspace_recorded)
                 .map(|work| vec![work.provision.clone()])
                 .unwrap_or_default())))
         }
@@ -3146,6 +3148,22 @@ mod tests {
         }
 
         fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed> {
+            if self
+                .queued_work
+                .as_ref()
+                .is_some_and(|work| work.workspace_recorded)
+            {
+                assert_eq!(
+                    request.inventory,
+                    Default::default(),
+                    "recorded workspace leaves an empty resume journal"
+                );
+                return Box::pin(std::future::ready(Ok(Resumed {
+                    connection_epoch: self.response.connection_epoch,
+                    registration_revision: self.response.registration_revision,
+                    directives: Default::default(),
+                })));
+            }
             Box::pin(std::future::ready(Err(RunnerRegistrationFailure::new(
                 RunnerInboundFrameKind::Resume,
                 AvailableCorrelation::Enrollment(request.request_id),
@@ -3646,6 +3664,7 @@ mod tests {
             provision: provision.clone(),
             changes,
             promoted: std::sync::atomic::AtomicBool::new(false),
+            workspace_recorded: false,
             connection: None,
             offer: LeaseOffer {
                 correlation,
@@ -3705,6 +3724,128 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn reconnect_with_recorded_workspace_delivers_promotion_before_a_queued_offer() {
+        use signalbox_runner_wire::{
+            EffectClass, LeaseOffer, ProvisionCorrelation, ResultBounds, SandboxProfile,
+            WorkspaceProvision,
+        };
+        let request_id = identity(1);
+        let advertisement = empty_advertisement();
+        let (_container, _database_url, store) = postgres_store().await;
+        let durable = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let RunnerEnrollmentResponse::Active(response) = durable
+            .enroll(Enroll {
+                request_id,
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("durable connection fixture")
+        else {
+            panic!("active connection fixture")
+        };
+        let connection = store
+            .load_connection(RunnerEnrollmentId::from_uuid(
+                response.enrollment_id.into_uuid(),
+            ))
+            .await
+            .expect("connection query")
+            .expect("durable connection");
+        let mut correlation = canonical_lease_correlation();
+        correlation.runner_id = response.runner_id;
+        let provision = WorkspaceProvision {
+            correlation: ProvisionCorrelation {
+                authorization_id: identity(5),
+                session_id: identity(6),
+                runner_id: response.runner_id,
+                placement_revision: correlation.placement_revision,
+                registration_revision: response.registration_revision,
+                repository: None,
+                sandbox_profile: SandboxProfile::Ambient,
+                credential_profile: None,
+            },
+            recovery: None,
+        };
+        assert_ne!(provision.correlation.session_id, correlation.session_id);
+        let (changes, _) = watch::channel(());
+        let work = Arc::new(QueuedRunnerWork {
+            provision: provision.clone(),
+            changes,
+            promoted: std::sync::atomic::AtomicBool::new(false),
+            workspace_recorded: true,
+            connection: Some(connection),
+            offer: LeaseOffer {
+                correlation,
+                effect_class: EffectClass::Pure,
+                credential_profile: None,
+                grant_revision: None,
+                normalized_arguments: serde_json::json!({"text":"echo"}),
+                result_bounds: ResultBounds::version_one(),
+            },
+        });
+        let service = EnrollmentService {
+            response: response.clone(),
+            queued_work: Some(Arc::clone(&work)),
+        };
+        let (server, client) = UnixStream::pair().expect("local wire");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve_connection(server, service, shutdown));
+        let (reader, mut writer) = client.into_split();
+        let mut reader = BufReader::new(reader);
+        write_message(
+            &mut writer,
+            Message::Resume(Box::new(Resume {
+                request_id: response.request_id,
+                digest_version: DIGEST_VERSION,
+                enrollment_id: response.enrollment_id,
+                runner_id: response.runner_id,
+                authentication_id: response.authentication_id,
+                advertisement,
+                prior_registration_revision: response.registration_revision,
+                inventory: Default::default(),
+            })),
+        )
+        .await
+        .expect("resume after WorkspaceRecorded and before Enrolled");
+        assert!(matches!(
+            read_frame(&mut reader).await.expect("resumed").message,
+            Message::Resumed(_)
+        ));
+        assert!(matches!(
+            read_frame(&mut reader)
+                .await
+                .expect("initial challenge")
+                .message,
+            Message::Heartbeat(_)
+        ));
+        // Expose the outstanding promotion after the initial heartbeat so the lease-change arm owns delivery.
+        work.promoted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        work.changes.send_replace(());
+        assert!(matches!(
+            read_frame(&mut reader)
+                .await
+                .expect("promotion before offer")
+                .message,
+            Message::Enrolled(_)
+        ));
+        assert_eq!(
+            read_frame(&mut reader)
+                .await
+                .expect("offer after promotion")
+                .message,
+            Message::LeaseOffer(work.offer.clone())
+        );
+        drop(reader);
+        drop(writer);
+        server
+            .await
+            .expect("server joined")
+            .expect("closed peer handled");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn provisioning_and_promotion_precede_a_later_lease_offer_for_another_session() {
         use signalbox_runner_wire::{
             EffectClass, LeaseOffer, ProvisionCorrelation, ResultBounds, SandboxProfile,
@@ -3753,6 +3894,7 @@ mod tests {
             provision: provision.clone(),
             changes,
             promoted: std::sync::atomic::AtomicBool::new(false),
+            workspace_recorded: false,
             connection: Some(connection),
             offer: LeaseOffer {
                 correlation,

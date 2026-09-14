@@ -138,8 +138,9 @@ reaps it and journals its outcome before the next resume handshake.
 
 The runner retains the complete provisioning request and ready receipt in its
 private journal. Restart recomputes the fixed path and authenticates the root
-and manifest, preserving session files. Equal replay retains the manifest
-identity and ready receipt. A changed repository mapping fails as
+and manifest, preserving session files. A cleanup guard removes unpublished
+repository staging on preparation failure or cancellation. Equal replay retains
+the manifest identity and ready receipt. A changed repository mapping fails as
 `manifest_conflict`. Reconnect admits only the exact stored daemon authorization
 under the unchanged registration, and the runner resends its authenticated
 receipt until acknowledgement activates the manifest and clears the journal. The

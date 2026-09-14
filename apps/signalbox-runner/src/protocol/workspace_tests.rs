@@ -287,6 +287,18 @@ async fn failed_anonymous_clone(missing_revision: bool) {
         .await
         .expect("expected clone failure keeps serving");
     let failed = receive_message(&mut hub).await.expect("typed refusal");
+    let session = directory
+        .path()
+        .join("state/sessions")
+        .join(request.correlation.session_id.to_string());
+    assert_eq!(
+        std::fs::read_dir(session)
+            .expect("failed clone session")
+            .count(),
+        0,
+        "failed real Git acquisition leaves no staging clone"
+    );
+
     let Message::OperationFailed(failure) = &failed else {
         panic!("operation failure")
     };

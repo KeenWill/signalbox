@@ -107,7 +107,11 @@ fn optional_directory(parent: &File, name: &str) -> Result<Option<File>, RunnerW
     }
 }
 
-fn finish_deletion(trash: &File, name: &str, placement: File) -> Result<(), RunnerWorkspaceError> {
+pub(super) fn finish_deletion(
+    trash: &File,
+    name: &str,
+    placement: File,
+) -> Result<(), RunnerWorkspaceError> {
     if !path_names_directory(trash, name, &placement)? {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
