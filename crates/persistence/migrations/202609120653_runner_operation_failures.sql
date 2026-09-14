@@ -19,6 +19,9 @@ CREATE TABLE runner_lease_failure (
 CREATE TRIGGER runner_lease_failure_is_append_only
     BEFORE UPDATE OR DELETE ON runner_lease_failure
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER runner_lease_failure_rejects_truncate
+    BEFORE TRUNCATE ON runner_lease_failure
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE FUNCTION require_runner_lease_refusal() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
