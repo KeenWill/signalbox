@@ -217,13 +217,15 @@ dispatch generation. Exhausting either generation fails closed.
 
 A completed or refused retry resumes the same turn through a fresh prepared turn
 attempt. An ambiguous retry enters tool recovery with its already yielded
-issuing attempt retained. Another connection loss keeps the request parked;
-another explicit replacement is required. A successor lost before receiving an
-offer retains the original loss correlation. Later requests execute in proposal
-order only after the retained request resolves. Once the complete batch
-resolves, continuation projects its results in order, appends each pending
-relocation once, and prepares the next model call. This is the user-replacement
-retry path, not a general automatic retry policy.
+issuing attempt retained. Automatic reconciliation projects the batch and its
+pending relocation before recording the reconciliation-required frontier.
+Another connection loss keeps the request parked; another explicit replacement
+is required. A successor lost before receiving an offer retains the original
+loss correlation. Later requests execute in proposal order only after the
+retained request resolves. Once the complete batch resolves, continuation
+projects its results in order, appends each pending relocation once, and
+prepares the next model call. This is the user-replacement retry path, not a
+general automatic retry policy.
 
 A stop and retry dispatch use the same turn dispatch gate. A stop that wins
 before dispatch suppresses the retry and projects `ToolClosed`, preserving any

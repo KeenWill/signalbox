@@ -664,42 +664,27 @@ pub(crate) async fn persist_tool_reconciliation_required(
     crate::tool_loop::persist_result_entry_slice(connection, reconciliation.tool_result_entries())
         .await
         .map_err(map_tool_evidence_error)?;
-    let result_snapshot = reconciliation.terminal_snapshot();
+    let snapshot = reconciliation.terminal_snapshot();
     let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_placement_boundary WHERE session_id = $1 AND context_frontier_id = $2)")
-        .bind(reconciliation.session().into_uuid()).bind(result_snapshot.frontier().snapshot().into_uuid())
+        .bind(reconciliation.session().into_uuid()).bind(snapshot.frontier().snapshot().into_uuid())
         .fetch_one(&mut *connection).await?;
     if retained {
         let stored = super::load_call_snapshot(
             connection,
             reconciliation.session(),
-            result_snapshot.frontier().snapshot(),
+            snapshot.frontier().snapshot(),
         )
         .await?
         .reconstitute()
         .ok_or(ModelCallCorruption::Inconsistent(
             "terminal takeover snapshot",
         ))?;
-        if stored != *result_snapshot {
+        if stored != *snapshot {
             return Err(ModelCallCorruption::Inconsistent("terminal takeover snapshot").into());
         }
     } else {
-        insert_snapshot(connection, result_snapshot).await?;
+        insert_snapshot(connection, snapshot).await?;
     }
-    let takeover_boundaries = crate::runner_protocol::append_takeover_boundaries(
-        connection,
-        reconciliation.session(),
-        result_snapshot,
-    )
-    .await
-    .map_err(|error| match error {
-        crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
-            ModelCallRepositoryError::from(source)
-        }
-        _ => ModelCallCorruption::Inconsistent("terminal takeover boundary").into(),
-    })?;
-    let snapshot = takeover_boundaries
-        .last()
-        .map_or(result_snapshot, |boundary| boundary.frontier());
     persist_reclassified_pending_steering(
         connection,
         reconciliation.session(),
@@ -764,7 +749,13 @@ pub(crate) async fn persist_tool_reconciliation_required(
                 )
             )",
     )
-    .bind(snapshot.frontier().snapshot().into_uuid())
+    .bind(
+        reconciliation
+            .terminal_snapshot()
+            .frontier()
+            .snapshot()
+            .into_uuid(),
+    )
     .bind(reconciliation.attempt().id().into_uuid())
     .bind(reconciliation.tool_attempt().attempt().into_uuid())
     .bind(turn_id_to_uuid(reconciliation.turn()))
@@ -783,7 +774,7 @@ pub(crate) async fn persist_tool_reconciliation_required(
             turn: reconciliation.turn(),
             disposition: TurnTerminalOutboxDisposition::ToolAttemptReconciliationRequired {
                 attempt: reconciliation.tool_attempt().attempt(),
-                terminal_frontier: snapshot.frontier().snapshot(),
+                terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
             },
         },
     )

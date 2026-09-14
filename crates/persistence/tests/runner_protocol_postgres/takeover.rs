@@ -1082,6 +1082,17 @@ async fn retry_refusal_resumes_the_turn_with_the_retained_failure() -> Result<()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn ambiguous_retry_enters_tool_recovery_without_rewriting_the_yielded_attempt()
 -> Result<(), Box<dyn Error>> {
+    reconcile_ambiguous_retry(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_reconciliation_projects_the_pending_takeover_boundary()
+-> Result<(), Box<dyn Error>> {
+    reconcile_ambiguous_retry(true).await
+}
+
+async fn reconcile_ambiguous_retry(automatic: bool) -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = installed_takeover(
         &pool,
@@ -1133,7 +1144,35 @@ async fn ambiguous_retry_enters_tool_recovery_without_rewriting_the_yielded_atte
             "yielded_to_durable_wait".into()
         )
     );
-    stop_retained_turn(&pool, &fixture.facts).await?;
+    if automatic {
+        let repository = signalbox_persistence::automatic_reconciliation::PostgresAutomaticReconciliationRepository::new(pool.clone());
+        let claimed = repository.claim_due().await?;
+        assert_eq!(claimed.claimed().len(), 1);
+        assert_eq!(claimed.claimed()[0].turn(), fixture.facts.turn);
+        assert_eq!(
+            repository.reconcile(claimed.claimed()[0]).await?,
+            signalbox_application::AutomaticReconciliationOutcome::Reconciled,
+        );
+        let kinds: Vec<String> = sqlx::query_scalar(
+            "SELECT entry.payload_kind FROM turn_lifecycle AS turn
+             JOIN LATERAL resolve_context_frontier_members(turn.session_id, turn.terminal_frontier_id) AS member ON true
+             JOIN semantic_transcript_entry AS entry USING (source_session_id, semantic_entry_id)
+             WHERE turn.turn_id = $1 ORDER BY member.member_position DESC LIMIT 2",
+        ).bind(fixture.facts.turn.into_uuid()).fetch_all(&pool).await?;
+        assert_eq!(
+            kinds,
+            ["runner_placement_changed", "tool_closed_by_turn_end"]
+        );
+        let boundaries: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_placement_boundary WHERE session_id = $1",
+        )
+        .bind(fixture.facts.session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(boundaries, 1);
+    } else {
+        stop_retained_turn(&pool, &fixture.facts).await?;
+    }
     let terminal: String = sqlx::query_scalar(
         "SELECT terminal_disposition_kind FROM turn_lifecycle WHERE turn_id = $1",
     )
