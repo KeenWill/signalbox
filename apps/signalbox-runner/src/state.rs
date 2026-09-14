@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{CanonicalUuid, Digest, PositiveU64};
 use uuid::Uuid;
 
-use crate::journal::Journal;
+use crate::{active_workspaces::ActiveWorkspaces, journal::Journal};
 
 const STATE_DOCUMENT_VERSION: u64 = 1;
 const ROOT_MODE: u32 = 0o700;
@@ -177,8 +177,12 @@ pub enum StateResource {
     TemporaryDocument,
     /// Current private operation journal.
     Journal,
+    /// Acknowledged active workspace receipts.
+    ActiveWorkspaces,
     /// Single-use replacement journal used for atomic publication.
     TemporaryJournal,
+    /// Atomic replacement of the active workspace receipts.
+    TemporaryActiveWorkspaces,
 }
 
 impl fmt::Display for StateResource {
@@ -189,6 +193,8 @@ impl fmt::Display for StateResource {
             Self::StateDocument => "runner state document",
             Self::TemporaryDocument => "runner temporary state document",
             Self::Journal => "runner operation journal",
+            Self::ActiveWorkspaces => "runner active workspace receipts",
+            Self::TemporaryActiveWorkspaces => "runner temporary active workspace receipts",
             Self::TemporaryJournal => "runner temporary operation journal",
         })
     }
@@ -313,8 +319,10 @@ impl Error for RunnerStateError {
 #[derive(Debug)]
 pub struct RunnerStateRoot {
     directory: File,
+    canonical_root: std::path::PathBuf,
     state: RunnerState,
     journal: Journal,
+    active_workspaces: ActiveWorkspaces,
 }
 
 impl RunnerStateRoot {
@@ -418,7 +426,7 @@ impl RunnerStateRoot {
             }
         })?;
 
-        let (state, journal) = match openat(
+        let (state, journal, active_workspaces) = match openat(
             &directory,
             STATE_FILE,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -427,14 +435,16 @@ impl RunnerStateRoot {
             Ok(descriptor) => (
                 read_state(File::from(descriptor), effective_user)?,
                 Journal::open(&directory)?,
+                ActiveWorkspaces::open(&directory)?,
             ),
             Err(rustix::io::Errno::NOENT) => {
                 let journal = Journal::initialize(&directory)?;
+                let active_workspaces = ActiveWorkspaces::initialize(&directory)?;
                 let state = RunnerState::Pristine {
                     request_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
                 };
                 write_state(&directory, &state)?;
-                (state, journal)
+                (state, journal, active_workspaces)
             }
             Err(error) => {
                 return Err(RunnerStateError::Io {
@@ -445,10 +455,18 @@ impl RunnerStateRoot {
             }
         };
         journal.validate_owner(&state)?;
+        active_workspaces.validate_owner(&state)?;
+        let canonical_root = fs::canonicalize(path).map_err(|source| RunnerStateError::Io {
+            operation: StateOperation::Inspect,
+            resource: StateResource::Root,
+            source,
+        })?;
         Ok(Self {
             directory,
+            canonical_root,
             state,
             journal,
+            active_workspaces,
         })
     }
 
@@ -457,9 +475,223 @@ impl RunnerStateRoot {
         &self.state
     }
 
+    pub(crate) fn workspace_store(
+        &self,
+    ) -> Result<crate::workspace::RunnerWorkspaceStore, RunnerStateError> {
+        let directory = self
+            .directory
+            .try_clone()
+            .map_err(|source| RunnerStateError::Io {
+                operation: StateOperation::Open,
+                resource: StateResource::Root,
+                source,
+            })?;
+        Ok(crate::workspace::RunnerWorkspaceStore::from_root(
+            directory,
+            self.canonical_root.clone(),
+        ))
+    }
+
     /// Projects the replayed durable journal into the next resume inventory.
     pub fn reconnect_inventory(&self) -> signalbox_runner_wire::ReconnectInventory {
         self.journal.reconnect_inventory()
+    }
+
+    pub(crate) fn retained_release(
+        &self,
+    ) -> Option<(
+        &signalbox_runner_wire::ReleaseCorrelation,
+        signalbox_runner_wire::ReleasePhase,
+    )> {
+        self.journal.release()
+    }
+    pub(crate) fn accepted_release(&self) -> Option<crate::journal::AcceptedWorkspaceRelease> {
+        self.journal.accepted_release()
+    }
+    pub(crate) fn record_release(
+        &mut self,
+        correlation: signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .state
+            .receipt()
+            .is_some_and(|receipt| receipt.runner_id() == correlation.runner_id)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.journal.record_release(&self.directory, correlation)
+    }
+    pub(crate) fn complete_release(
+        &mut self,
+        correlation: &signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.complete_release(&self.directory, correlation)
+    }
+    pub(crate) fn acknowledge_release(
+        &mut self,
+        correlation: &signalbox_runner_wire::ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if self.journal.release()
+            != Some((
+                correlation,
+                signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
+            ))
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.active_workspaces
+            .remove(&self.directory, correlation.manifest_id)?;
+        self.journal
+            .acknowledge_release(&self.directory, correlation)
+    }
+
+    /// Authenticates retained ready placements and acknowledged identities before reconnecting.
+    pub fn authenticate_active_workspaces(
+        &self,
+        configuration: &crate::RunnerConfiguration,
+    ) -> Result<(), crate::WorkspaceProvisionError> {
+        use crate::WorkspaceProvisionError;
+        let store = self
+            .workspace_store()
+            .map_err(|_| WorkspaceProvisionError::Storage)?;
+        if let Some((request, Some(ready))) = self.journal.provision() {
+            let checked = crate::workspace::provision::CheckedProvision::check(
+                configuration,
+                request.clone(),
+            )
+            .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
+            if Some(checked.canonical_clone_url_digest())
+                != self.journal.provision_clone_url_digest()
+            {
+                return Err(WorkspaceProvisionError::ManifestConflict);
+            }
+            store
+                .authenticate_pending_ready(ready)
+                .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
+        }
+        for active in self.active_workspaces.records.values() {
+            if self.journal.release().is_some_and(|(release, _)| {
+                release.manifest_id == active.ready.ready.manifest.manifest_id
+            }) {
+                continue;
+            }
+            let ready = &active.ready;
+            let manifest = &ready.ready.manifest;
+            if !configuration
+                .advertisement()
+                .sandbox_profiles
+                .contains(&manifest.sandbox_profile)
+            {
+                return Err(WorkspaceProvisionError::ManifestConflict);
+            }
+            if let Some(key) = &manifest.repository {
+                let repository = configuration
+                    .repository(key)
+                    .ok_or(WorkspaceProvisionError::ManifestConflict)?;
+                if repository.credential_profile() != manifest.credential_profile.as_ref()
+                    || manifest.canonical_clone_url_digest.as_ref()
+                        != Some(&signalbox_runner_wire::clone_url_digest(
+                            repository.clone_url(),
+                        ))
+                {
+                    return Err(WorkspaceProvisionError::ManifestConflict);
+                }
+            }
+            let observed = store
+                .authenticate_active(ready)
+                .map_err(|_| WorkspaceProvisionError::ManifestConflict)?;
+            if observed != active.directory_identity {
+                return Err(WorkspaceProvisionError::ManifestConflict);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retained_provision(
+        &self,
+    ) -> Option<(
+        &signalbox_runner_wire::WorkspaceProvision,
+        Option<&signalbox_runner_wire::WorkspaceReady>,
+    )> {
+        self.journal.provision()
+    }
+
+    pub(crate) fn retained_provision_clone_url_digest(&self) -> Option<&Digest> {
+        self.journal.provision_clone_url_digest()
+    }
+
+    pub(crate) fn record_provision(
+        &mut self,
+        request: signalbox_runner_wire::WorkspaceProvision,
+        canonical_clone_url_digest: Digest,
+    ) -> Result<(), RunnerStateError> {
+        let receipt = self
+            .state
+            .receipt()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if receipt.runner_id() != request.correlation.runner_id
+            || (receipt.registration_revision() != request.correlation.registration_revision
+                && !self
+                    .journal
+                    .provision()
+                    .is_some_and(|(prior, _)| prior == &request))
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.journal
+            .record_provision(&self.directory, request, canonical_clone_url_digest)
+    }
+
+    pub(crate) fn retained_provision_failure(
+        &self,
+    ) -> Option<&signalbox_runner_wire::OperationFailure> {
+        self.journal.provision_failure()
+    }
+    pub(crate) fn record_provision_failure(
+        &mut self,
+        failure: signalbox_runner_wire::OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .record_provision_failure(&self.directory, failure)
+    }
+    pub(crate) fn acknowledge_provision_failure(
+        &mut self,
+        correlation: &signalbox_runner_wire::OperationCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        self.journal
+            .acknowledge_provision_failure(&self.directory, correlation)
+    }
+
+    pub(crate) fn record_workspace_ready(
+        &mut self,
+        ready: signalbox_runner_wire::WorkspaceReady,
+    ) -> Result<(), RunnerStateError> {
+        self.journal.record_workspace_ready(&self.directory, ready)
+    }
+
+    pub(crate) fn acknowledge_workspace(
+        &mut self,
+        recorded: &signalbox_runner_wire::WorkspaceRecorded,
+    ) -> Result<(), RunnerStateError> {
+        let ready = self
+            .journal
+            .provision()
+            .and_then(|(_, ready)| ready)
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        let identity = self
+            .workspace_store()?
+            .authenticate_active(ready)
+            .map_err(|_| RunnerStateError::InvalidTransition)?;
+        if ready.correlation != recorded.correlation
+            || ready.ready.manifest.manifest_id != recorded.manifest_id
+            || ready.ready.manifest_digest != recorded.manifest_digest
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.active_workspaces
+            .record(&self.directory, ready.clone(), identity)?;
+        self.journal
+            .acknowledge_workspace(&self.directory, recorded)
     }
 
     /// Fsyncs the exact claimed lease phase before its named execution step.
@@ -614,6 +846,7 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
 pub(crate) enum DocumentKind {
     Enrollment,
     Journal,
+    ActiveWorkspaces,
 }
 
 impl DocumentKind {
@@ -621,6 +854,7 @@ impl DocumentKind {
         match self {
             Self::Enrollment => STATE_FILE,
             Self::Journal => "operation-journal.json",
+            Self::ActiveWorkspaces => "active-workspaces.json",
         }
     }
 
@@ -628,6 +862,7 @@ impl DocumentKind {
         match self {
             Self::Enrollment => StateResource::StateDocument,
             Self::Journal => StateResource::Journal,
+            Self::ActiveWorkspaces => StateResource::ActiveWorkspaces,
         }
     }
 
@@ -635,6 +870,7 @@ impl DocumentKind {
         match self {
             Self::Enrollment => StateResource::TemporaryDocument,
             Self::Journal => StateResource::TemporaryJournal,
+            Self::ActiveWorkspaces => StateResource::TemporaryActiveWorkspaces,
         }
     }
 }

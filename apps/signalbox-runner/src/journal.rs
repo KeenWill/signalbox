@@ -10,8 +10,10 @@ use rustix::{
 };
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
-    LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, ReconnectInventory,
-    RetainedResult,
+    Digest, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
+    OperationCorrelation, OperationFailure, ProvisionPhase, ReconnectInventory, ReleaseCorrelation,
+    ReleasePhase, RetainedResult, WorkspaceOperation, WorkspaceProvision, WorkspaceReady,
+    WorkspaceRecorded,
 };
 use std::{
     fs::File,
@@ -33,10 +35,29 @@ pub(crate) struct Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum JournalEntry {
+    Release {
+        correlation: ReleaseCorrelation,
+        phase: ReleasePhase,
+    },
     Lease {
         phase: LeasePhase,
         result: Option<RetainedResult>,
     },
+    Provision {
+        request: WorkspaceProvision,
+        canonical_clone_url_digest: Digest,
+        ready: Option<WorkspaceReady>,
+        failure: Option<Box<OperationFailure>>,
+    },
+}
+
+/// Cleanup capability obtained only from a durably accepted journal entry.
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedWorkspaceRelease(ReleaseCorrelation);
+impl AcceptedWorkspaceRelease {
+    pub(crate) fn correlation(&self) -> &ReleaseCorrelation {
+        &self.0
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,12 +82,30 @@ impl Journal {
                 _ => return Err(RunnerStateError::CorruptState),
             }
         }
+        if let Some(JournalEntry::Provision { request, .. }) = self.entries.first() {
+            match state {
+                crate::RunnerState::Enrolled { receipt }
+                    if receipt.runner_id() == request.correlation.runner_id
+                        && receipt.registration_revision()
+                            >= request.correlation.registration_revision => {}
+                _ => return Err(RunnerStateError::CorruptState),
+            }
+        }
+        if let Some((correlation, _)) = self.release()
+            && !state
+                .receipt()
+                .is_some_and(|receipt| receipt.runner_id() == correlation.runner_id)
+        {
+            return Err(RunnerStateError::CorruptState);
+        }
         Ok(())
     }
 
     pub(crate) fn initialize(directory: &File) -> Result<Self, RunnerStateError> {
         match Self::open(directory) {
-            Ok(journal) if journal.entries.is_empty() => return Ok(journal),
+            Ok(journal) if journal.entries.is_empty() => {
+                return Ok(journal);
+            }
             Ok(_) => return Err(RunnerStateError::CorruptState),
             Err(RunnerStateError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound => {}
@@ -121,10 +160,34 @@ impl Journal {
 
     pub(crate) fn reconnect_inventory(&self) -> ReconnectInventory {
         match self.entries.first() {
+            Some(JournalEntry::Release { correlation, phase }) => ReconnectInventory {
+                workspace_operation: Some(WorkspaceOperation::Release {
+                    correlation: correlation.clone(),
+                    phase: *phase,
+                }),
+                ..ReconnectInventory::default()
+            },
             None => ReconnectInventory::default(),
             Some(JournalEntry::Lease { phase, result }) => ReconnectInventory {
                 lease: Some(phase.clone()),
                 result: result.clone(),
+                ..ReconnectInventory::default()
+            },
+            Some(JournalEntry::Provision {
+                request,
+                ready,
+                failure,
+                ..
+            }) => ReconnectInventory {
+                operation_failure: failure.as_deref().cloned(),
+                workspace_operation: Some(WorkspaceOperation::Provision {
+                    correlation: request.correlation.clone(),
+                    phase: if ready.is_some() {
+                        ProvisionPhase::ReadyUnrecorded
+                    } else {
+                        ProvisionPhase::Provisioning
+                    },
+                }),
                 ..ReconnectInventory::default()
             },
         }
@@ -132,6 +195,32 @@ impl Journal {
 
     fn validate(&self) -> Result<(), RunnerStateError> {
         if self.entries.len() > 1 {
+            return Err(RunnerStateError::CorruptState);
+        }
+        if let Some(JournalEntry::Provision {
+            request,
+            canonical_clone_url_digest,
+            ready,
+            failure,
+        }) = self.entries.first()
+            && (failure.as_ref().is_some_and(|failure| {
+                ready.is_some()
+                    || failure.correlation
+                        != OperationCorrelation::Provision(request.correlation.clone())
+                    || failure.validate().is_err()
+            }) || Message::WorkspaceProvision(request.clone())
+                .validate()
+                .is_err()
+                || ready.as_ref().is_some_and(|ready| {
+                    ready.correlation != request.correlation
+                        || Message::WorkspaceReady(ready.clone()).validate().is_err()
+                        || request.recovery.as_ref().is_some_and(|recovery| {
+                            ready.ready.manifest.recovery.as_ref() != Some(recovery)
+                        })
+                        || ready.ready.manifest.canonical_clone_url_digest.as_ref()
+                            != Some(canonical_clone_url_digest)
+                }))
+        {
             return Err(RunnerStateError::CorruptState);
         }
         if let Some(JournalEntry::Lease {
@@ -147,6 +236,12 @@ impl Journal {
         Ok(())
     }
 
+    fn without_operation(&self) -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
     fn publish(&mut self, directory: &File, next: Self) -> Result<(), RunnerStateError> {
         next.validate()?;
         let document = JournalDocument {
@@ -160,6 +255,226 @@ impl Journal {
         write_document(directory, DocumentKind::Journal, &encoded)?;
         *self = document.journal;
         Ok(())
+    }
+
+    pub(crate) fn release(&self) -> Option<(&ReleaseCorrelation, ReleasePhase)> {
+        match self.entries.first() {
+            Some(JournalEntry::Release { correlation, phase }) => Some((correlation, *phase)),
+            _ => None,
+        }
+    }
+    pub(crate) fn accepted_release(&self) -> Option<AcceptedWorkspaceRelease> {
+        self.release().and_then(|(correlation, phase)| {
+            (phase == ReleasePhase::ReleaseAccepted)
+                .then(|| AcceptedWorkspaceRelease(correlation.clone()))
+        })
+    }
+    pub(crate) fn record_release(
+        &mut self,
+        directory: &File,
+        correlation: ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        match self.release() {
+            Some((prior, _)) if prior == &correlation => return Ok(()),
+            Some(_) => return Err(RunnerStateError::InvalidTransition),
+            None if !self.entries.is_empty() => return Err(RunnerStateError::InvalidTransition),
+            None => {}
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Release {
+                    correlation,
+                    phase: ReleasePhase::ReleaseAccepted,
+                }],
+            },
+        )
+    }
+    pub(crate) fn complete_release(
+        &mut self,
+        directory: &File,
+        correlation: &ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .release()
+            .is_some_and(|(prior, _)| prior == correlation)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Release {
+                    correlation: correlation.clone(),
+                    phase: ReleasePhase::ReleaseCompleted,
+                }],
+            },
+        )
+    }
+    pub(crate) fn acknowledge_release(
+        &mut self,
+        directory: &File,
+        correlation: &ReleaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if self.release() != Some((correlation, ReleasePhase::ReleaseCompleted)) {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.publish(directory, self.without_operation())
+    }
+
+    pub(crate) fn provision(&self) -> Option<(&WorkspaceProvision, Option<&WorkspaceReady>)> {
+        match self.entries.first() {
+            Some(JournalEntry::Provision { request, ready, .. }) => Some((request, ready.as_ref())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn provision_clone_url_digest(&self) -> Option<&Digest> {
+        match self.entries.first() {
+            Some(JournalEntry::Provision {
+                canonical_clone_url_digest,
+                ..
+            }) => Some(canonical_clone_url_digest),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn record_provision(
+        &mut self,
+        directory: &File,
+        request: WorkspaceProvision,
+        canonical_clone_url_digest: Digest,
+    ) -> Result<(), RunnerStateError> {
+        match self.entries.first() {
+            None => self.publish(
+                directory,
+                Self {
+                    entries: vec![JournalEntry::Provision {
+                        request,
+                        canonical_clone_url_digest,
+                        ready: None,
+                        failure: None,
+                    }],
+                },
+            ),
+            Some(JournalEntry::Provision {
+                request: prior,
+                canonical_clone_url_digest: prior_digest,
+                ..
+            }) if prior == &request && prior_digest == &canonical_clone_url_digest => Ok(()),
+            _ => Err(RunnerStateError::InvalidTransition),
+        }
+    }
+
+    pub(crate) fn record_workspace_ready(
+        &mut self,
+        directory: &File,
+        ready: WorkspaceReady,
+    ) -> Result<(), RunnerStateError> {
+        let Some(JournalEntry::Provision {
+            request,
+            canonical_clone_url_digest,
+            ready: prior,
+            failure: None,
+        }) = self.entries.first()
+        else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        if request.correlation != ready.correlation {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        if let Some(prior) = prior {
+            return if prior == &ready {
+                Ok(())
+            } else {
+                Err(RunnerStateError::InvalidTransition)
+            };
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Provision {
+                    request: request.clone(),
+                    canonical_clone_url_digest: canonical_clone_url_digest.clone(),
+                    ready: Some(ready),
+                    failure: None,
+                }],
+            },
+        )
+    }
+
+    pub(crate) fn provision_failure(&self) -> Option<&OperationFailure> {
+        match self.entries.first() {
+            Some(JournalEntry::Provision { failure, .. }) => failure.as_deref(),
+            _ => None,
+        }
+    }
+    pub(crate) fn record_provision_failure(
+        &mut self,
+        directory: &File,
+        failure: OperationFailure,
+    ) -> Result<(), RunnerStateError> {
+        let Some(JournalEntry::Provision {
+            request,
+            canonical_clone_url_digest,
+            ready: None,
+            failure: prior,
+        }) = self.entries.first()
+        else {
+            return Err(RunnerStateError::InvalidTransition);
+        };
+        if failure.correlation != OperationCorrelation::Provision(request.correlation.clone()) {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        if let Some(prior) = prior {
+            return if prior.as_ref() == &failure {
+                Ok(())
+            } else {
+                Err(RunnerStateError::InvalidTransition)
+            };
+        }
+        self.publish(
+            directory,
+            Self {
+                entries: vec![JournalEntry::Provision {
+                    request: request.clone(),
+                    canonical_clone_url_digest: canonical_clone_url_digest.clone(),
+                    ready: None,
+                    failure: Some(Box::new(failure)),
+                }],
+            },
+        )
+    }
+    pub(crate) fn acknowledge_provision_failure(
+        &mut self,
+        directory: &File,
+        correlation: &OperationCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        if !self
+            .provision_failure()
+            .is_some_and(|failure| &failure.correlation == correlation)
+        {
+            return Err(RunnerStateError::InvalidTransition);
+        }
+        self.publish(directory, self.without_operation())
+    }
+
+    pub(crate) fn acknowledge_workspace(
+        &mut self,
+        directory: &File,
+        recorded: &WorkspaceRecorded,
+    ) -> Result<(), RunnerStateError> {
+        match self.entries.first() {
+            Some(JournalEntry::Provision {
+                ready: Some(ready), ..
+            }) if ready.correlation == recorded.correlation
+                && ready.ready.manifest.manifest_id == recorded.manifest_id
+                && ready.ready.manifest_digest == recorded.manifest_digest =>
+            {
+                self.publish(directory, self.without_operation())
+            }
+            _ => Err(RunnerStateError::InvalidTransition),
+        }
     }
 
     pub(crate) fn record_phase(
@@ -246,7 +561,9 @@ impl Journal {
             Some(JournalEntry::Lease {
                 result: Some(result),
                 ..
-            }) if &result.correlation == correlation => self.publish(directory, Self::default()),
+            }) if &result.correlation == correlation => {
+                self.publish(directory, self.without_operation())
+            }
             _ => Err(RunnerStateError::InvalidTransition),
         }
     }
@@ -258,7 +575,7 @@ impl Journal {
     ) -> Result<(), RunnerStateError> {
         match self.entries.first() {
             Some(JournalEntry::Lease { phase, .. }) if &phase.correlation == correlation => {
-                self.publish(directory, Self::default())
+                self.publish(directory, self.without_operation())
             }
             _ => Err(RunnerStateError::InvalidTransition),
         }

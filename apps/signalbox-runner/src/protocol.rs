@@ -30,6 +30,9 @@ use crate::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,
 };
 
+mod workspaces;
+pub use workspaces::WorkspaceReleaseWorker;
+
 const SOCKET_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const FIRST_RUNNER_SEQUENCE: u64 = 1;
@@ -282,33 +285,6 @@ pub enum ServeOutcome {
     ShutdownReady,
 }
 
-/// Closed local recovery gap; no wire recovery facts are fabricated.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryGap {
-    UnbornHeadNotRepresentable,
-}
-
-/// Typed proof that recovery is deliberately unavailable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RecoveryUnavailable {
-    gap: RecoveryGap,
-}
-
-impl RecoveryUnavailable {
-    /// Returns the exact representational gap preventing recovery.
-    pub const fn gap(self) -> RecoveryGap {
-        self.gap
-    }
-}
-
-impl fmt::Display for RecoveryUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runner recovery is unavailable because unborn HEAD is unrepresentable")
-    }
-}
-
-impl Error for RecoveryUnavailable {}
-
 /// Closed peer or local lifecycle violation with exact evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolViolation {
@@ -456,7 +432,7 @@ pub enum RunnerConnectionError {
     },
     Violation(ProtocolViolation),
     InvalidLocalFrame(ValueError),
-    RecoveryUnavailable(RecoveryUnavailable),
+    Workspace(crate::WorkspaceProvisionError),
 }
 
 impl fmt::Display for RunnerConnectionError {
@@ -477,7 +453,7 @@ impl fmt::Display for RunnerConnectionError {
             } => write!(formatter, "daemon rejected {offending_kind} with {code:?}"),
             Self::Violation(error) => write!(formatter, "runner protocol violation: {error}"),
             Self::InvalidLocalFrame(_) => formatter.write_str("runner local frame is invalid"),
-            Self::RecoveryUnavailable(error) => error.fmt(formatter),
+            Self::Workspace(error) => error.fmt(formatter),
         }
     }
 }
@@ -490,7 +466,7 @@ impl Error for RunnerConnectionError {
             Self::Read(error) | Self::Write(error) => Some(error),
             Self::Violation(error) => Some(error),
             Self::InvalidLocalFrame(error) => Some(error),
-            Self::RecoveryUnavailable(error) => Some(error),
+            Self::Workspace(error) => Some(error),
             Self::PeerClosed | Self::PeerRejected { .. } => None,
         }
     }
@@ -526,6 +502,11 @@ pub struct RunnerConnection<S> {
     resumed_lease: Option<LeaseCorrelation>,
     execution: Option<RunnerExecution>,
     last_recorded: Option<LeaseCorrelation>,
+    configuration: Option<crate::RunnerConfiguration>,
+    workspace: Option<workspaces::WorkspaceExecution>,
+    last_release_recorded: Option<signalbox_runner_wire::ReleaseCorrelation>,
+    last_workspace_recorded: Option<signalbox_runner_wire::WorkspaceRecorded>,
+    last_provision_failure: Option<signalbox_runner_wire::OperationCorrelation>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
@@ -536,6 +517,7 @@ pub struct RunnerConnection<S> {
 enum RunnerEvent {
     Message(Message),
     Result(RetainedResult),
+    Workspace(workspaces::WorkspaceCompletion),
 }
 
 struct RunnerExecution {
@@ -686,6 +668,7 @@ where
                         }
                     }
                 }
+                workspaces::apply_workspace_directives(state, &resumed.directives)?;
                 let receipt = state.record_registration(resumed.registration_revision, digest)?;
                 if let Some(correlation) = &resumed_lease {
                     send_message(
@@ -710,12 +693,23 @@ where
             resumed_lease,
             execution: None,
             last_recorded: None,
+            configuration: None,
+            workspace: None,
+            last_release_recorded: None,
+            last_workspace_recorded: None,
+            last_provision_failure: None,
             receipt,
             advertisement: advertisement.clone(),
             outcome,
             connection_epoch,
             heartbeat: None,
         })
+    }
+
+    /// Supplies the local repository and sandbox configuration for workspace operations.
+    pub fn with_configuration(mut self, configuration: crate::RunnerConfiguration) -> Self {
+        self.configuration = Some(configuration);
+        self
     }
 
     /// Returns the establishment path used by this live connection.
@@ -736,13 +730,6 @@ where
     /// Returns the hub-issued epoch of this physical connection.
     pub const fn connection_epoch(&self) -> PositiveU64 {
         self.connection_epoch
-    }
-
-    /// Reports the recovery design gap without constructing wire recovery facts.
-    pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
-        RecoveryUnavailable {
-            gap: RecoveryGap::UnbornHeadNotRepresentable,
-        }
     }
 
     /// Sends one shutdown order naming this exact physical connection epoch.
@@ -822,6 +809,7 @@ where
     {
         tokio::pin!(shutdown);
         let mut shutdown_requested = false;
+        self.ensure_workspace(state)?;
         loop {
             if shutdown_requested && !self.has_unsettled_lease(state) {
                 return Ok(ServeOutcome::ShutdownReady);
@@ -839,12 +827,22 @@ where
         }
     }
 
+    fn has_unsettled_tool(&self, state: &RunnerStateRoot) -> bool {
+        let inventory = state.reconnect_inventory();
+        self.pending_offer.is_some()
+            || self.resumed_lease.is_some()
+            || self.execution.is_some()
+            || inventory.lease.is_some()
+            || inventory.result.is_some()
+    }
+
     fn has_unsettled_lease(&self, state: &RunnerStateRoot) -> bool {
         let inventory = state.reconnect_inventory();
         self.pending_offer.is_some()
             || self.execution.is_some()
             || inventory.lease.is_some()
             || inventory.result.is_some()
+            || inventory.workspace_operation.is_some()
     }
 
     /// Handles one complete daemon frame or completed child result.
@@ -852,6 +850,7 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
+        self.ensure_workspace(state)?;
         let event = self.receive_event().await?;
         self.serve_event(state, event).await
     }
@@ -860,6 +859,7 @@ where
         tokio::select! {
             message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => message.map(RunnerEvent::Message),
             result = execution_finished(&mut self.execution) => result.map(RunnerEvent::Result),
+            ready = workspaces::workspace_finished(&mut self.workspace) => ready.map(RunnerEvent::Workspace),
         }
     }
 
@@ -870,6 +870,10 @@ where
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match event {
             RunnerEvent::Message(message) => self.serve_message(state, message).await,
+            RunnerEvent::Workspace(completion) => {
+                self.finish_workspace(state, completion).await?;
+                Ok(None)
+            }
             RunnerEvent::Result(result) => {
                 state.record_terminal_result(result)?;
                 self.execution = None;
@@ -908,6 +912,7 @@ where
                 let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
                 self.send_retained_result(state).await?;
+                self.send_retained_workspace(state).await?;
                 Ok(None)
             }
             Message::Shutdown(shutdown)
@@ -942,9 +947,27 @@ where
                     provision.correlation.runner_id,
                     provision.correlation.registration_revision,
                 )?;
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                if self.has_unsettled_tool(state) {
+                    return Err(lease_mismatch());
+                }
+                let checked = self.check_workspace(provision.clone())?;
+                state.record_provision(provision, checked.canonical_clone_url_digest().clone())?;
+                self.ensure_workspace(state)?;
+                self.send_retained_workspace(state).await?;
+                Ok(None)
+            }
+            Message::OperationFailureRecorded(recorded) => {
+                if self.last_provision_failure.as_ref() == Some(&recorded.correlation) {
+                    return Ok(None);
+                }
+                state.acknowledge_provision_failure(&recorded.correlation)?;
+                self.workspace = None;
+                self.last_provision_failure = Some(recorded.correlation);
+                Ok(None)
+            }
+            Message::WorkspaceRecorded(recorded) => {
+                self.record_workspace(state, recorded)?;
+                Ok(None)
             }
             Message::WorkspaceRelease(release) => {
                 if release.correlation.runner_id != self.receipt.runner_id() {
@@ -952,9 +975,17 @@ where
                         ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
                 }
-                Err(RunnerConnectionError::RecoveryUnavailable(
-                    self.recovery_unavailable(),
-                ))
+                if self.has_unsettled_tool(state) {
+                    return Err(lease_mismatch());
+                }
+                state.record_release(release.correlation)?;
+                self.ensure_workspace(state)?;
+                self.send_retained_workspace(state).await?;
+                Ok(None)
+            }
+            Message::WorkspaceReleaseRecorded(recorded) => {
+                self.acknowledge_release(state, recorded.correlation)?;
+                Ok(None)
             }
             Message::LeaseOffer(offer) => {
                 self.validate_connection_correlation(
@@ -963,6 +994,7 @@ where
                 )?;
                 if self.pending_offer.is_some()
                     || state.reconnect_inventory().lease.is_some()
+                    || state.reconnect_inventory().workspace_operation.is_some()
                     || offer.correlation.tool_name.as_str() != signalbox_tools_basic::ECHO_NAME
                     || self
                         .advertisement
@@ -1660,40 +1692,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn recovery_seam_names_the_unborn_head_gap() {
-        let parent = TempDir::new().expect("a temporary parent is available");
-        let mut state = state_root(&parent);
-        let receipt = issued_receipt(state.state().request_id());
-        state
-            .record_receipt(receipt)
-            .expect("the issued receipt is journaled");
-        let advertisement = empty_advertisement();
-        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
-        let mut hub_io = BufReader::new(hub_io);
-
-        let runner = RunnerConnection::establish(runner_io, &mut state, &advertisement);
-        let hub = async {
-            let _resume = receive_hub_message(&mut hub_io).await;
-            send_hub_message(
-                &mut hub_io,
-                Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
-                    connection_epoch: positive(CONNECTION_EPOCH),
-                    directives: ReconnectDirectives::default(),
-                })),
-            )
-            .await;
-        };
-        let (connection, ()) = tokio::join!(runner, hub);
-        let connection = connection.expect("the production connection is established");
-
-        assert_eq!(
-            connection.recovery_unavailable().gap(),
-            RecoveryGap::UnbornHeadNotRepresentable
-        );
-    }
-
     #[test]
     fn transient_connection_failures_are_reconnectable() {
         let unavailable = RunnerConnectionError::PeerRejected {
@@ -1793,7 +1791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_provision_stops_at_the_typed_recovery_seam() {
+    async fn workspace_provision_requires_local_configuration_before_acceptance() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -1847,9 +1845,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
-                gap: RecoveryGap::UnbornHeadNotRepresentable,
-            })
+            RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::RepositoryUnavailable)
         ));
     }
 
@@ -1980,3 +1976,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod workspace_tests;

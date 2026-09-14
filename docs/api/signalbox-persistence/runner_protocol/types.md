@@ -359,6 +359,16 @@ impl runner_protocol::RunnerProtocolStore {
         runner_protocol::RunnerConnectionSnapshot,
         runner_protocol::RunnerProtocolStoreError,
     >;
+    pub async fn open_connection_for_replacement_workspace_release(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        session: signalbox_domain::SessionId,
+        revision: signalbox_domain::RunnerGeneration,
+        manifest: signalbox_domain::WorkspaceManifestId,
+    ) -> result::Result<
+        runner_protocol::RunnerConnectionSnapshot,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
     pub async fn transition_connection(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
@@ -615,14 +625,7 @@ impl runner_protocol::RunnerProtocolStore {
     ) -> result::Result<signalbox_domain::RunnerLease, runner_protocol::RunnerProtocolStoreError>;
 }
 impl runner_protocol::RunnerProtocolStore {
-    pub async fn replacement_workspace_releases(
-        &self,
-        enrollment: signalbox_domain::RunnerEnrollmentId,
-    ) -> result::Result<
-        vec::Vec<signalbox_domain::ProvisionedWorkspace>,
-        runner_protocol::RunnerProtocolStoreError,
-    >;
-    pub async fn record_replacement_workspace_released(
+    pub async fn validate_replacement_workspace_release(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
         session: signalbox_domain::SessionId,
@@ -630,7 +633,31 @@ impl runner_protocol::RunnerProtocolStore {
         runner: signalbox_domain::RunnerId,
         manifest: signalbox_domain::WorkspaceManifestId,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+    pub async fn replacement_workspace_releases(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+    ) -> result::Result<
+        vec::Vec<signalbox_domain::ProvisionedWorkspace>,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
+    pub async fn record_replacement_workspace_released(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        session: signalbox_domain::SessionId,
+        revision: signalbox_domain::RunnerGeneration,
+        runner: signalbox_domain::RunnerId,
+        manifest: signalbox_domain::WorkspaceManifestId,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn record_replacement_provisioning_failure(
+        &self,
+        authorization: &signalbox_domain::RunnerReplacementProvisioning,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        kind: signalbox_domain::RunnerProvisioningFailureKind,
+        detail: &value::Value,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+    pub async fn reconcile_replacement_provisioning_failure(
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,
         kind: signalbox_domain::RunnerProvisioningFailureKind,
@@ -646,6 +673,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn replacement_provisioning(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
     ) -> result::Result<
         vec::Vec<signalbox_domain::RunnerReplacementProvisioning>,
         runner_protocol::RunnerProtocolStoreError,
@@ -653,6 +681,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn record_replacement_workspace_ready(
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,
+        epoch: runner_protocol::RunnerConnectionEpoch,
         workspace: &signalbox_domain::ProvisionedWorkspace,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
 }

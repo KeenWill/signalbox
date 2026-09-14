@@ -609,7 +609,33 @@ impl RunnerProtocolStore {
         &self,
         enrollment: RunnerEnrollmentId,
     ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
+        self.open_connection_with_release(enrollment, None).await
+    }
+
+    /// Opens an epoch and reauthorizes its retained staging release in one transaction.
+    pub async fn open_connection_for_replacement_workspace_release(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        session: SessionId,
+        revision: RunnerGeneration,
+        manifest: WorkspaceManifestId,
+    ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
+        self.open_connection_with_release(enrollment, Some((session, revision, manifest)))
+            .await
+    }
+
+    async fn open_connection_with_release(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        release: Option<(SessionId, RunnerGeneration, WorkspaceManifestId)>,
+    ) -> Result<RunnerConnectionSnapshot, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
+        if let Some((session, _, _)) = release {
+            sqlx::query(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+                .bind(session.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+        }
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment.into_uuid())
             .fetch_optional(&mut *transaction)
@@ -685,6 +711,17 @@ impl RunnerProtocolStore {
         if prior_was_suspect {
             append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot)
                 .await?;
+        }
+        if let Some((session, revision, manifest)) = release {
+            Self::reauthorize_replacement_workspace_release_in(
+                transaction.as_mut(),
+                enrollment,
+                epoch,
+                session,
+                revision,
+                manifest,
+            )
+            .await?;
         }
         match commit_mutation(transaction).await {
             Ok(()) => Ok(snapshot),
@@ -5975,6 +6012,9 @@ fn decode_provisioned_workspace(
     }
     let recovery = match (recovery_kind.as_deref(), branch_name, revision) {
         (None, None, None) => None,
+        (Some("unborn_branch"), Some(name), None) => Some(WorkspaceRecovery::UnbornBranch {
+            name: WorkspaceBranchName::try_new(name).map_err(RunnerProtocolStoreError::Domain)?,
+        }),
         (Some("commit"), None, Some(revision)) => Some(WorkspaceRecovery::Commit {
             revision: WorkspaceRevision::try_new(revision)
                 .map_err(RunnerProtocolStoreError::Domain)?,
@@ -7180,6 +7220,9 @@ fn encode_workspace_recovery(
     recovery: &WorkspaceRecovery,
 ) -> (Option<&'static str>, Option<&str>, Option<&str>) {
     match recovery {
+        WorkspaceRecovery::UnbornBranch { name } => {
+            (Some("unborn_branch"), Some(name.as_str()), None)
+        }
         WorkspaceRecovery::Commit { revision } => (Some("commit"), None, Some(revision.as_str())),
         WorkspaceRecovery::Branch { name, revision } => {
             (Some("branch"), Some(name.as_str()), Some(revision.as_str()))

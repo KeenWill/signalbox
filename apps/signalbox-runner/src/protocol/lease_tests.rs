@@ -86,7 +86,7 @@ async fn crash_at_journal_phase(
     RunnerStateRoot::open(&parent.path().join("state")).expect("restart replays killed producer")
 }
 
-fn fixture(
+pub(super) fn fixture(
     parent: &TempDir,
 ) -> (
     RunnerStateRoot,
@@ -146,6 +146,11 @@ fn fixture(
         resumed_lease: None,
         execution: None,
         last_recorded: None,
+        configuration: None,
+        workspace: None,
+        last_release_recorded: None,
+        last_workspace_recorded: None,
+        last_provision_failure: None,
         receipt,
         advertisement,
         outcome: EnrollmentOutcome::Enrolled,

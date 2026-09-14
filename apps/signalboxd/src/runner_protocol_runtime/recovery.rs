@@ -80,10 +80,21 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn replacement_releases_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> Result<Vec<signalbox_runner_wire::WorkspaceRelease>, RunnerRegistrationFailure> {
+        let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceRelease,
+                AvailableCorrelation::ConnectionEpoch(epoch),
+                RejectionCode::CorrelationMismatch,
+            )
+        })?;
         let workspaces = self
             .store
-            .replacement_workspace_releases(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
+            .replacement_workspace_releases(
+                RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                epoch,
+            )
             .await
             .map_err(|error| {
                 store_failure(
@@ -119,6 +130,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn workspace_released_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> Result<signalbox_runner_wire::WorkspaceReleaseRecorded, RunnerRegistrationFailure> {
         let correlation = receipt.correlation;
@@ -139,6 +151,11 @@ impl PostgresRunnerRegistrationService {
         self.store
             .record_replacement_workspace_released(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                    failure(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::CorrelationMismatch,
+                    ))
+                })?,
                 signalbox_domain::SessionId::from_uuid(correlation.session_id.into_uuid()),
                 revision,
                 RunnerId::from_uuid(correlation.runner_id.into_uuid()),
@@ -151,6 +168,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn provisioning_failed_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: Option<PositiveU64>,
         message: signalbox_runner_wire::OperationFailed,
     ) -> Result<signalbox_runner_wire::OperationFailureRecorded, RunnerRegistrationFailure> {
         use signalbox_domain::RunnerProvisioningFailureKind as Kind;
@@ -196,16 +214,30 @@ impl PostgresRunnerRegistrationService {
             }
         };
         let detail = serde_json::to_value(&failure.detail).map_err(|_| rejected())?;
-        self.store
-            .record_replacement_provisioning_failure(&authorization, kind, &detail)
-            .await
-            .map_err(|error| {
-                store_failure(
-                    RunnerInboundFrameKind::OperationFailed,
-                    AvailableCorrelation::OperationFailure(failure.correlation.clone()),
-                    error,
-                )
-            })?;
+        match epoch {
+            Some(epoch) => {
+                self.store
+                    .record_replacement_provisioning_failure(
+                        &authorization,
+                        RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(rejected)?,
+                        kind,
+                        &detail,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .reconcile_replacement_provisioning_failure(&authorization, kind, &detail)
+                    .await
+            }
+        }
+        .map_err(|error| {
+            store_failure(
+                RunnerInboundFrameKind::OperationFailed,
+                AvailableCorrelation::OperationFailure(failure.correlation.clone()),
+                error,
+            )
+        })?;
         Ok(signalbox_runner_wire::OperationFailureRecorded {
             correlation: failure.correlation,
         })
@@ -213,10 +245,18 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn replacement_operations_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
     ) -> Result<Vec<WorkspaceProvision>, RunnerRegistrationFailure> {
+        let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+            RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::WorkspaceProvision,
+                AvailableCorrelation::ConnectionEpoch(epoch),
+                RejectionCode::CorrelationMismatch,
+            )
+        })?;
         let operations = self
             .store
-            .replacement_provisioning(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()))
+            .replacement_provisioning(RunnerEnrollmentId::from_uuid(enrollment.into_uuid()), epoch)
             .await
             .map_err(|error| {
                 store_failure(
@@ -231,6 +271,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn workspace_ready_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: WorkspaceReady,
     ) -> Result<Option<WorkspaceRecorded>, RunnerRegistrationFailure> {
         let correlation = AvailableCorrelation::Provision(receipt.correlation.clone());
@@ -286,6 +327,12 @@ impl PostgresRunnerRegistrationService {
                 .map_err(|error| failure(RunnerProtocolStoreError::Domain(error)))?,
             manifest_id: WorkspaceManifestId::from_uuid(manifest.manifest_id.into_uuid()),
             recovery: match &manifest.recovery {
+                Some(Recovery::UnbornBranch { name }) => {
+                    Some(signalbox_domain::WorkspaceRecovery::UnbornBranch {
+                        name: signalbox_domain::WorkspaceBranchName::try_new(name.clone())
+                            .map_err(|error| failure(RunnerProtocolStoreError::Domain(error)))?,
+                    })
+                }
                 Some(Recovery::Commit { revision }) => {
                     Some(signalbox_domain::WorkspaceRecovery::Commit {
                         revision: signalbox_domain::WorkspaceRevision::try_new(revision.clone())
@@ -304,7 +351,15 @@ impl PostgresRunnerRegistrationService {
             },
         };
         self.store
-            .record_replacement_workspace_ready(&authorization, &workspace)
+            .record_replacement_workspace_ready(
+                &authorization,
+                RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                    failure(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::CorruptStoredFacts,
+                    ))
+                })?,
+                &workspace,
+            )
             .await
             .map_err(failure)?;
         let outcome = self
@@ -327,7 +382,7 @@ impl PostgresRunnerRegistrationService {
     }
 }
 
-fn provision_message(
+pub(super) fn provision_message(
     operation: &RunnerReplacementProvisioning,
 ) -> Result<WorkspaceProvision, RunnerRegistrationFailure> {
     let invalid = |_| {
@@ -370,6 +425,9 @@ fn provision_message(
                 .map_err(invalid)?,
         },
         recovery: operation.recovery.as_ref().map(|recovery| match recovery {
+            signalbox_domain::WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
+                name: name.as_str().to_owned(),
+            },
             signalbox_domain::WorkspaceRecovery::Commit { revision } => Recovery::Commit {
                 revision: revision.as_str().to_owned(),
             },

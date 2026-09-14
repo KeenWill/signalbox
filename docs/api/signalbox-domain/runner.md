@@ -802,6 +802,9 @@ pub enum WorkspaceRecovery {
         name: WorkspaceBranchName,
         revision: WorkspaceRevision,
     },
+    UnbornBranch {
+        name: WorkspaceBranchName,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```

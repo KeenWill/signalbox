@@ -75,35 +75,12 @@ argument. The runner rejects an unknown credential profile before accepting the
 authorization and returns one `ProvisionedWorkspace` receipt whose manifest
 facts match every correlation.
 
-A complete workspace lives at
-`sessions/<canonical-session-uuid>/<placement-revision>/repo` with its own
-`.git`; no shared Git directory, linked-worktree administration, home path, or
-credential-bearing remote URL is used. Provisioning creates a sibling staging
-directory, clones under the restricted profile, writes a versioned `0600`
-non-secret manifest in the non-mounted placement parent, fsyncs, and atomically
-renames the placement directory before returning the receipt. Exact provisioning
-replay returns the matching ready receipt, and conflicting facts fail closed. A
-clone of an empty repository is an ordinary success whose manifest records the
-unborn branch.
-
-Exactly one writable root exists per placement: the provisioned repository, the
-exact selected working directory, or a private root at the sibling path
-`sessions/<canonical-session-uuid>/<placement-revision>/work` that the runner
-creates on first use with the same manifest and no repository key, clone-URL
-digest, or credential-profile name. Confinement is defined over that root, which
-need not be a repository. Each root is identified by durable facts, a manifest,
-the placement value that names the directory, or the private root's
-deterministic path and manifest, never by process memory. A restarted runner
-recomputes the private-root path from placement facts, authenticates it against
-the manifest, and re-adopts the root with whatever the session wrote into it; it
-never substitutes a fresh empty directory for one holding session files.
-
-The manifest lifecycle is `staging`, `ready`, `active`, then `releasing`.
-Transitions advance only in that order, equal replay retains the same value, and
-deletion is represented by absence rather than a fifth token. Recovery resolves
-the repository key again and requires the current canonical URL digest to equal
-the manifest value; a changed mapping is `manifest_conflict`, never a
-reinterpretation of an existing clone.
+[Workspace publication](../spec/runner-protocol.md#workspace-publication) owns
+the ambient anonymous clone, protected manifest, and restart re-adoption.
+Repository-free private-root acquisition is not built. Restricted acquisition
+clones inside the restricted profile. Each placement has exactly one writable
+root, whether a repository, selected plain directory, or private root.
+Confinement is defined over that root.
 
 Runners are not cleanup authorities. Only the runner that provisioned a
 workspace can delete it; a replaced, revoked, or dead runner leaves its
@@ -125,19 +102,11 @@ connection is already lost enqueues no release, and losing a connection that
 still owed one retires that release as unowned; either way the workspace becomes
 a recorded leak.
 
-The runner fsyncs a `release_accepted` journal entry carrying the complete
-release correlation before it does anything irreversible. Only then does it mark
-release in the manifest, atomically rename the placement below `trash/`, fsync,
-and delete it by descriptor-relative traversal that unlinks symlinks instead of
-following them. It advances the entry to `release_completed` and resends
-`workspace_released` until the daemon replies `workspace_release_recorded`,
-which frees the journaled release and the runner's single workspace-operation
-slot. A crash resumes from the journal rather than from a manifest the runner
-may already have deleted: `release_accepted` resumes the deletion and then
-reports, and `release_completed` resends the correlation. A release whose rename
-or deletion keeps failing reports `workspace_cleanup_failed`; its
-acknowledgement retires the release journal with the failure, and the surviving
-placement is reported as a `cleanup_failed` leak.
+[Workspace publication](../spec/runner-protocol.md#workspace-publication) owns
+the accepted release journal, descriptor cleanup, and completion exchange. A
+release whose rename or deletion keeps failing reports
+`workspace_cleanup_failed`; its acknowledgement retires the release journal with
+the failure, and the surviving placement is reported as a `cleanup_failed` leak.
 
 Startup reconciles every ready or active manifest with the daemon before any
 execution and reports every unknown, retired-but-present, conflicting, or

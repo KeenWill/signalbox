@@ -757,7 +757,7 @@ impl RunnerProtocolStore {
             .as_ref()
             .map(encode_workspace_recovery)
             .unwrap_or((None, None, None));
-        if !before_pin && repository.is_some() != revision.is_some() {
+        if !before_pin && repository.is_some() != recovery.is_some() {
             return Ok(rejected(Rejection::PlacementUnavailable));
         }
         sqlx::query("INSERT INTO runner_replacement_stage (command_id, session_id, source_event_ordinal, successor_enrollment_id, successor_registration_revision) VALUES ($1, $2, $3, $4, $5)")

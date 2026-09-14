@@ -21,13 +21,17 @@ have durable request, receipt, and daemon handlers. The local catalog admits the
 `echo` capability class, the `ambient` profile, and the existing daemon `echo`
 tool as a combined-locus pure declaration with the identical model definition
 and permission default. The runner advertises configured availability for those
-entries, credential profiles, and repositories, with no workspace capability. It
-executes `echo` in a plain child process under `ambient` and retains the claimed
-phase and terminal result in a versioned, fsynced, atomically published private
-journal. An initialized state root without that journal fails startup. Resume
-reconciles the retained lease phase and terminal result against durable daemon
-state. Workspace reconciliation and sandbox supervision are listed under
-Planned.
+entries, credential profiles, and anonymous repositories. Credential-bound
+repositories remain configured locally but are not advertised. An ambient runner
+also advertises `worktree_per_session`. It executes `echo` in a plain child
+process under `ambient` and retains the claimed phase and terminal result in a
+versioned, fsynced, atomically published private journal. An initialized state
+root without that journal fails startup. Resume reconciles the retained lease
+phase and terminal result against durable daemon state. Provisioning resumes the
+exact retained workspace operation. Rejected staged workspaces retain accepted
+release and completion phases through daemon acknowledgement.
+Placement-retirement release, leak reconciliation, and sandbox supervision are
+listed under Planned.
 
 The daemon admits authenticated runner recovery after migrations and before the
 generic startup scan or blob checks. Ordinary enrollment waits until the process
@@ -112,6 +116,66 @@ filesystem-confidentiality claim under `ambient`.
 The workspace manifest carries the digest of the canonical clone URL rather than
 the URL. Why: the URL is credential-free, but its digest is sufficient identity
 and avoids repeating the operator's configuration value.
+
+## Workspace publication
+
+The runner accepts an ambient `workspace_provision` only after resolving its
+repository and optional credential profile against local configuration. Unknown
+profiles reject before the operation is journaled. Anonymous acquisition runs
+Git as a plain child process with system and global configuration disabled and
+credential helpers cleared. Each command has one five-minute deadline covering
+output collection and process completion; expiration rejects acquisition as
+`repository_unavailable`. Credentialed and repository-free private-root
+acquisition are unavailable. Provisioning and release reject while an offer,
+resumed lease, execution, or journaled lease or result remains unsettled.
+
+Repository workspaces live at
+`sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
+`.git` directory and no shared object store or credential-bearing remote URL. A
+sibling staging placement holds a versioned `0600` manifest outside the writable
+root; publication fsyncs the files and directories and atomically renames the
+placement. The manifest advances from `staging` to `ready`, then to `active`
+upon an exact `workspace_recorded` acknowledgement. A repository records a
+commit, a branch and commit, or an `unborn_branch` with its name and no commit
+revision.
+
+An in-flight release keeps the same worker across physical connections.
+Authenticated resume opens its epoch and reauthorizes retained staging-release
+authority in one transaction before accepting completion. A rejected release
+admission leaves the prior connection head unchanged. The daemon retains that
+reauthorization without changing the original release record; unrelated stale
+release receipts still fail the current-epoch check.
+
+Retained staging-release authority cannot be reauthorized after durable
+connection loss. Live provisioning failure and release completion check the
+caller's connection epoch in the receipt transaction, including equal replay.
+
+The runner retains the complete provisioning request, resolved clone-URL digest,
+and ready receipt in its private journal. Restart checks the configured mapping
+against the retained digest before cloning. Restart recomputes the fixed path
+and authenticates the root and manifest, preserving session files. A pending
+ready placement is authenticated before reconnect even when its acknowledgement
+is not yet journaled; missing or conflicting files preserve the receipt and fail
+as `manifest_conflict`. A cleanup guard removes unpublished repository staging
+on preparation failure or cancellation. Equal replay retains the manifest
+identity and ready receipt. A changed repository mapping fails as
+`manifest_conflict`. Once a ready receipt is journaled, this conflict fails
+closed before reconnect and preserves the receipt. Reconnect admits only the
+exact stored daemon authorization under the unchanged registration, and the
+runner resends its authenticated receipt until acknowledgement activates the
+manifest and clears the pending operation. The separately published
+`active-workspaces.json` retains acknowledged ready facts and
+execution-directory identities until release is acknowledged; its aggregate size
+is independent of the operation-journal frame limit. Startup authenticates these
+facts against the configuration and filesystem before reconnecting; a changed
+mapping or replaced directory fails as `manifest_conflict`. The daemon loads
+provisioning and release work only for the current connection epoch and
+serializes provisioning and lease delivery on each connection until the
+corresponding durable outcome is acknowledged. Expected acquisition refusals are
+journaled as `operation_failed` and retained through heartbeat and reconnect
+until acknowledged; the runner keeps serving. Provisioning dispatch also
+requires the authorization’s registration revision to match the current
+registration head.
 
 ## Boundary contracts
 
@@ -331,24 +395,27 @@ placement path, which is not a runner placement fact.
 `promote_pending_runner` names the pending enrollment request and atomically
 revokes its lost predecessor and promotes its exact enrollment and registration;
 it changes no session placement. The daemon delivers the promoted `enrolled`
-receipt on the candidate connection; the runner fsyncs its exact promotion and
-equal replay changes nothing. `replace_lost_runner` names a lost session and an
-optional checkout revision, promotes a connected pending successor when needed,
-and installs the successor placement and grant lineage. Successor selection
-follows the enrollment chain to its current pending or active descendant.
-Pre-pin replacement provisions nothing and returns to unpinned at the next
-revision. Replacement behind an active model call or tool batch remains staged
-until its observation or complete-result boundary. Registration-triggered loss
-permits replacement on the same runner after its current registration satisfies
-the retained request; other loss sources require a different runner.
+receipt on the candidate connection before releasing its provisioning slot or
+delivering a lease offer; the runner fsyncs its exact promotion and equal replay
+changes nothing. `replace_lost_runner` names a lost session and an optional
+checkout revision, promotes a connected pending successor when needed, and
+installs the successor placement and grant lineage. Successor selection follows
+the enrollment chain to its current pending or active descendant. Pre-pin
+replacement provisions nothing and returns to unpinned at the next revision.
+Replacement behind an active model call or tool batch remains staged until its
+observation or complete-result boundary. Registration-triggered loss permits
+replacement on the same runner after its current registration satisfies the
+retained request; other loss sources require a different runner.
 
 Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,
 including its absolute working directory. The daemon acknowledges a durably
-retained receipt even while installation waits. Provisioning retains a
-repository key and checkout revision together or neither; a mismatched pair is
-rejected before staging. Installation consumes that receipt, promotes the
-pending candidate, installs the placement and grant, appends the reference-only
+retained receipt even while installation waits. Recording or replaying it
+validates the physical connection epoch under the same transaction's authority
+locks. Provisioning retains a repository key and checkout recovery facts
+together or neither; mismatched repository and recovery facts are rejected
+before staging. Installation consumes that receipt, promotes the pending
+candidate, installs the placement and grant, appends the reference-only
 placement boundary, and records the terminal result atomically after any
 authorized in-flight call reaches its observation boundary and, for a tool
 batch, after all results are appended. Provisioning refusal or candidate loss
@@ -363,22 +430,29 @@ ready workspace, including a correlated receipt arriving after abandonment, is
 released only through its exact manifest correlation on the candidate's retained
 connection epoch. Suspicion retains that cleanup authority; loss does not
 transfer it. Release acknowledgement uses the same current-epoch fence as
-release dispatch.
+release dispatch. The runner journals the exact release before cleanup, verifies
+its protected manifest, marks it `releasing`, renames the placement into
+`trash/<manifest_id>`, and deletes through directory descriptors without
+following symlinks. An accepted journal authorizes completion after a partial
+trash deletion. The completion receipt remains journaled until its exact
+acknowledgement; resume rechecks pending release authority or records the
+retained completion. Cleanup storage errors retain the accepted journal. Lease
+offers, provisioning, and staged release run serially per runner.
 
 ## Planned
 
-- Failure spooling and workspace, failure, and leak reconnect-inventory
-  reconciliation over the wire:
+- General failure spooling and placement-release, failure, and leak
+  reconnect-inventory reconciliation over the wire:
   [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:
   [runner protocol design](../design/runner-protocol.md).
-- Workspace provisioning, private writable roots, the workspace manifest
-  lifecycle, and root re-adoption on runner restart:
+- Initial repository-placement provisioning admission and credentialed or
+  restricted repository acquisition:
   [runner protocol design](../design/runner-protocol.md).
-- Workspace release and startup leak reconciliation:
-  [runner protocol design](../design/runner-protocol.md).
+- Placement-retirement release, cleanup-failure projection, and startup leak
+  reconciliation: [runner protocol design](../design/runner-protocol.md).
 - The restricted sandbox and ambient supervision under bubblewrap, with confined
   file tools: [runner protocol design](../design/runner-protocol.md).
 - The restricted-namespace HTTPS egress broker:

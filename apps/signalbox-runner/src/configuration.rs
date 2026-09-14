@@ -171,7 +171,7 @@ impl RunnerConfiguration {
         Ok(configuration)
     }
 
-    fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
+    pub(crate) fn parse(content: &str) -> Result<Self, RunnerConfigurationError> {
         let raw: RawConfiguration =
             toml::from_str(content).map_err(|_| RunnerConfigurationError::InvalidDocument)?;
         if raw.version != CONFIGURATION_VERSION {
@@ -211,7 +211,15 @@ impl RunnerConfiguration {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(RunnerConfigurationError::InvalidAdvertisement)?,
-            workspace_capabilities: Vec::new(),
+            workspace_capabilities: if raw
+                .sandbox_profiles
+                .iter()
+                .any(|profile| matches!(profile, ConfiguredSandbox::Ambient))
+            {
+                vec![signalbox_runner_wire::WorkspaceCapability::WorktreePerSession]
+            } else {
+                Vec::new()
+            },
             sandbox_profiles: raw
                 .sandbox_profiles
                 .into_iter()
@@ -222,6 +230,7 @@ impl RunnerConfiguration {
             credential_profiles: credentials.keys().cloned().collect(),
             repositories: repositories
                 .iter()
+                .filter(|(_, repository)| repository.credential_profile.is_none())
                 .map(|(key, repository)| signalbox_runner_wire::RepositoryEntry {
                     key: key.clone(),
                     credential_profile: repository.credential_profile.clone(),
@@ -747,11 +756,9 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
             configuration.advertisement().sandbox_profiles,
             [SandboxProfile::Ambient]
         );
-        assert!(
-            configuration
-                .advertisement()
-                .workspace_capabilities
-                .is_empty()
+        assert_eq!(
+            configuration.advertisement().workspace_capabilities,
+            [signalbox_runner_wire::WorkspaceCapability::WorktreePerSession]
         );
     }
 
@@ -820,16 +827,28 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
     }
 
     #[test]
-    fn configuration_advertises_the_exact_repository_profile_pair() {
+    fn configuration_does_not_advertise_a_credentialed_repository() {
         let fixture = configured_fixture();
         let configuration = RunnerConfiguration::parse(&fixture.document)
             .expect("the configured credential and repository are valid");
 
+        assert!(configuration.advertisement().repositories.is_empty());
+    }
+
+    #[test]
+    fn anonymous_repositories_are_advertised_for_provisioning() {
+        let fixture = configured_fixture();
+        let document = fixture.document.replace(
+            &format!(r#"credential_profile = "{CONFIGURED_PROFILE}""#),
+            "",
+        );
+        let configuration =
+            RunnerConfiguration::parse(&document).expect("anonymous repository configuration");
         assert_eq!(
             configuration.advertisement().repositories,
             vec![signalbox_runner_wire::RepositoryEntry {
                 key: fixture.repository,
-                credential_profile: Some(fixture.profile),
+                credential_profile: None,
             }]
         );
     }
@@ -854,7 +873,7 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
             .expect("the configured credential and repository are valid");
         let repository = configuration
             .repository(&fixture.repository)
-            .expect("the advertised repository resolves");
+            .expect("the configured repository resolves");
 
         assert_eq!(repository.clone_url(), CONFIGURED_CLONE_URL);
         assert_eq!(repository.credential_profile(), Some(&fixture.profile));

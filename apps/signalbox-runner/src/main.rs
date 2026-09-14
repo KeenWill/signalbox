@@ -56,11 +56,17 @@ async fn run(
         RunnerConfiguration::read(path.as_path()).map_err(RunnerDaemonError::Configuration)?;
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
+    state
+        .authenticate_active_workspaces(&configuration)
+        .map_err(|error| {
+            RunnerDaemonError::Connection(signalbox_runner::RunnerConnectionError::Workspace(error))
+        })?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(RunnerDaemonError::Signal)?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(RunnerDaemonError::Signal)?;
     let mut backoff = ReconnectBackoff::new();
+    let mut release_worker = None;
     loop {
         let stream = match tokio::select! {
             connected = connect_verified(configuration.daemon_socket_path()) => connected,
@@ -87,7 +93,7 @@ async fn run(
             _ = terminate.recv() => return Ok(()),
             _ = interrupt.recv() => return Ok(()),
         } {
-            Ok(connection) => connection,
+            Ok(connection) => connection.with_configuration(configuration.clone()),
             Err(error) if error.is_reconnectable() => {
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Establishment, &error, delay);
@@ -98,6 +104,9 @@ async fn run(
             }
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         };
+        if let Some(worker) = release_worker.take() {
+            connection.restore_workspace_release_worker(worker);
+        }
         report_established(&connection);
         backoff.reset();
         let mut shutdown_requested = false;
@@ -125,6 +134,7 @@ async fn run(
                 return shutdown_with_timeout(&mut connection).await;
             }
             Err(error) if error.is_reconnectable() && !shutdown_requested => {
+                release_worker = connection.take_workspace_release_worker();
                 let delay = backoff.next_delay();
                 report_reconnect(ReconnectStage::Serving, &error, delay);
                 if wait_for_retry(delay, &mut terminate, &mut interrupt).await {

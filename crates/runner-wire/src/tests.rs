@@ -587,6 +587,29 @@ fn manifest_rejects_invalid_branch_ref() {
 }
 
 #[test]
+fn unborn_manifest_binds_the_branch_without_a_commit_revision() {
+    let mut unborn = manifest();
+    unborn.recovery = Some(Recovery::UnbornBranch {
+        name: "main".to_owned(),
+    });
+    let first = workspace_manifest_digest(&unborn).expect("unborn branch is representable");
+    let encoded = serde_json::to_value(&unborn).expect("manifest encodes");
+    assert_eq!(encoded["recovery"]["kind"], "unborn_branch");
+    assert!(encoded["recovery"].get("revision").is_none());
+    unborn.recovery = Some(Recovery::UnbornBranch {
+        name: "other".to_owned(),
+    });
+    assert_ne!(
+        workspace_manifest_digest(&unborn).expect("another valid branch"),
+        first
+    );
+    unborn.recovery = Some(Recovery::UnbornBranch {
+        name: "bad..branch".to_owned(),
+    });
+    assert!(workspace_manifest_digest(&unborn).is_err());
+}
+
+#[test]
 fn manifest_rejects_abbreviated_revision() {
     let mut invalid = manifest();
     invalid.recovery = Some(Recovery::Commit {
