@@ -62,7 +62,7 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
         .enroll_pristine(enrollment_request())
         .await?
         .into_receipt();
-    store
+    let candidate_connection = store
         .open_connection(candidate.identities().enrollment())
         .await?;
 
@@ -79,7 +79,10 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
             RunnerRecoveryOutcome::Pending
         );
         let operations = store
-            .replacement_provisioning(candidate.identities().enrollment())
+            .replacement_provisioning(
+                candidate.identities().enrollment(),
+                candidate_connection.epoch(),
+            )
             .await?;
         let authorization = operations
             .into_iter()
