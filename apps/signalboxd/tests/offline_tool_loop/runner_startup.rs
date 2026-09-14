@@ -14,10 +14,17 @@ use signalboxd::runner_protocol_runtime::{
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn retained_runner_result_settles_before_generic_startup_scan() -> Result<(), Box<dyn Error>>
 {
-    tokio::time::timeout(Duration::from_secs(60), recover_retained_result()).await?
+    tokio::time::timeout(Duration::from_secs(60), recover_retained_result(true)).await?
 }
 
-async fn recover_retained_result() -> Result<(), Box<dyn Error>> {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_rechecks_a_settled_lease_without_a_dispatch_notification()
+-> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(60), recover_retained_result(false)).await?
+}
+
+async fn recover_retained_result(notify_recovery: bool) -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let fixture = ToolLoopFixture::with_creation_placement(
         DangerousToolAutoApproval::Disabled,
@@ -120,8 +127,23 @@ async fn recover_retained_result() -> Result<(), Box<dyn Error>> {
         assert_eq!(scanned.recovered_turn_count(), 0);
         Ok::<_, Box<dyn Error>>(())
     };
+    let mut recover_then_scan = Box::pin(recover_then_scan);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut recover_then_scan)
+            .await
+            .is_err(),
+        "recovery waits for the retained claimed lease"
+    );
+    let resume_service = if notify_recovery {
+        restarted.clone()
+    } else {
+        PostgresRunnerRegistrationService::local(fixture.pool.clone())
+            .expect("independent resume service")
+            .with_recovery_only()
+    };
+    let notifications = restarted.lease_changes().expect("dispatch notifications");
     let resume = async {
-        let resumed = restarted
+        let resumed = resume_service
             .resume(Resume {
                 request_id: receipt.request_id,
                 digest_version: DIGEST_VERSION,
@@ -148,10 +170,19 @@ async fn recover_retained_result() -> Result<(), Box<dyn Error>> {
             resumed.directives.result.expect("recorded result").action,
             DirectiveAction::DiscardAsRecorded
         );
+        if !notify_recovery {
+            assert!(
+                !notifications.has_changed()?,
+                "durable settlement produces no local wake"
+            );
+        }
         Ok::<_, Box<dyn Error>>(())
     };
-    let (recovered, resumed) = tokio::join!(recover_then_scan, resume);
-    recovered?;
+    let (recovered, resumed) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(5), recover_then_scan),
+        resume
+    );
+    recovered??;
     resumed?;
     assert_eq!(
         store
