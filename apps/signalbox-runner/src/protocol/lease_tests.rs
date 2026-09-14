@@ -86,7 +86,7 @@ async fn crash_at_journal_phase(
     RunnerStateRoot::open(&parent.path().join("state")).expect("restart replays killed producer")
 }
 
-fn fixture(
+pub(super) fn fixture(
     parent: &TempDir,
 ) -> (
     RunnerStateRoot,

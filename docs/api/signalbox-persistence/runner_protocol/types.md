@@ -671,6 +671,7 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn record_replacement_workspace_ready(
         &self,
         authorization: &signalbox_domain::RunnerReplacementProvisioning,
+        epoch: runner_protocol::RunnerConnectionEpoch,
         workspace: &signalbox_domain::ProvisionedWorkspace,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
 }

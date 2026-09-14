@@ -41,10 +41,18 @@ async fn a_replaced_connection_cannot_load_workspace_provisioning() -> Result<()
     provision_with_candidate_capabilities(ProvisionCase::Reconnected).await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_replaced_connection_cannot_record_or_replay_workspace_ready()
+-> Result<(), Box<dyn Error>> {
+    provision_with_candidate_capabilities(ProvisionCase::StaleReady).await
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProvisionCase {
     Supported,
     Reconnected,
+    StaleReady,
     UnbornRepository,
     Unsupported,
     RevisionWithoutRepository,
@@ -129,7 +137,10 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
     };
     if !matches!(
         case,
-        ProvisionCase::Supported | ProvisionCase::UnbornRepository | ProvisionCase::Reconnected
+        ProvisionCase::Supported
+            | ProvisionCase::UnbornRepository
+            | ProvisionCase::Reconnected
+            | ProvisionCase::StaleReady
     ) {
         let rejected =
             RunnerRecoveryOutcome::Recorded(signalbox_domain::ReplaceLostRunnerResult::Rejected(
@@ -216,11 +227,39 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         candidate.identities().runner(),
         authorization.placement_revision,
     );
+    let stale_epoch = if case == ProvisionCase::StaleReady {
+        let prior_epoch = candidate_connection.epoch();
+        candidate_connection = store
+            .open_connection(candidate.identities().enrollment())
+            .await?;
+        assert!(matches!(
+            store
+                .record_replacement_workspace_ready(authorization, prior_epoch, &ready)
+                .await,
+            Err(RunnerProtocolStoreError::Domain(
+                signalbox_domain::RunnerDomainError::InvalidState
+            ))
+        ));
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_replacement_workspace_ready WHERE authorization_id = $1",
+        )
+        .bind(authorization.authorization.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(receipts, 0);
+        assert_eq!(
+            store.resume_runner_replacement(command.command_id).await?,
+            RunnerRecoveryOutcome::Pending
+        );
+        Some(prior_epoch)
+    } else {
+        None
+    };
     let mut wrong = ready.clone();
     wrong.runner = predecessor.identities().runner();
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, &wrong)
+            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &wrong)
             .await
             .is_err()
     );
@@ -232,16 +271,30 @@ async fn provision_with_candidate_capabilities(case: ProvisionCase) -> Result<()
         )
         .await?;
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
         .await?;
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
         .await?;
+    if let Some(prior_epoch) = stale_epoch {
+        assert!(matches!(
+            store
+                .record_replacement_workspace_ready(authorization, prior_epoch, &ready)
+                .await,
+            Err(RunnerProtocolStoreError::Domain(
+                signalbox_domain::RunnerDomainError::InvalidState
+            ))
+        ));
+    }
     let mut changed = ready.clone();
     changed.manifest_id = WorkspaceManifestId::from_uuid(Uuid::now_v7());
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, &changed)
+            .record_replacement_workspace_ready(
+                authorization,
+                candidate_connection.epoch(),
+                &changed
+            )
             .await
             .is_err()
     );
@@ -490,7 +543,7 @@ async fn recovery_provisioning_failure_is_terminal_and_exactly_replayed()
     );
     assert!(
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
             .await
             .is_err()
     );
@@ -579,7 +632,7 @@ async fn recovery_startup_rejects_a_lost_candidate_without_consuming_or_releasin
         authorization.placement_revision,
     );
     store
-        .record_replacement_workspace_ready(authorization, &ready)
+        .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
         .await?;
     let connection = store
         .load_connection(candidate.identities().enrollment())
@@ -732,7 +785,7 @@ async fn rejected_staging_releases_ready_workspace(
     );
     if !late_ready {
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
             .await?;
     }
     let candidate_connection = store
@@ -766,15 +819,19 @@ async fn rejected_staging_releases_ready_workspace(
         wrong.runner = predecessor.identities().runner();
         assert!(
             store
-                .record_replacement_workspace_ready(authorization, &wrong)
+                .record_replacement_workspace_ready(
+                    authorization,
+                    candidate_connection.epoch(),
+                    &wrong
+                )
                 .await
                 .is_err()
         );
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
             .await?;
         store
-            .record_replacement_workspace_ready(authorization, &ready)
+            .record_replacement_workspace_ready(authorization, candidate_connection.epoch(), &ready)
             .await?;
     }
     let releases: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release WHERE authorization_id = $1 AND connection_epoch = $2")

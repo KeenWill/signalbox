@@ -175,6 +175,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn workspace_ready(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReady,
     ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>;
     /// Atomically creates or exactly replays pristine enrollment authority.
@@ -1367,9 +1368,10 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn workspace_ready(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReady,
     ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>> {
-        Box::pin(self.workspace_ready_durably(enrollment, receipt))
+        Box::pin(self.workspace_ready_durably(enrollment, epoch, receipt))
     }
     fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, RunnerEnrollmentResponse> {
         Box::pin(self.enroll_durably(request))
@@ -2224,7 +2226,7 @@ where
                     }
                     Message::WorkspaceReady(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.workspace_ready(context.enrollment, receipt).await {
+                        match service.workspace_ready(context.enrollment, context.epoch, receipt).await {
                             Ok(Some(recorded)) => {
                                 let completed_provision =
                                     busy_provision == Some(recorded.correlation.authorization_id);
@@ -3166,6 +3168,7 @@ mod tests {
         fn workspace_ready(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
             receipt: signalbox_runner_wire::WorkspaceReady,
         ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>
         {
