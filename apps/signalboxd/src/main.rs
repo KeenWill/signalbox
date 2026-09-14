@@ -581,6 +581,36 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
     error
 }
 
+fn runner_startup_failure(
+    error: &signalbox_persistence::runner_protocol::RunnerProtocolStoreError,
+) -> HubRuntimeError {
+    use signalbox_persistence::runner_protocol::RunnerProtocolStoreError;
+
+    let mut failure = erase_startup_scan_cause(
+        match error {
+            RunnerProtocolStoreError::CommitAmbiguous(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            RunnerProtocolStoreError::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            RunnerProtocolStoreError::Database(_)
+            | RunnerProtocolStoreError::Domain(_)
+            | RunnerProtocolStoreError::EnrollmentRequest(_) => {
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                }
+            }
+        },
+        "runner_connection_reconciliation_failed",
+        None,
+        None,
+    );
+    failure.database_failure = matches!(
+        error,
+        RunnerProtocolStoreError::Database(_) | RunnerProtocolStoreError::CommitAmbiguous(_)
+    );
+    failure
+}
+
 fn erase_startup_database_cause(
     phase: RuntimePhase,
     cause: SanitizedStartupCause<'_>,
@@ -1898,38 +1928,7 @@ async fn run_hub_incarnation(
                 .reconcile_startup(prior_connections)
                 .await
                 .map(|_| ())
-                .map_err(|error| {
-                    use signalbox_persistence::runner_protocol::RunnerProtocolStoreError;
-
-                    let mut failure = erase_startup_scan_cause(
-                        match &error {
-                            RunnerProtocolStoreError::CommitAmbiguous(_) => {
-                                OperatorFailureClass::Infrastructure {
-                                    commit_ambiguous: true,
-                                }
-                            }
-                            RunnerProtocolStoreError::Corruption(_) => {
-                                OperatorFailureClass::FailClosedCorruption
-                            }
-                            RunnerProtocolStoreError::Database(_)
-                            | RunnerProtocolStoreError::Domain(_)
-                            | RunnerProtocolStoreError::EnrollmentRequest(_) => {
-                                OperatorFailureClass::Infrastructure {
-                                    commit_ambiguous: false,
-                                }
-                            }
-                        },
-                        "runner_connection_reconciliation_failed",
-                        None,
-                        None,
-                    );
-                    failure.database_failure = matches!(
-                        error,
-                        RunnerProtocolStoreError::Database(_)
-                            | RunnerProtocolStoreError::CommitAmbiguous(_)
-                    );
-                    failure
-                })
+                .map_err(|error| runner_startup_failure(&error))
         },
         &mut runtime_tasks,
         &runner_shutdown,
@@ -4539,6 +4538,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, ShutdownOutcome::SignalListenerFailed);
+    }
+
+    #[test]
+    fn runner_startup_recovery_retries_database_failures_and_stops_on_corruption() {
+        use signalbox_persistence::runner_protocol::{
+            RunnerProtocolCorruption, RunnerProtocolStoreError,
+        };
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        for (failure, expected_class, retry) in [
+            (
+                RunnerProtocolStoreError::Database(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                true,
+            ),
+            (
+                RunnerProtocolStoreError::CommitAmbiguous(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                true,
+            ),
+            (
+                RunnerProtocolStoreError::Corruption(
+                    RunnerProtocolCorruption::MissingCanonicalLease,
+                ),
+                OperatorFailureClass::FailClosedCorruption,
+                false,
+            ),
+        ] {
+            let error = super::runner_startup_failure(&failure);
+            assert_eq!(error.failure_class, expected_class);
+            assert_eq!(
+                matches!(
+                    super::recovery_incarnation_outcome(Err(error), true),
+                    GuardedIncarnationOutcome::Reacquire
+                ),
+                retry
+            );
+        }
     }
 
     #[test]
