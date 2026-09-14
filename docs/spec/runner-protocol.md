@@ -176,7 +176,9 @@ manifest digest, so a startup report of the same workspace matches the retained
 leak. A readable releasing manifest, whether still in place or below `trash/`,
 retains its canonical workspace locator, ready-manifest digest, and session
 correlation in the startup report, matching the stored cleanup diagnostic.
-Pending and completed releases are reconciled by startup reporting. When a trash
+Readable trash manifests with inconsistent identity, path, or lifecycle are
+reported as manifest conflicts. Pending and completed releases, including
+retired initial placements, are reconciled by startup reporting. When a trash
 manifest is already deleted, its canonical trash name identifies the retained
 release and its existing diagnostic.
 

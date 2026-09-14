@@ -470,23 +470,44 @@ async fn reconcile_leak(
         WHERE operation.runner_id = $1 AND operation.session_id = $2 AND operation.placement_revision = $3 AND ready.relative_path = $4")
         .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get())).bind(fact.locator.as_str()).fetch_all(&mut *connection).await?;
     if rows.is_empty() {
-        let initial = sqlx::query("SELECT placement.* FROM runner_current_session_placement head
-            JOIN runner_session_placement_record placement USING (session_id,event_ordinal)
+        let initial = sqlx::query("SELECT placement.*, outcome.outcome,
+                release.manifest_id IS NOT NULL AS released
+            FROM runner_session_placement_record placement
+            LEFT JOIN runner_current_session_placement head USING (session_id,event_ordinal)
+            LEFT JOIN runner_workspace_release release ON release.session_id = placement.session_id
+                AND release.source_event_ordinal = placement.event_ordinal
+            LEFT JOIN runner_workspace_release_outcome outcome ON outcome.manifest_id = release.manifest_id
             WHERE placement.pinned_runner_id = $1 AND placement.session_id = $2
                 AND placement.workspace_placement_revision = $3 AND placement.workspace_relative_path = $4
                 AND placement.workspace_manifest_id IS NOT NULL AND placement.state_kind <> 'runner_abandoned'
+                AND (head.session_id IS NOT NULL OR release.manifest_id IS NOT NULL)
                 AND NOT EXISTS (SELECT 1 FROM runner_replacement_workspace_ready ready WHERE ready.manifest_id = placement.workspace_manifest_id)")
             .bind(runner.into_uuid()).bind(session.into_uuid()).bind(Decimal::from(revision.get()))
-            .bind(fact.locator.as_str()).fetch_optional(connection).await?;
-        return match initial {
-            Some(placement)
-                if placement_manifest_digest(&placement)? == fact.entry_digest.as_str() =>
-            {
-                Ok(None)
+            .bind(fact.locator.as_str()).fetch_all(connection).await?;
+        for placement in &initial {
+            if placement_manifest_digest(placement)? == fact.entry_digest.as_str() {
+                return if placement.decode_column::<bool>("released")? {
+                    Ok(
+                        match placement
+                            .decode_column::<Option<String>>("outcome")?
+                            .as_deref()
+                        {
+                            None | Some("completed") => None,
+                            Some("cleanup_failed") => Some(Kind::CleanupFailed),
+                            Some("unowned") => Some(Kind::RetiredPresent),
+                            _ => return Err(mismatch()),
+                        },
+                    )
+                } else {
+                    Ok(None)
+                };
             }
-            Some(_) => Ok(Some(Kind::ManifestConflict)),
-            None => Ok(Some(Kind::UnknownManifest)),
-        };
+        }
+        return Ok(Some(if initial.is_empty() {
+            Kind::UnknownManifest
+        } else {
+            Kind::ManifestConflict
+        }));
     }
     for row in rows {
         if row.decode_column::<String>("manifest_digest")? == fact.entry_digest.as_str() {

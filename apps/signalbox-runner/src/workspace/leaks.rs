@@ -177,7 +177,14 @@ fn trash_manifest_fact(
         || manifest.relative_path != expected_path
         || manifest.lifecycle != ManifestLifecycle::Releasing
     {
-        return Ok(None);
+        return Ok(Some(LeakFact {
+            kind: LeakFactKind::ManifestConflict,
+            locator: format!("{}/{}", release::TRASH_DIRECTORY, locator_component(name)),
+            entry_digest: workspace_manifest_digest(&manifest)
+                .map_err(|_| RunnerWorkspaceError::CorruptManifest)?,
+            session: Some(manifest.session),
+            placement_revision: Some(manifest.placement_revision),
+        }));
     }
     manifest.lifecycle = ManifestLifecycle::Ready;
     Ok(Some(LeakFact {

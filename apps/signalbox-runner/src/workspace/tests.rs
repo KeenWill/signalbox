@@ -797,3 +797,54 @@ async fn active_receipts_larger_than_a_frame_do_not_block_workspace_acknowledgem
             .expect("receipt document");
     assert!(receipts.records.contains_key(&next.manifest.manifest_id));
 }
+
+#[tokio::test]
+async fn startup_inventory_reports_inconsistent_trash_manifests_as_conflicts() {
+    let (parent, state) = enrolled_workspace_root();
+    let store = state.workspace_store().expect("owned workspace store");
+    let prepared = publish_repository(
+        &state,
+        Recovery::UnbornBranch {
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let placement_path = Path::new(prepared.execution_directory.as_str())
+        .parent()
+        .expect("placement");
+    let trash = parent.path().join("runner-state/trash");
+    fs::create_dir(&trash).expect("trash fixture");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(DIRECTORY_MODE)).expect("private trash");
+    let trashed = trash.join(prepared.manifest.manifest_id.to_string());
+    fs::rename(placement_path, &trashed).expect("release rename");
+    let directory = File::open(&trashed).expect("trash descriptor");
+    let mut releasing = read_manifest(&directory).expect("manifest");
+    releasing.lifecycle = ManifestLifecycle::Releasing;
+    let mut wrong_id = releasing.clone();
+    wrong_id.manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let mut wrong_runner = releasing.clone();
+    wrong_runner.runner = CanonicalUuid::from_uuid(Uuid::from_u128(OTHER_RUNNER));
+    let mut wrong_path = releasing.clone();
+    wrong_path.relative_path = format!("sessions/{}/99/repo", releasing.session);
+    let mut wrong_lifecycle = releasing.clone();
+    wrong_lifecycle.lifecycle = ManifestLifecycle::Active;
+    for manifest in [wrong_id, wrong_runner, wrong_path, wrong_lifecycle] {
+        write_manifest(&directory, &manifest).expect("readable inconsistent manifest");
+        let facts = store
+            .startup_leaks(prepared.manifest.runner)
+            .expect("inventory");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].kind,
+            signalbox_runner_wire::LeakFactKind::ManifestConflict
+        );
+        assert_eq!(
+            facts[0].locator,
+            format!("trash/{}", prepared.manifest.manifest_id)
+        );
+        assert_eq!(
+            facts[0].entry_digest,
+            workspace_manifest_digest(&manifest).expect("observed digest")
+        );
+    }
+}
