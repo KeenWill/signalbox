@@ -1142,8 +1142,7 @@ struct DimensionScalar {
 // svgtypes accepts trailing decimal points and only SVG length units. CSS token
 // boundaries retain strict decimal syntax; the additional CSS units have no numeric metadata.
 fn parse_scalar(value: &str) -> Result<DimensionScalar, ParseIssue> {
-    let mut input = cssparser::ParserInput::new(value);
-    let mut parser = cssparser::Parser::new(&mut input);
+    let mut parser = cssparser::Parser::new(value);
     let unit = match parser
         .next_including_whitespace_and_comments()
         .map_err(|_| ParseIssue::Malformed)?
@@ -1403,8 +1402,7 @@ impl<'a> CalculationParser<'a> {
     fn parse_dimension_value(&mut self) -> Option<CalculationValue> {
         self.skip_whitespace();
         let remaining = self.input.get(self.position..)?;
-        let mut input = cssparser::ParserInput::new(remaining);
-        let mut parser = cssparser::Parser::new(&mut input);
+        let mut parser = cssparser::Parser::new(remaining);
         parser.next_including_whitespace_and_comments().ok()?;
         let consumed = parser.position().byte_index();
         let scalar = parse_scalar(remaining.get(..consumed)?).ok()?;
