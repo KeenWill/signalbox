@@ -140,11 +140,11 @@ commit, a branch and commit, or an `unborn_branch` with its name and no commit
 revision.
 
 An in-flight release keeps the same worker across physical connections.
-Authenticated resume validates retained staging-release authority before opening
-an epoch, then reauthorizes that release under the new connection epoch before
-its completion is accepted. The daemon retains that reauthorization without
-changing the original release record; unrelated stale release receipts still
-fail the current-epoch check.
+Authenticated resume opens its epoch and reauthorizes retained staging-release
+authority in one transaction before accepting completion. A rejected release
+admission leaves the prior connection head unchanged. The daemon retains that
+reauthorization without changing the original release record; unrelated stale
+release receipts still fail the current-epoch check.
 
 Retained staging-release authority cannot be reauthorized after durable
 connection loss. Live provisioning failure and release completion check the

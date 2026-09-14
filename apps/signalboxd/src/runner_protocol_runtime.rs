@@ -819,38 +819,42 @@ impl PostgresRunnerRegistrationService {
                 "runner registration revision stored"
             );
         }
-        let connection = self
-            .store
-            .open_connection(receipt.enrollment().enrollment())
-            .await
-            .map_err(|error| {
-                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
-            })?;
+        let connection = match &request.inventory.workspace_operation {
+            Some(signalbox_runner_wire::WorkspaceOperation::Release {
+                correlation: release,
+                ..
+            }) => {
+                if release.runner_id != request.runner_id {
+                    return Err(invalid_inventory());
+                }
+                self.store
+                    .open_connection_for_replacement_workspace_release(
+                        identities.enrollment(),
+                        signalbox_domain::SessionId::from_uuid(release.session_id.into_uuid()),
+                        signalbox_domain::RunnerGeneration::try_from_u64(
+                            release.placement_revision.get(),
+                        )
+                        .ok_or_else(invalid_inventory)?,
+                        signalbox_domain::WorkspaceManifestId::from_uuid(
+                            release.manifest_id.into_uuid(),
+                        ),
+                    )
+                    .await
+            }
+            _ => {
+                self.store
+                    .open_connection(receipt.enrollment().enrollment())
+                    .await
+            }
+        }
+        .map_err(|error| {
+            store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+        })?;
         if let Some(signalbox_runner_wire::WorkspaceOperation::Release {
             correlation: release,
             phase,
         }) = &request.inventory.workspace_operation
         {
-            if release.runner_id != request.runner_id {
-                return Err(invalid_inventory());
-            }
-            self.store
-                .reauthorize_replacement_workspace_release(
-                    identities.enrollment(),
-                    connection.epoch(),
-                    signalbox_domain::SessionId::from_uuid(release.session_id.into_uuid()),
-                    signalbox_domain::RunnerGeneration::try_from_u64(
-                        release.placement_revision.get(),
-                    )
-                    .ok_or_else(invalid_inventory)?,
-                    signalbox_domain::WorkspaceManifestId::from_uuid(
-                        release.manifest_id.into_uuid(),
-                    ),
-                )
-                .await
-                .map_err(|error| {
-                    store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
-                })?;
             if *phase == signalbox_runner_wire::ReleasePhase::ReleaseCompleted {
                 self.workspace_released_durably(
                     request.enrollment_id,

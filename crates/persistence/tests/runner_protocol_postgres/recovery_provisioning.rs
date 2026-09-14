@@ -758,7 +758,7 @@ async fn recovery_release_receipt_cannot_cross_the_retained_cleanup_epoch()
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn retained_release_authority_is_not_reissued_after_heartbeat_loss()
+async fn release_admission_after_heartbeat_loss_leaves_the_prior_epoch_unchanged()
 -> Result<(), Box<dyn Error>> {
     rejected_staging_releases_ready_workspace(
         false,
@@ -933,13 +933,8 @@ async fn rejected_staging_releases_ready_workspace(
     );
     if reconnect_release {
         let next = store
-            .open_connection(candidate.identities().enrollment())
-            .await?;
-        assert_ne!(next.epoch(), candidate_connection.epoch());
-        store
-            .reauthorize_replacement_workspace_release(
+            .open_connection_for_replacement_workspace_release(
                 candidate.identities().enrollment(),
-                next.epoch(),
                 session,
                 ready.placement_revision,
                 ready.manifest_id,
@@ -991,12 +986,8 @@ async fn rejected_staging_releases_ready_workspace(
             )
             .await?;
         let next = store
-            .open_connection(candidate.identities().enrollment())
-            .await?;
-        store
-            .reauthorize_replacement_workspace_release(
+            .open_connection_for_replacement_workspace_release(
                 candidate.identities().enrollment(),
-                next.epoch(),
                 session,
                 ready.placement_revision,
                 ready.manifest_id,
@@ -1074,21 +1065,41 @@ async fn rejected_staging_releases_ready_workspace(
                 .epoch(),
             candidate_connection.epoch()
         );
-        let successor = store
-            .open_connection(candidate.identities().enrollment())
+        let before = store
+            .load_connection(candidate.identities().enrollment())
             .await?;
-        assert_ne!(successor.epoch(), candidate_connection.epoch());
+        let events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_connection_event WHERE enrollment_id = $1",
+        )
+        .bind(candidate.identities().enrollment().into_uuid())
+        .fetch_one(&pool)
+        .await?;
         assert!(
             store
-                .reauthorize_replacement_workspace_release(
+                .open_connection_for_replacement_workspace_release(
                     candidate.identities().enrollment(),
-                    successor.epoch(),
                     session,
                     ready.placement_revision,
                     ready.manifest_id,
                 )
                 .await
                 .is_err()
+        );
+        assert_eq!(
+            store
+                .load_connection(candidate.identities().enrollment())
+                .await?,
+            before
+        );
+        let after_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runner_connection_event WHERE enrollment_id = $1",
+        )
+        .bind(candidate.identities().enrollment().into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            after_events, events,
+            "rejected release admission leaves no new epoch"
         );
         let reauthorized: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_replacement_workspace_release_reauthorization WHERE authorization_id = $1")
             .bind(authorization.authorization.into_uuid()).fetch_one(&pool).await?;
@@ -1098,7 +1109,7 @@ async fn rejected_staging_releases_ready_workspace(
             store
                 .replacement_workspace_releases(
                     candidate.identities().enrollment(),
-                    successor.epoch()
+                    candidate_connection.epoch()
                 )
                 .await?
                 .is_empty()

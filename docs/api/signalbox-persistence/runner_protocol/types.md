@@ -359,6 +359,16 @@ impl runner_protocol::RunnerProtocolStore {
         runner_protocol::RunnerConnectionSnapshot,
         runner_protocol::RunnerProtocolStoreError,
     >;
+    pub async fn open_connection_for_replacement_workspace_release(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
+        session: signalbox_domain::SessionId,
+        revision: signalbox_domain::RunnerGeneration,
+        manifest: signalbox_domain::WorkspaceManifestId,
+    ) -> result::Result<
+        runner_protocol::RunnerConnectionSnapshot,
+        runner_protocol::RunnerProtocolStoreError,
+    >;
     pub async fn transition_connection(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
@@ -621,14 +631,6 @@ impl runner_protocol::RunnerProtocolStore {
         session: signalbox_domain::SessionId,
         revision: signalbox_domain::RunnerGeneration,
         runner: signalbox_domain::RunnerId,
-        manifest: signalbox_domain::WorkspaceManifestId,
-    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
-    pub async fn reauthorize_replacement_workspace_release(
-        &self,
-        enrollment: signalbox_domain::RunnerEnrollmentId,
-        epoch: runner_protocol::RunnerConnectionEpoch,
-        session: signalbox_domain::SessionId,
-        revision: signalbox_domain::RunnerGeneration,
         manifest: signalbox_domain::WorkspaceManifestId,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
     pub async fn replacement_workspace_releases(

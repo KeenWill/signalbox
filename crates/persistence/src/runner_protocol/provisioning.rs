@@ -41,24 +41,14 @@ impl RunnerProtocolStore {
         Ok(())
     }
 
-    /// Reauthorizes an exact journaled staging release on its owner's current connection.
-    pub async fn reauthorize_replacement_workspace_release(
-        &self,
+    pub(super) async fn reauthorize_replacement_workspace_release_in(
+        transaction: &mut PgConnection,
         enrollment: RunnerEnrollmentId,
         epoch: RunnerConnectionEpoch,
         session: SessionId,
         revision: RunnerGeneration,
         manifest: WorkspaceManifestId,
     ) -> Result<(), RunnerProtocolStoreError> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
-            .bind(session.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-        sqlx::query(RUNNER_ENROLLMENT)
-            .bind(enrollment.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
         sqlx::query(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
             .bind(enrollment.into_uuid())
             .fetch_one(&mut *transaction)
@@ -87,7 +77,7 @@ impl RunnerProtocolStore {
         ))?;
         sqlx::query("INSERT INTO runner_replacement_workspace_release_reauthorization (authorization_id,connection_epoch) VALUES ($1,$2) ON CONFLICT DO NOTHING")
             .bind(authorization).bind(Decimal::from(epoch.get())).execute(&mut *transaction).await?;
-        commit_mutation(transaction).await
+        Ok(())
     }
 
     /// Loads command-retired staging workspaces authorized for the exact connection epoch.
