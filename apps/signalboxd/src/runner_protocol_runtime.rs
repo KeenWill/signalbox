@@ -157,12 +157,14 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn workspace_released(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded>;
     /// Retains a correlated provisioning refusal before acknowledging it.
     fn provisioning_failed(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         failure: signalbox_runner_wire::OperationFailed,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded>;
     /// Stores one validated startup diagnostic page before acknowledging it.
@@ -714,6 +716,7 @@ impl PostgresRunnerRegistrationService {
                 let action = if let Some(failure) = &request.inventory.operation_failure {
                     self.provisioning_failed_durably(
                         request.enrollment_id,
+                        None,
                         signalbox_runner_wire::OperationFailed {
                             failure: failure.clone(),
                         },
@@ -1339,16 +1342,18 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn workspace_released(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded> {
-        Box::pin(self.workspace_released_durably(enrollment, receipt))
+        Box::pin(self.workspace_released_durably(enrollment, epoch, receipt))
     }
     fn provisioning_failed(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         failure: signalbox_runner_wire::OperationFailed,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
-        Box::pin(self.provisioning_failed_durably(enrollment, failure))
+        Box::pin(self.provisioning_failed_durably(enrollment, Some(epoch), failure))
     }
     fn workspace_leak_page(
         &self,
@@ -2201,14 +2206,14 @@ where
                     }
                     Message::WorkspaceReleased(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReleased, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.workspace_released(context.enrollment, receipt).await {
+                        match service.workspace_released(context.enrollment, context.epoch, receipt).await {
                             Ok(recorded) => { workspaces::settle_workspace(&mut pending_workspace, signalbox_runner_wire::OperationCorrelation::Release(recorded.correlation.clone())); write_message(&mut writer, Message::WorkspaceReleaseRecorded(recorded)).await?; },
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
                     }
                     Message::OperationFailed(failure) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::OperationFailed, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.provisioning_failed(context.enrollment, failure).await {
+                        match service.provisioning_failed(context.enrollment, context.epoch, failure).await {
                             Ok(recorded) => {
                                 if let signalbox_runner_wire::OperationCorrelation::LeaseOffer(correlation) = &recorded.correlation
                                     && busy_lease.as_ref() == Some(correlation)
@@ -3127,6 +3132,7 @@ mod tests {
         fn workspace_released(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
             receipt: signalbox_runner_wire::WorkspaceReleased,
         ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceReleaseRecorded> {
             Box::pin(async move {
@@ -3140,6 +3146,7 @@ mod tests {
         fn provisioning_failed(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
             failure: signalbox_runner_wire::OperationFailed,
         ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::OperationFailureRecorded> {
             Box::pin(async move {

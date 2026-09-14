@@ -168,7 +168,7 @@ impl PostgresRunnerRegistrationService {
             (RunnerWorkspaceReleaseState::Pending, ReleasePhase::ReleaseCompleted, None)
             | (RunnerWorkspaceReleaseState::Pending, ReleasePhase::ReleaseAccepted, Some(_)) => {
                 self.store
-                    .record_workspace_release_outcome(
+                    .reconcile_workspace_release_outcome(
                         identities.enrollment(),
                         &release,
                         detail.as_ref(),

@@ -730,6 +730,13 @@ impl runner_protocol::RunnerProtocolStore {
     pub async fn record_workspace_release_outcome(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,
+        epoch: runner_protocol::RunnerConnectionEpoch,
+        expected: &runner_protocol::workspaces::RunnerWorkspaceRelease,
+        failure_detail: option::Option<&value::Value>,
+    ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;
+    pub async fn reconcile_workspace_release_outcome(
+        &self,
+        enrollment: signalbox_domain::RunnerEnrollmentId,
         expected: &runner_protocol::workspaces::RunnerWorkspaceRelease,
         failure_detail: option::Option<&value::Value>,
     ) -> result::Result<(), runner_protocol::RunnerProtocolStoreError>;

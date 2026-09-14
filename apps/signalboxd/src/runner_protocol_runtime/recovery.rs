@@ -127,6 +127,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn workspace_released_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReleased,
     ) -> Result<signalbox_runner_wire::WorkspaceReleaseRecorded, RunnerRegistrationFailure> {
         let correlation = receipt.correlation;
@@ -147,6 +148,11 @@ impl PostgresRunnerRegistrationService {
         self.store
             .record_workspace_release_outcome(
                 RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                    failure(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::CorrelationMismatch,
+                    ))
+                })?,
                 &signalbox_persistence::runner_protocol::workspaces::RunnerWorkspaceRelease {
                     session: signalbox_domain::SessionId::from_uuid(
                         correlation.session_id.into_uuid(),
@@ -164,6 +170,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn provisioning_failed_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: Option<PositiveU64>,
         message: signalbox_runner_wire::OperationFailed,
     ) -> Result<signalbox_runner_wire::OperationFailureRecorded, RunnerRegistrationFailure> {
         use signalbox_domain::RunnerProvisioningFailureKind as Kind;
@@ -182,20 +189,34 @@ impl PostgresRunnerRegistrationService {
                 return Err(rejected());
             }
             let detail = serde_json::to_value(&failure.detail).map_err(|_| rejected())?;
-            self.store
-                .record_workspace_release_outcome(
-                    RunnerEnrollmentId::from_uuid(enrollment.into_uuid()),
-                    &super::workspaces::release_receipt(correlation).map_err(|_| rejected())?,
-                    Some(&detail),
+            let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
+            let release =
+                super::workspaces::release_receipt(correlation).map_err(|_| rejected())?;
+            let result = match epoch {
+                Some(epoch) => {
+                    self.store
+                        .record_workspace_release_outcome(
+                            enrollment,
+                            RunnerConnectionEpoch::try_from_u64(epoch.get())
+                                .ok_or_else(rejected)?,
+                            &release,
+                            Some(&detail),
+                        )
+                        .await
+                }
+                None => {
+                    self.store
+                        .reconcile_workspace_release_outcome(enrollment, &release, Some(&detail))
+                        .await
+                }
+            };
+            result.map_err(|error| {
+                store_failure(
+                    RunnerInboundFrameKind::OperationFailed,
+                    AvailableCorrelation::OperationFailure(failure.correlation.clone()),
+                    error,
                 )
-                .await
-                .map_err(|error| {
-                    store_failure(
-                        RunnerInboundFrameKind::OperationFailed,
-                        AvailableCorrelation::OperationFailure(failure.correlation.clone()),
-                        error,
-                    )
-                })?;
+            })?;
             return Ok(signalbox_runner_wire::OperationFailureRecorded {
                 correlation: failure.correlation,
             });
