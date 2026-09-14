@@ -868,8 +868,16 @@ async fn retained_release_outcomes_reconcile_before_a_new_epoch_opens() -> Resul
 enum ReleaseEpoch {
     Current,
     Lost,
+    HeartbeatLoss,
     Fenced,
     Retained,
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retained_release_authority_is_not_reissued_after_heartbeat_loss()
+-> Result<(), Box<dyn Error>> {
+    rejected_staging_releases_ready_workspace(false, ReleaseEpoch::HeartbeatLoss, false).await
 }
 
 async fn rejected_staging_releases_ready_workspace(
@@ -1096,12 +1104,19 @@ async fn rejected_staging_releases_ready_workspace(
         assert_eq!(recorded, 1);
         return Ok(());
     }
-    if matches!(release_epoch, ReleaseEpoch::Lost) {
+    if matches!(
+        release_epoch,
+        ReleaseEpoch::Lost | ReleaseEpoch::HeartbeatLoss
+    ) {
         store
             .transition_connection(
                 candidate.identities().enrollment(),
                 candidate_connection.epoch(),
-                RunnerConnectionTransition::TransportClosed,
+                if matches!(release_epoch, ReleaseEpoch::HeartbeatLoss) {
+                    RunnerConnectionTransition::HeartbeatTimeout
+                } else {
+                    RunnerConnectionTransition::TransportClosed
+                },
             )
             .await?;
         let successor = store
