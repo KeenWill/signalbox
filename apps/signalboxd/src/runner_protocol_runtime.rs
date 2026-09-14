@@ -169,6 +169,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn workspace_leak_page(
         &self,
         _enrollment: CanonicalUuid,
+        _epoch: PositiveU64,
         page: signalbox_runner_wire::WorkspaceLeakPage,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceLeakRecorded> {
         Box::pin(async move {
@@ -190,6 +191,7 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     fn workspace_ready(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReady,
     ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>;
     /// Atomically creates or exactly replays pristine enrollment authority.
@@ -735,6 +737,7 @@ impl PostgresRunnerRegistrationService {
             }
             self.leak_page_durably(
                 request.enrollment_id,
+                None,
                 signalbox_runner_wire::WorkspaceLeakPage { page: page.clone() },
             )
             .await?;
@@ -1350,9 +1353,10 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn workspace_leak_page(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         page: signalbox_runner_wire::WorkspaceLeakPage,
     ) -> RunnerRegistrationFuture<'_, signalbox_runner_wire::WorkspaceLeakRecorded> {
-        Box::pin(self.leak_page_durably(enrollment, page))
+        Box::pin(self.leak_page_durably(enrollment, Some(epoch), page))
     }
     fn replacement_operations(
         &self,
@@ -1365,9 +1369,10 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     fn workspace_ready(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: signalbox_runner_wire::WorkspaceReady,
     ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>> {
-        Box::pin(self.workspace_ready_durably(enrollment, receipt))
+        Box::pin(self.workspace_ready_durably(enrollment, epoch, receipt))
     }
     fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, RunnerEnrollmentResponse> {
         Box::pin(self.enroll_durably(request))
@@ -2189,7 +2194,7 @@ where
                 match frame.message {
                     Message::WorkspaceLeakPage(page) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceLeakPage, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.workspace_leak_page(context.enrollment, page).await {
+                        match service.workspace_leak_page(context.enrollment, context.epoch, page).await {
                             Ok(recorded) => write_message(&mut writer, Message::WorkspaceLeakRecorded(recorded)).await?,
                             Err(failure) => { write_rejected(&mut writer, failure).await?; return Ok(()); }
                         }
@@ -2218,7 +2223,7 @@ where
                     }
                     Message::WorkspaceReady(receipt) => {
                         if !transition_or_reject_not_current(&service, context, &mut writer, RunnerInboundFrameKind::WorkspaceReady, context.epoch, RunnerConnectionTransition::Observe).await? { return Ok(()); }
-                        match service.workspace_ready(context.enrollment, receipt).await {
+                        match service.workspace_ready(context.enrollment, context.epoch, receipt).await {
                             Ok(Some(recorded)) => {
                                 let completed_provision =
                                     pending_workspace == Some(signalbox_runner_wire::OperationCorrelation::Provision(recorded.correlation.clone()));
@@ -3176,6 +3181,7 @@ mod tests {
         fn workspace_ready(
             &self,
             _enrollment: CanonicalUuid,
+            _epoch: PositiveU64,
             receipt: signalbox_runner_wire::WorkspaceReady,
         ) -> RunnerRegistrationFuture<'_, Option<signalbox_runner_wire::WorkspaceRecorded>>
         {

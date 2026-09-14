@@ -308,6 +308,7 @@ impl PostgresRunnerRegistrationService {
     pub(super) async fn workspace_ready_durably(
         &self,
         enrollment: CanonicalUuid,
+        epoch: PositiveU64,
         receipt: WorkspaceReady,
     ) -> Result<Option<WorkspaceRecorded>, RunnerRegistrationFailure> {
         let correlation = AvailableCorrelation::Provision(receipt.correlation.clone());
@@ -389,6 +390,11 @@ impl PostgresRunnerRegistrationService {
         self.store
             .record_replacement_workspace_ready(
                 &authorization,
+                RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
+                    failure(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::CorruptStoredFacts,
+                    ))
+                })?,
                 &workspace,
                 &signalbox_persistence::runner_protocol::workspaces::RunnerEvidenceDigest::try_new(
                     receipt.ready.manifest_digest.as_str().to_owned(),
