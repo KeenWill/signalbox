@@ -252,7 +252,7 @@ async fn acknowledge_repository_revision(
         recovery: Some(recovery.clone()),
     };
     state
-        .record_provision(operation.clone())
+        .record_provision(operation.clone(), clone_url_digest(CLONE_URL))
         .expect("durable request");
     let prepared = publish_repository_request(state, &request, recovery).await;
     state

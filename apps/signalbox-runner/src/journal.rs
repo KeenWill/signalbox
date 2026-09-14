@@ -10,9 +10,10 @@ use rustix::{
 };
 use serde::{Deserialize, Serialize};
 use signalbox_runner_wire::{
-    LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message, OperationCorrelation,
-    OperationFailure, ProvisionPhase, ReconnectInventory, ReleaseCorrelation, ReleasePhase,
-    RetainedResult, WorkspaceOperation, WorkspaceProvision, WorkspaceReady, WorkspaceRecorded,
+    Digest, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
+    OperationCorrelation, OperationFailure, ProvisionPhase, ReconnectInventory, ReleaseCorrelation,
+    ReleasePhase, RetainedResult, WorkspaceOperation, WorkspaceProvision, WorkspaceReady,
+    WorkspaceRecorded,
 };
 use std::{
     fs::File,
@@ -44,6 +45,7 @@ enum JournalEntry {
     },
     Provision {
         request: WorkspaceProvision,
+        canonical_clone_url_digest: Digest,
         ready: Option<WorkspaceReady>,
         failure: Option<Box<OperationFailure>>,
     },
@@ -175,6 +177,7 @@ impl Journal {
                 request,
                 ready,
                 failure,
+                ..
             }) => ReconnectInventory {
                 operation_failure: failure.as_deref().cloned(),
                 workspace_operation: Some(WorkspaceOperation::Provision {
@@ -196,6 +199,7 @@ impl Journal {
         }
         if let Some(JournalEntry::Provision {
             request,
+            canonical_clone_url_digest,
             ready,
             failure,
         }) = self.entries.first()
@@ -213,6 +217,8 @@ impl Journal {
                         || request.recovery.as_ref().is_some_and(|recovery| {
                             ready.ready.manifest.recovery.as_ref() != Some(recovery)
                         })
+                        || ready.ready.manifest.canonical_clone_url_digest.as_ref()
+                            != Some(canonical_clone_url_digest)
                 }))
         {
             return Err(RunnerStateError::CorruptState);
@@ -323,10 +329,21 @@ impl Journal {
         }
     }
 
+    pub(crate) fn provision_clone_url_digest(&self) -> Option<&Digest> {
+        match self.entries.first() {
+            Some(JournalEntry::Provision {
+                canonical_clone_url_digest,
+                ..
+            }) => Some(canonical_clone_url_digest),
+            _ => None,
+        }
+    }
+
     pub(crate) fn record_provision(
         &mut self,
         directory: &File,
         request: WorkspaceProvision,
+        canonical_clone_url_digest: Digest,
     ) -> Result<(), RunnerStateError> {
         match self.entries.first() {
             None => self.publish(
@@ -334,12 +351,17 @@ impl Journal {
                 Self {
                     entries: vec![JournalEntry::Provision {
                         request,
+                        canonical_clone_url_digest,
                         ready: None,
                         failure: None,
                     }],
                 },
             ),
-            Some(JournalEntry::Provision { request: prior, .. }) if prior == &request => Ok(()),
+            Some(JournalEntry::Provision {
+                request: prior,
+                canonical_clone_url_digest: prior_digest,
+                ..
+            }) if prior == &request && prior_digest == &canonical_clone_url_digest => Ok(()),
             _ => Err(RunnerStateError::InvalidTransition),
         }
     }
@@ -351,6 +373,7 @@ impl Journal {
     ) -> Result<(), RunnerStateError> {
         let Some(JournalEntry::Provision {
             request,
+            canonical_clone_url_digest,
             ready: prior,
             failure: None,
         }) = self.entries.first()
@@ -372,6 +395,7 @@ impl Journal {
             Self {
                 entries: vec![JournalEntry::Provision {
                     request: request.clone(),
+                    canonical_clone_url_digest: canonical_clone_url_digest.clone(),
                     ready: Some(ready),
                     failure: None,
                 }],
@@ -392,6 +416,7 @@ impl Journal {
     ) -> Result<(), RunnerStateError> {
         let Some(JournalEntry::Provision {
             request,
+            canonical_clone_url_digest,
             ready: None,
             failure: prior,
         }) = self.entries.first()
@@ -413,6 +438,7 @@ impl Journal {
             Self {
                 entries: vec![JournalEntry::Provision {
                     request: request.clone(),
+                    canonical_clone_url_digest: canonical_clone_url_digest.clone(),
                     ready: None,
                     failure: Some(Box::new(failure)),
                 }],

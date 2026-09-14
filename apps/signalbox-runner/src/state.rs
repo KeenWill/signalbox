@@ -601,9 +601,14 @@ impl RunnerStateRoot {
         self.journal.provision()
     }
 
+    pub(crate) fn retained_provision_clone_url_digest(&self) -> Option<&Digest> {
+        self.journal.provision_clone_url_digest()
+    }
+
     pub(crate) fn record_provision(
         &mut self,
         request: signalbox_runner_wire::WorkspaceProvision,
+        canonical_clone_url_digest: Digest,
     ) -> Result<(), RunnerStateError> {
         let receipt = self
             .state
@@ -618,7 +623,8 @@ impl RunnerStateRoot {
         {
             return Err(RunnerStateError::InvalidTransition);
         }
-        self.journal.record_provision(&self.directory, request)
+        self.journal
+            .record_provision(&self.directory, request, canonical_clone_url_digest)
     }
 
     pub(crate) fn retained_provision_failure(
