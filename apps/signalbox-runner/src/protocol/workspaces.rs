@@ -21,6 +21,15 @@ pub struct WorkspaceReleaseWorker {
 }
 
 impl WorkspaceReleaseWorker {
+    /// Finishes and journals cleanup before resume can reconcile its retained release.
+    #[doc(hidden)]
+    pub async fn reap(&mut self, state: &mut RunnerStateRoot) -> Result<(), RunnerConnectionError> {
+        let (correlation, succeeded) = (&mut self.task).await.map_err(|_| {
+            RunnerConnectionError::Workspace(crate::WorkspaceProvisionError::Storage)
+        })?;
+        record_release_completion(state, correlation, succeeded)
+    }
+
     pub(super) fn new(
         task: tokio::task::JoinHandle<(signalbox_runner_wire::ReleaseCorrelation, bool)>,
     ) -> Self {
@@ -71,14 +80,33 @@ pub(super) async fn workspace_finished(
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
-    /// Restores the exact release executor retained across a reconnect.
-    #[doc(hidden)]
-    pub fn restore_workspace_release_worker(&mut self, worker: WorkspaceReleaseWorker) {
-        debug_assert!(self.workspace.is_none());
-        self.workspace = Some(WorkspaceExecution::Releasing(worker));
+fn record_release_completion(
+    state: &mut RunnerStateRoot,
+    correlation: signalbox_runner_wire::ReleaseCorrelation,
+    succeeded: bool,
+) -> Result<(), RunnerConnectionError> {
+    if succeeded {
+        state.complete_release(&correlation)?;
+    } else {
+        use signalbox_runner_wire::{
+            DetailName, FailureCategory, FailureDetail, OperationCorrelation, OperationFailure,
+        };
+        state.fail_release(OperationFailure {
+            correlation: OperationCorrelation::Release(correlation),
+            category: FailureCategory::WorkspaceCleanupFailed,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("workspace-cleanup-failed".to_owned())
+                    .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+                "The accepted workspace cleanup failed".to_owned(),
+                serde_json::json!({}),
+            )
+            .map_err(RunnerConnectionError::InvalidLocalFrame)?,
+        })?;
     }
+    Ok(())
+}
 
+impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
     /// Removes an in-flight release executor so reconnect does not duplicate it.
     #[doc(hidden)]
     pub fn take_workspace_release_worker(&mut self) -> Option<WorkspaceReleaseWorker> {
@@ -191,25 +219,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> RunnerConnection<S> {
                 correlation,
                 succeeded,
             } => {
-                if succeeded {
-                    state.complete_release(&correlation)?;
-                } else {
-                    use signalbox_runner_wire::{
-                        DetailName, FailureCategory, FailureDetail, OperationCorrelation,
-                        OperationFailure,
-                    };
-                    state.fail_release(OperationFailure {
-                        correlation: OperationCorrelation::Release(correlation),
-                        category: FailureCategory::WorkspaceCleanupFailed,
-                        detail: FailureDetail::try_new(
-                            DetailName::try_new("workspace-cleanup-failed".to_owned())
-                                .map_err(RunnerConnectionError::InvalidLocalFrame)?,
-                            "The accepted workspace cleanup failed".to_owned(),
-                            serde_json::json!({}),
-                        )
-                        .map_err(RunnerConnectionError::InvalidLocalFrame)?,
-                    })?;
-                }
+                record_release_completion(state, correlation, succeeded)?;
             }
         }
         self.workspace = Some(WorkspaceExecution::Ready);

@@ -133,7 +133,8 @@ upon an exact `workspace_recorded` acknowledgement. A repository records a
 commit, a branch and commit, or an `unborn_branch` with its name and no commit
 revision.
 
-An in-flight release keeps the same worker across physical connections.
+An in-flight release keeps the same worker after a transport loss. The runner
+reaps it and journals its outcome before the next resume handshake.
 
 The runner retains the complete provisioning request and ready receipt in its
 private journal. Restart recomputes the fixed path and authenticates the root
@@ -161,14 +162,17 @@ descriptors without following symlinks. Restart continues accepted deletion even
 when its manifest is gone. Completion is journaled before `workspace_released`
 and retained until the exact acknowledgement. Failed cleanup retains
 `workspace_cleanup_failed` until durable acknowledgement and exposes the
-surviving workspace as a `cleanup_failed` leak.
+surviving workspace as a `cleanup_failed` leak. Release diagnostics retain the
+manifest digest, so a startup report of the same workspace matches the retained
+leak.
 
-Before execution, startup reports ready and active manifests and unknown entries
-in bounded, digest-correlated pages. The daemon reconciles exact retained ready
-facts and stores unresolved diagnostics before acknowledging each page. The
-final page verifies strict ordering and the complete digest over all retained
-facts. Reports remain visible without a resumable session and authorize no
-deletion.
+Before accepting new provisioning or executing tools, startup reports ready and
+active manifests and unknown entries in bounded, digest-correlated pages.
+Provisioning waits until every startup page is acknowledged. The daemon
+reconciles exact retained ready facts and stores unresolved diagnostics before
+acknowledging each page. The final page verifies strict ordering and the
+complete digest over all retained facts. Reports remain visible without a
+resumable session and authorize no deletion.
 
 ## Boundary contracts
 

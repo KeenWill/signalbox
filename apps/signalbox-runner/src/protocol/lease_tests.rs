@@ -156,6 +156,7 @@ fn fixture(
         last_leak_recorded: None,
         deferred_dispatch: None,
         deferred_release: None,
+        deferred_provision: None,
         offer_claimed: false,
         receipt,
         advertisement,
