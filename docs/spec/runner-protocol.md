@@ -23,13 +23,14 @@ tool as a combined-locus pure declaration with the identical model definition
 and permission default. The runner advertises configured availability for those
 entries, credential profiles, and anonymous repositories. Credential-bound
 repositories remain configured locally but are not advertised. An ambient runner
-also advertises `worktree_per_session`. It executes `echo` in a plain child
-process under `ambient` and retains the claimed phase and terminal result in a
-versioned, fsynced, atomically published private journal. An initialized state
-root without that journal fails startup. Resume reconciles the retained lease
-phase and terminal result against durable daemon state. Provisioning and release
-resume the exact retained workspace operation. Startup reconciles leak pages
-before execution. Sandbox supervision is listed under Planned.
+also advertises `worktree_per_session`. It executes `echo` through the labeled
+`ambient` bubblewrap supervisor and retains the claimed phase and terminal
+result in a versioned, fsynced, atomically published private journal. An
+initialized state root without that journal fails startup. Resume reconciles the
+retained lease phase and terminal result against durable daemon state.
+Provisioning and release resume the exact retained workspace operation. Startup
+reconciles leak pages before execution. Restricted confinement is listed under
+Planned.
 
 The daemon admits authenticated runner recovery after migrations and before the
 generic startup scan or blob checks. Ordinary enrollment waits until the process
@@ -445,6 +446,14 @@ placement whose selected registration does not advertise its sandbox profile. A
 placement override naming a tool absent from the validated registration's daemon
 catalog rejects the request as `ToolUndeclared`.
 
+The `ambient` supervisor binds the invoking user's filesystem read-write,
+including devices, and retains host networking and the host PID namespace. It
+supervises without confining. Before connecting, the runner proves a separate
+mount namespace, unchanged user and group identities, shared network and PID
+namespaces, and a writable host binding; failure prevents enrollment. The child
+dies when its supervisor or runner dies. Explicit profile selection accepts the
+full same-user filesystem exposure, including discoverable credential files.
+
 No credential-value field exists in the runner-protocol domain; advertisements,
 registrations, placements, grants, leases, changes, and reconstitution inputs
 carry only `CredentialProfileName`. Model-provider credentials never enter
@@ -508,8 +517,8 @@ release dispatch.
 - Initial repository-placement provisioning admission and credentialed or
   restricted repository acquisition:
   [runner protocol design](../design/runner-protocol.md).
-- The restricted sandbox and ambient supervision under bubblewrap, with confined
-  file tools: [runner protocol design](../design/runner-protocol.md).
+- The restricted sandbox under bubblewrap, with confined file tools:
+  [runner protocol design](../design/runner-protocol.md).
 - The restricted-namespace HTTPS egress broker:
   [runner protocol design](../design/runner-protocol.md).
 - Forced Git configuration and the canonical repository binding check:

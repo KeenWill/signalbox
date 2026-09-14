@@ -20,6 +20,15 @@ const SHUTDOWN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn main() -> ExitCode {
     if env::args_os()
         .skip(1)
+        .eq([OsString::from(signalbox_runner::AMBIENT_PROBE_ARGUMENT)])
+    {
+        return match signalbox_runner::run_ambient_probe_child() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
+    if env::args_os()
+        .skip(1)
         .eq([OsString::from(signalbox_runner::ECHO_CHILD_ARGUMENT)])
     {
         return match signalbox_runner::run_echo_child() {
@@ -54,6 +63,10 @@ async fn run(
         .map_err(RunnerDaemonError::Argument)?;
     let configuration =
         RunnerConfiguration::read(path.as_path()).map_err(RunnerDaemonError::Configuration)?;
+    configuration
+        .verify_ambient_supervisor()
+        .await
+        .map_err(RunnerDaemonError::AmbientSupervisor)?;
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
     state
@@ -277,6 +290,7 @@ impl ReconnectBackoff {
 
 #[derive(Debug)]
 enum RunnerDaemonError {
+    AmbientSupervisor(io::Error),
     Argument(ArgumentError),
     Configuration(RunnerConfigurationError),
     State(RunnerStateError),
@@ -290,6 +304,7 @@ enum RunnerDaemonError {
 impl fmt::Display for RunnerDaemonError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::AmbientSupervisor(_) => "ambient bubblewrap supervisor is unavailable",
             Self::Argument(_) => "runner arguments are invalid",
             Self::Configuration(_) => "runner configuration is invalid",
             Self::State(_) => "runner durable state is unavailable",
@@ -305,6 +320,7 @@ impl fmt::Display for RunnerDaemonError {
 impl Error for RunnerDaemonError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::AmbientSupervisor(error) => Some(error),
             Self::Argument(error) => Some(error),
             Self::Configuration(error) => Some(error),
             Self::State(error) => Some(error),

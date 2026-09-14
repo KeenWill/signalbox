@@ -5112,6 +5112,7 @@ dependencies = [
  "sha2 0.11.0",
  "signalbox-domain",
  "signalbox-runner-wire",
+ "signalbox-test-bin",
  "signalbox-tools-basic",
  "tempfile",
  "tokio",

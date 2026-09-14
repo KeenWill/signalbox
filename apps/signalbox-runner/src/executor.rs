@@ -1,7 +1,8 @@
-//! The compiled pure echo tool executed in one ambient child process.
+//! The compiled pure echo tool executed through the ambient bubblewrap supervisor.
 
 use std::{
     io::{self, Read as _, Write as _},
+    path::PathBuf,
     process::Stdio,
 };
 
@@ -11,10 +12,7 @@ use signalbox_domain::{
 };
 use signalbox_runner_wire::{Dispatch, MAX_FRAME_BYTES};
 use signalbox_tools_basic::EchoExecutor;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    process::Command,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// Internal child mode invoking only the compiled pure echo implementation.
 pub const ECHO_CHILD_ARGUMENT: &str = "--execute-echo";
@@ -35,8 +33,8 @@ pub fn run_echo_child() -> io::Result<()> {
     io::stdout().write_all(text.as_bytes())
 }
 
-pub(crate) async fn execute(dispatch: Dispatch) -> ToolAttemptEnd {
-    match execute_child(dispatch).await {
+pub(crate) async fn execute(dispatch: Dispatch, bubblewrap: Option<PathBuf>) -> ToolAttemptEnd {
+    match execute_child(dispatch, bubblewrap).await {
         Ok(text) => match ToolResultText::try_new(text) {
             Ok(text) => ToolAttemptEnd::Completed {
                 result: ToolResultContent::Text(text),
@@ -60,16 +58,18 @@ fn failure(kind: ToolExecutionErrorKind) -> ToolAttemptEnd {
     }
 }
 
-async fn execute_child(dispatch: Dispatch) -> io::Result<String> {
-    let mut child = Command::new(std::env::current_exe()?)
-        .arg(ECHO_CHILD_ARGUMENT)
-        .env_clear()
-        .current_dir(dispatch.correlation.working_directory.as_str())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+async fn execute_child(dispatch: Dispatch, bubblewrap: Option<PathBuf>) -> io::Result<String> {
+    let bubblewrap = bubblewrap.ok_or(io::ErrorKind::NotFound)?;
+    let mut child = crate::ambient::command(
+        &bubblewrap,
+        &std::env::current_exe()?,
+        std::path::Path::new(dispatch.correlation.working_directory.as_str()),
+    )
+    .arg(ECHO_CHILD_ARGUMENT)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()?;
     let mut stdin = child.stdin.take().ok_or(io::ErrorKind::BrokenPipe)?;
     let stdout = child.stdout.take().ok_or(io::ErrorKind::BrokenPipe)?;
     let arguments = serde_json::to_vec(&dispatch.normalized_arguments)?;

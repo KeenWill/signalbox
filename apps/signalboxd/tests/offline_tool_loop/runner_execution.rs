@@ -178,7 +178,7 @@ impl RunnerHost {
             sandbox_profiles = ["ambient"]
             daemon_socket_path = (socket.to_str().expect("fixture path"))
             runner_root = (runner_root.to_str().expect("fixture path"))
-            bubblewrap_path = (binary.to_str().expect("packaged binary path"))
+            bubblewrap_path = "/usr/bin/bwrap"
             read_only_paths = ["/usr"]
             allowed_network_hosts = []
             git_author_name = "Runner fixture"

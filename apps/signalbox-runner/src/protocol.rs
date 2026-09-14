@@ -1285,7 +1285,12 @@ where
                 })?;
                 self.execution = Some(RunnerExecution {
                     correlation: dispatch.correlation.clone(),
-                    task: tokio::spawn(crate::executor::execute(dispatch)),
+                    task: tokio::spawn(crate::executor::execute(
+                        dispatch,
+                        self.configuration
+                            .as_ref()
+                            .map(|configuration| configuration.bubblewrap_path().to_owned()),
+                    )),
                 });
                 self.resumed_lease = None;
                 Ok(None)

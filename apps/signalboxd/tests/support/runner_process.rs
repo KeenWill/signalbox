@@ -120,7 +120,6 @@ impl RunnerProcesses {
         let socket = root.join("runner.sock");
         let runner_root = root.join("runner-state");
         let runner_config = root.join("runner.toml");
-        let runner_binary = fs::canonicalize(runner_binary())?;
         let configuration = toml::toml! {
             version = 1
             capability_classes = ["echo"]
@@ -128,7 +127,7 @@ impl RunnerProcesses {
             sandbox_profiles = ["ambient"]
             daemon_socket_path = (socket.to_str().ok_or("socket path is not UTF-8")?)
             runner_root = (runner_root.to_str().ok_or("runner root is not UTF-8")?)
-            bubblewrap_path = (runner_binary.to_str().ok_or("runner binary path is not UTF-8")?)
+            bubblewrap_path = "/usr/bin/bwrap"
             read_only_paths = ["/usr"]
             allowed_network_hosts = []
             git_author_name = "Runner fixture"
