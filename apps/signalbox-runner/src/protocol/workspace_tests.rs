@@ -1400,3 +1400,109 @@ async fn provisioning_waits_for_the_startup_scan_and_its_page_acknowledgement() 
         &operation
     );
 }
+
+#[tokio::test]
+async fn provisioning_rejects_all_unsettled_tool_authority() {
+    check_workspace_tool_exclusion(false).await;
+}
+
+#[tokio::test]
+async fn release_waits_for_all_unsettled_tool_authority() {
+    check_workspace_tool_exclusion(true).await;
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ToolAuthority {
+    PendingOffer,
+    ResumedLease,
+    WaitingDispatch,
+    ExecutionMayHaveStarted,
+    RetainedResult,
+}
+
+async fn check_workspace_tool_exclusion(release: bool) {
+    for authority in [
+        ToolAuthority::PendingOffer,
+        ToolAuthority::ResumedLease,
+        ToolAuthority::WaitingDispatch,
+        ToolAuthority::ExecutionMayHaveStarted,
+        ToolAuthority::RetainedResult,
+    ] {
+        let directory = tempfile::tempdir().expect("private state parent");
+        let (mut state, mut runner, _hub, offer) = super::lease_tests::fixture(&directory);
+        runner.configuration = Some(configuration());
+        match authority {
+            ToolAuthority::PendingOffer => runner.pending_offer = Some(offer.clone()),
+            ToolAuthority::ResumedLease => runner.resumed_lease = Some(offer.correlation.clone()),
+            ToolAuthority::WaitingDispatch
+            | ToolAuthority::ExecutionMayHaveStarted
+            | ToolAuthority::RetainedResult => {
+                state
+                    .record_lease_phase(LeasePhase {
+                        correlation: offer.correlation.clone(),
+                        phase: LeasePhaseKind::WaitingDispatch,
+                    })
+                    .expect("durable claim");
+                if !matches!(authority, ToolAuthority::WaitingDispatch) {
+                    for phase in [
+                        LeasePhaseKind::DispatchReceived,
+                        LeasePhaseKind::ExecutionMayHaveStarted,
+                    ] {
+                        state
+                            .record_lease_phase(LeasePhase {
+                                correlation: offer.correlation.clone(),
+                                phase,
+                            })
+                            .expect("advance retained execution");
+                    }
+                }
+                if matches!(authority, ToolAuthority::RetainedResult) {
+                    state
+                        .record_terminal_result(RetainedResult {
+                            correlation: offer.correlation.clone(),
+                            result: TerminalResult::Success {
+                                text: "retained echo result".to_owned(),
+                            },
+                        })
+                        .expect("durable result");
+                }
+            }
+        }
+        let before = state.reconnect_inventory();
+        let operation = provision(&runner.receipt);
+        let message = if release {
+            Message::WorkspaceRelease(signalbox_runner_wire::WorkspaceRelease {
+                correlation: signalbox_runner_wire::ReleaseCorrelation {
+                    session_id: operation.correlation.session_id,
+                    placement_revision: operation.correlation.placement_revision,
+                    runner_id: runner.receipt.runner_id(),
+                    manifest_id: identity(),
+                },
+            })
+        } else {
+            Message::WorkspaceProvision(operation)
+        };
+        let result = runner.serve_message(&mut state, message).await;
+        if release {
+            assert!(matches!(result, Ok(None)), "{authority:?}");
+            assert!(runner.deferred_release.is_some(), "{authority:?}");
+            runner
+                .advance_local(&mut state)
+                .await
+                .expect("deferred release stays blocked");
+            assert!(runner.deferred_release.is_some(), "{authority:?}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::LeaseMismatch
+                    ))
+                ),
+                "{authority:?}"
+            );
+        }
+        assert_eq!(state.reconnect_inventory(), before, "{authority:?}");
+        assert!(runner.workspace.is_none(), "{authority:?}");
+    }
+}

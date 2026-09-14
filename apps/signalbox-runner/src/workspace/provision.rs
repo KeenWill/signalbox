@@ -1,6 +1,6 @@
 //! Checked anonymous repository acquisition.
 
-use std::{error::Error, fmt, path::Path, process::Stdio};
+use std::{error::Error, fmt, path::Path, process::Stdio, time::Duration};
 
 use signalbox_runner_wire::{
     Digest, Recovery, SandboxProfile, WorkspaceProvision, WorkspaceReady, clone_url_digest,
@@ -241,15 +241,18 @@ async fn git_required(path: &Path, arguments: &[&str]) -> Result<String, Workspa
         .ok_or(WorkspaceProvisionError::RepositoryUnavailable)
 }
 
-async fn git_output(
-    path: &Path,
-    arguments: &[&str],
-) -> Result<Option<String>, WorkspaceProvisionError> {
+// Repository acquisition allows five minutes per Git command, including output collection.
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn git_command(path: &Path, arguments: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
+        .args(["-c", "credential.helper="])
         .args(arguments)
         .current_dir(path)
         .env_clear()
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -258,29 +261,47 @@ async fn git_output(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let mut child = command
+    command
+}
+
+async fn git_output(
+    path: &Path,
+    arguments: &[&str],
+) -> Result<Option<String>, WorkspaceProvisionError> {
+    let child = git_command(path, arguments)
         .spawn()
         .map_err(|_| WorkspaceProvisionError::RepositoryUnavailable)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(WorkspaceProvisionError::RepositoryUnavailable)?;
-    let mut output = String::new();
-    stdout
-        .take(signalbox_runner_wire::MAX_FRAME_BYTES as u64 + 1)
-        .read_to_string(&mut output)
-        .await
-        .map_err(|_| WorkspaceProvisionError::RepositoryUnavailable)?;
-    if output.len() > signalbox_runner_wire::MAX_FRAME_BYTES {
-        return Err(WorkspaceProvisionError::RepositoryUnavailable);
-    }
-    let status = child
-        .wait()
-        .await
-        .map_err(|_| WorkspaceProvisionError::RepositoryUnavailable)?;
-    Ok(status
-        .success()
-        .then(|| output.trim_end_matches(['\r', '\n']).to_owned()))
+    git_completion(child, GIT_COMMAND_TIMEOUT).await
+}
+
+async fn git_completion(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+) -> Result<Option<String>, WorkspaceProvisionError> {
+    tokio::time::timeout(timeout, async {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(WorkspaceProvisionError::RepositoryUnavailable)?;
+        let mut output = String::new();
+        stdout
+            .take(signalbox_runner_wire::MAX_FRAME_BYTES as u64 + 1)
+            .read_to_string(&mut output)
+            .await
+            .map_err(|_| WorkspaceProvisionError::RepositoryUnavailable)?;
+        if output.len() > signalbox_runner_wire::MAX_FRAME_BYTES {
+            return Err(WorkspaceProvisionError::RepositoryUnavailable);
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| WorkspaceProvisionError::RepositoryUnavailable)?;
+        Ok(status
+            .success()
+            .then(|| output.trim_end_matches(['\r', '\n']).to_owned()))
+    })
+    .await
+    .map_err(|_| WorkspaceProvisionError::RepositoryUnavailable)?
 }
 
 #[cfg(test)]
@@ -289,6 +310,89 @@ mod tests {
     use crate::RunnerStateRoot;
     use signalbox_runner_wire::{CanonicalUuid, ManifestLifecycle, PositiveU64, RepositoryKey};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn git_ignores_system_and_global_url_rewrites() {
+        let directory = tempfile::tempdir().expect("isolated Git configuration");
+        git_required(directory.path(), &["init", "--bare", "repository.git"])
+            .await
+            .expect("local anonymous repository");
+        let config = format!(
+            "[url \"{}/\"]\n    insteadOf = fixture:\n",
+            directory.path().display()
+        );
+        let system = directory.path().join("system.gitconfig");
+        std::fs::write(&system, &config).expect("system rewrite fixture");
+        std::fs::write(directory.path().join(".gitconfig"), config)
+            .expect("global rewrite fixture");
+        let mut command = git_command(directory.path(), &["ls-remote", "fixture:repository.git"]);
+        command
+            .env("HOME", directory.path())
+            .env("GIT_CONFIG_SYSTEM", &system);
+        let result = git_completion(command.spawn().expect("Git child"), GIT_COMMAND_TIMEOUT)
+            .await
+            .expect("Git rejects the unknown fixture transport");
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn git_does_not_invoke_repository_credential_helpers() {
+        use tokio::io::AsyncWriteExt as _;
+        let directory = tempfile::tempdir().expect("isolated Git repository");
+        git_required(directory.path(), &["init"])
+            .await
+            .expect("local repository");
+        git_required(
+            directory.path(),
+            &[
+                "config",
+                "credential.helper",
+                "!echo username=fixture; echo password=fixture",
+            ],
+        )
+        .await
+        .expect("local helper fixture");
+        let mut child = git_command(directory.path(), &["credential", "fill"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("Git credential consumer");
+        let mut input = child.stdin.take().expect("credential protocol input");
+        input
+            .write_all(b"protocol=https\nhost=example.invalid\n\n")
+            .await
+            .expect("credential query");
+        drop(input);
+        assert_eq!(
+            git_completion(child, GIT_COMMAND_TIMEOUT)
+                .await
+                .expect("helper-free credential refusal"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn git_timeout_bounds_output_collection_and_process_wait() {
+        for script in ["exec sleep 60", "exec 1>&-; exec sleep 60"] {
+            let child = Command::new("sh")
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("stalled Git stand-in");
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                git_completion(child, Duration::from_millis(20)),
+            )
+            .await
+            .expect("both read and wait honor the command deadline");
+            assert!(
+                matches!(result, Err(WorkspaceProvisionError::RepositoryUnavailable)),
+                "{script}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn real_git_clone_publishes_an_unborn_repository_without_shared_objects() {

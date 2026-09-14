@@ -858,6 +858,15 @@ where
         }
     }
 
+    fn has_unsettled_tool(&self, state: &RunnerStateRoot) -> bool {
+        let inventory = state.reconnect_inventory();
+        self.pending_offer.is_some()
+            || self.resumed_lease.is_some()
+            || self.execution.is_some()
+            || inventory.lease.is_some()
+            || inventory.result.is_some()
+    }
+
     fn has_unsettled_lease(&self, state: &RunnerStateRoot) -> bool {
         let inventory = state.reconnect_inventory();
         self.pending_offer.is_some()
@@ -980,7 +989,7 @@ where
                     provision.correlation.runner_id,
                     provision.correlation.registration_revision,
                 )?;
-                if self.pending_offer.is_some() || self.execution.is_some() {
+                if self.has_unsettled_tool(state) {
                     return Err(lease_mismatch());
                 }
                 let checked = self.check_workspace(provision.clone())?;
@@ -1014,8 +1023,7 @@ where
                         ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
                 }
-                if self.pending_offer.is_some()
-                    || state.reconnect_inventory().lease.is_some()
+                if self.has_unsettled_tool(state)
                     || matches!(
                         self.startup_report,
                         leaks::StartupReport::Scanning(_) | leaks::StartupReport::Reporting(_)

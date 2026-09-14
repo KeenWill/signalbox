@@ -120,8 +120,13 @@ and avoids repeating the operator's configuration value.
 The runner accepts an ambient `workspace_provision` only after resolving its
 repository and optional credential profile against local configuration. Unknown
 profiles reject before the operation is journaled. Anonymous acquisition runs
-Git as a plain child process. Credentialed and repository-free private-root
-acquisition are unavailable.
+Git as a plain child process with system and global configuration disabled and
+credential helpers cleared. Each command has one five-minute deadline covering
+output collection and process completion; expiration rejects acquisition as
+`repository_unavailable`. Credentialed and repository-free private-root
+acquisition are unavailable. Provisioning rejects while an offer, resumed lease,
+execution, or journaled lease or result remains unsettled. Release waits for
+that tool authority to settle before journal acceptance or cleanup.
 
 Repository workspaces live at
 `sessions/<canonical-session-uuid>/<placement-revision>/repo`, with their own
@@ -190,10 +195,15 @@ active manifests and unknown entries in bounded, digest-correlated pages.
 Scanning waits for canceled staging cleanup to finish; successfully removed
 unpublished workspaces produce no leak fact. Provisioning waits until every
 startup page is acknowledged. The daemon reconciles exact retained ready facts,
-including the reconstructed ready manifest of a current initial placement, and
-stores unresolved diagnostics before acknowledging each page. The final page
-verifies strict ordering and the complete digest over all retained facts.
-Reports remain visible without a resumable session and authorize no deletion.
+including the reconstructed ready manifest of a current initial placement and
+the retained source of an abandoned initial placement. An abandoned workspace
+whose owner was lost keeps its retired-present diagnostic. A live page's
+transaction validates the physical connection epoch before storage or equal
+replay. Authenticated Resume reconciles its retained page before opening an
+epoch. Unresolved diagnostics are stored before acknowledging each page. The
+final page verifies strict ordering and the complete digest over all retained
+facts. Reports remain visible without a resumable session and authorize no
+deletion.
 
 ## Boundary contracts
 
@@ -428,25 +438,27 @@ retained request; other loss sources require a different runner.
 Pinned replacement requiring a repository or private root retains a single-use
 command authorization and an exactly correlated `workspace_ready` receipt,
 including its absolute working directory. The daemon acknowledges a durably
-retained receipt even while installation waits. Provisioning retains a
-repository key and checkout recovery facts together or neither; mismatched
-repository and recovery facts are rejected before staging. Installation consumes
-that receipt, promotes the pending candidate, installs the placement and grant,
-appends the reference-only placement boundary, and records the terminal result
-atomically after any authorized in-flight call reaches its observation boundary
-and, for a tool batch, after all results are appended. Provisioning refusal or
-candidate loss records a typed terminal rejection and leaves the candidate
-pending. A terminal delegated runtime does not count as an active turn for
-recovery commands. Replacement stays staged while an explicit compaction call is
-nonterminal; its observation commit wakes installation from the resulting
-frontier. Replacement rejects a candidate lacking the requested sandbox or
-repository workspace capability before staging provisioning. Ambient
-default-directory replacement requires the successor registration's reported
-directory. A rejected command's ready workspace, including a correlated receipt
-arriving after abandonment, is released only through its exact manifest
-correlation on the candidate's retained connection epoch. Suspicion retains that
-cleanup authority; loss does not transfer it. Release acknowledgement uses the
-same current-epoch fence as release dispatch.
+retained receipt even while installation waits. Recording or replaying it
+validates the physical connection epoch under the same transaction's authority
+locks. Provisioning retains a repository key and checkout recovery facts
+together or neither; mismatched repository and recovery facts are rejected
+before staging. Installation consumes that receipt, promotes the pending
+candidate, installs the placement and grant, appends the reference-only
+placement boundary, and records the terminal result atomically after any
+authorized in-flight call reaches its observation boundary and, for a tool
+batch, after all results are appended. Provisioning refusal or candidate loss
+records a typed terminal rejection and leaves the candidate pending. A terminal
+delegated runtime does not count as an active turn for recovery commands.
+Replacement stays staged while an explicit compaction call is nonterminal; its
+observation commit wakes installation from the resulting frontier. Replacement
+rejects a candidate lacking the requested sandbox or repository workspace
+capability before staging provisioning. Ambient default-directory replacement
+requires the successor registration's reported directory. A rejected command's
+ready workspace, including a correlated receipt arriving after abandonment, is
+released only through its exact manifest correlation on the candidate's retained
+connection epoch. Suspicion retains that cleanup authority; loss does not
+transfer it. Release acknowledgement uses the same current-epoch fence as
+release dispatch.
 
 ## Planned
 

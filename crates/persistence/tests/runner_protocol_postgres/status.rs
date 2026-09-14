@@ -238,10 +238,26 @@ async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
     let report = signalbox_runner_wire::leak_report_digest(&facts)?;
     let mut page = report_page(&report, 1, None, true, &facts);
     store
-        .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+        .record_workspace_leak_page(
+            receipt.identities().enrollment(),
+            store
+                .load_connection(receipt.identities().enrollment())
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &page,
+        )
         .await?;
     store
-        .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+        .record_workspace_leak_page(
+            receipt.identities().enrollment(),
+            store
+                .load_connection(receipt.identities().enrollment())
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &page,
+        )
         .await?;
     let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak_page")
         .fetch_one(&pool)
@@ -250,7 +266,15 @@ async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
     page.facts[0].kind = RunnerWorkspaceLeakKind::CleanupFailed;
     assert!(
         store
-            .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+            .record_workspace_leak_page(
+                receipt.identities().enrollment(),
+                store
+                    .load_connection(receipt.identities().enrollment())
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page
+            )
             .await
             .is_err()
     );
@@ -272,7 +296,15 @@ async fn startup_leak_pages_are_durable_exact_and_visible_without_a_session()
     page.prior_page_digest = Some(page.page_digest.clone());
     assert!(
         store
-            .record_workspace_leak_page(receipt.identities().enrollment(), &page)
+            .record_workspace_leak_page(
+                receipt.identities().enrollment(),
+                store
+                    .load_connection(receipt.identities().enrollment())
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page
+            )
             .await
             .is_err(),
         "a final page cannot be extended"
@@ -361,7 +393,15 @@ async fn final_leak_page_rejects_a_false_complete_report_digest() -> Result<(), 
     let page = report_page(&claimed, 1, None, true, &facts);
     assert!(
         store
-            .record_workspace_leak_page(enrollment, &page)
+            .record_workspace_leak_page(
+                enrollment,
+                store
+                    .load_connection(enrollment)
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page
+            )
             .await
             .is_err()
     );
@@ -406,13 +446,29 @@ async fn final_leak_page_rejects_reversed_and_duplicate_page_boundaries()
         let report = leak_report_digest(&canonical)?;
         let page_one = report_page(&report, 1, None, false, &first);
         store
-            .record_workspace_leak_page(enrollment, &page_one)
+            .record_workspace_leak_page(
+                enrollment,
+                store
+                    .load_connection(enrollment)
+                    .await?
+                    .expect("retained fixture connection")
+                    .epoch(),
+                &page_one,
+            )
             .await?;
         let prior = Digest::try_new(page_one.page_digest.as_str().to_owned())?;
         let page_two = report_page(&report, 2, Some(&prior), true, &[last]);
         assert!(
             store
-                .record_workspace_leak_page(enrollment, &page_two)
+                .record_workspace_leak_page(
+                    enrollment,
+                    store
+                        .load_connection(enrollment)
+                        .await?
+                        .expect("retained fixture connection")
+                        .epoch(),
+                    &page_two
+                )
                 .await
                 .is_err()
         );
@@ -442,11 +498,41 @@ async fn final_leak_page_acknowledges_the_exact_assembled_report() -> Result<(),
     let facts: Vec<_> = (0..65).map(report_fact).collect();
     let report = leak_report_digest(&facts)?;
     let first = report_page(&report, 1, None, false, &facts[..64]);
-    store.record_workspace_leak_page(enrollment, &first).await?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &first,
+        )
+        .await?;
     let prior = Digest::try_new(first.page_digest.as_str().to_owned())?;
     let last = report_page(&report, 2, Some(&prior), true, &facts[64..]);
-    store.record_workspace_leak_page(enrollment, &last).await?;
-    store.record_workspace_leak_page(enrollment, &last).await?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &last,
+        )
+        .await?;
+    store
+        .record_workspace_leak_page(
+            enrollment,
+            store
+                .load_connection(enrollment)
+                .await?
+                .expect("retained fixture connection")
+                .epoch(),
+            &last,
+        )
+        .await?;
     let pages: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak_page")
         .fetch_one(&pool)
         .await?;
@@ -455,5 +541,88 @@ async fn final_leak_page_acknowledges_the_exact_assembled_report() -> Result<(),
         .fetch_one(&pool)
         .await?;
     assert_eq!(projected, 65);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_diagnostics_reject_a_fenced_connection() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    let old_epoch = store.open_connection(enrollment).await?.epoch();
+    let facts = [report_fact(0)];
+    let report = signalbox_runner_wire::leak_report_digest(&facts)?;
+    let page = report_page(&report, 1, None, true, &facts);
+    let current_epoch = store.open_connection(enrollment).await?.epoch();
+    assert!(
+        store
+            .record_workspace_leak_page(enrollment, old_epoch, &page)
+            .await
+            .is_err()
+    );
+    let retained: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM runner_workspace_leak_page), (SELECT count(*) FROM runner_workspace_leak)").fetch_one(&pool).await?;
+    assert_eq!(retained, (0, 0));
+    store
+        .record_workspace_leak_page(enrollment, current_epoch, &page)
+        .await?;
+    assert!(
+        store
+            .record_workspace_leak_page(enrollment, old_epoch, &page)
+            .await
+            .is_err()
+    );
+    store
+        .record_workspace_leak_page(enrollment, current_epoch, &page)
+        .await?;
+    let retained: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM runner_workspace_leak_page), (SELECT count(*) FROM runner_workspace_leak)").fetch_one(&pool).await?;
+    assert_eq!(retained, (1, 1));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_diagnostics_resume_reconciles_before_opening_an_epoch()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let receipt = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let enrollment = receipt.identities().enrollment();
+    let epoch = store.open_connection(enrollment).await?.epoch();
+    store
+        .transition_connection(
+            enrollment,
+            epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let before = store.load_connection(enrollment).await?;
+    let facts = [report_fact(0)];
+    let report = signalbox_runner_wire::leak_report_digest(&facts)?;
+    let page = report_page(&report, 1, None, true, &facts);
+    assert!(
+        store
+            .record_workspace_leak_page(enrollment, epoch, &page)
+            .await
+            .is_err()
+    );
+    store
+        .reconcile_workspace_leak_page(enrollment, &page)
+        .await?;
+    store
+        .reconcile_workspace_leak_page(enrollment, &page)
+        .await?;
+    assert_eq!(store.load_connection(enrollment).await?, before);
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_workspace_leak_page")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(retained, 1);
     Ok(())
 }
