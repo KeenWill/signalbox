@@ -221,6 +221,7 @@ mod tests {
     #[test]
     fn context_prefix_keeps_a_small_result_exact() {
         for source in [
+            "unchanged \"雪\" \\ result\t\r\n\u{000b}\u{000c}",
             "unchanged \"界\" \\ result\u{0008}\u{000c}\u{0000}",
             "unchanged \"雪\" \\ result\t\u{000b}\u{000c}\r\n",
         ] {
