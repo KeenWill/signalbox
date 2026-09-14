@@ -49,6 +49,7 @@ use crate::LocalProcessListener;
 use crate::local_socket::LocalSocketError;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const STARTUP_RECONCILIATION_RECHECK: Duration = Duration::from_secs(1);
 const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -290,7 +291,10 @@ impl PostgresRunnerRegistrationService {
                 break admission;
             }
             drop(admission);
-            let _ = changes.changed().await;
+            tokio::select! {
+                _ = changes.changed() => {},
+                () = tokio::time::sleep(STARTUP_RECONCILIATION_RECHECK) => {},
+            }
         };
         let mut transitions = Vec::new();
         for connection in connections {
