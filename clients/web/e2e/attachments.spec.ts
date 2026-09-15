@@ -79,7 +79,7 @@ test('a derivative decoder failure does not transfer to another attachment ident
 })
 
 for (const width of [790, 1440]) {
-  test(`stacks attachments within the available pane at viewport ${width}`, async ({ page }) => {
+  test(`lays out attachments within the available pane at viewport ${width}`, async ({ page }) => {
     const problems = watchBrowser(page)
     await page.addInitScript(
       (preferences) => {
@@ -93,7 +93,7 @@ for (const width of [790, 1440]) {
     if (width === 790) {
       expect(await layout.evaluate((element) => element.clientWidth)).toBeLessThan(450)
     }
-    await expect(layout).toHaveCSS('display', 'block')
+    await expect(layout).toHaveCSS('display', width === 790 ? 'block' : 'grid')
     expect(await layout.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
       true,
     )
