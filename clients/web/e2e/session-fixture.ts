@@ -146,42 +146,69 @@ export async function sessionApi(
     if (url.pathname.endsWith('/timeline')) {
       state.historyReads.push(url.searchParams.get('anchor') ?? '')
       state.historyAddresses.push(url.searchParams.get('address'))
+      const headers = [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          projected_structured_bytes: 78,
+        },
+        {
+          address: { event_sequence: '43' },
+          kind: 'turn_completed',
+          projected_structured_bytes: 78,
+        },
+        ...(state.grown
+          ? [
+              {
+                address: { event_sequence: '44' },
+                kind: 'model_call_transition',
+                projected_structured_bytes: 85,
+              },
+            ]
+          : []),
+      ]
+      const anchor = url.searchParams.get('anchor')
+      const address = BigInt(url.searchParams.get('address') ?? '0')
+      const maxItems = Number(url.searchParams.get('max_items') ?? headers.length)
+      const eligible = headers.filter((item) =>
+        anchor === 'before'
+          ? BigInt(item.address.event_sequence) < address
+          : anchor === 'after'
+            ? BigInt(item.address.event_sequence) > address
+            : true,
+      )
+      const items =
+        anchor === 'latest' || anchor === 'before'
+          ? eligible.slice(-maxItems)
+          : eligible.slice(0, maxItems)
+      const first = items[0]
+      const last = items.at(-1)
       return route.fulfill({
         json: {
           session_id: selectedSessionId,
-          items: [
-            {
-              address: { event_sequence: '41' },
-              kind: 'input_accepted',
-              projected_structured_bytes: 78,
-            },
-            {
-              address: { event_sequence: '43' },
-              kind: 'turn_completed',
-              projected_structured_bytes: 78,
-            },
-            ...(state.grown
-              ? [
-                  {
-                    address: { event_sequence: '44' },
-                    kind: 'model_call_transition',
-                    projected_structured_bytes: 85,
-                  },
-                ]
-              : []),
-          ].filter(
-            (item) =>
-              url.searchParams.get('anchor') !== 'after' ||
-              BigInt(item.address.event_sequence) > BigInt(url.searchParams.get('address') ?? '0'),
+          items,
+          projected_structured_bytes: items.reduce(
+            (sum, item) => sum + item.projected_structured_bytes,
+            0,
           ),
-          projected_structured_bytes:
-            url.searchParams.get('anchor') === 'after' ? 85 : state.grown ? 241 : 156,
           continuation_before:
-            url.searchParams.get('anchor') === 'after' ? { event_sequence: '44' } : null,
-          continuation_after: null,
+            first &&
+            headers.some(
+              (item) => BigInt(item.address.event_sequence) < BigInt(first.address.event_sequence),
+            )
+              ? first.address
+              : null,
+          continuation_after:
+            last &&
+            headers.some(
+              (item) => BigInt(item.address.event_sequence) > BigInt(last.address.event_sequence),
+            )
+              ? last.address
+              : null,
         },
       })
     }
+
     return route.fulfill({
       json: {
         session_id: selectedSessionId,
