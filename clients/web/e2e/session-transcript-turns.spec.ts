@@ -80,7 +80,8 @@ for (const close of ['button', 'Escape']) {
     const input = detailItems[0]
     const tool = detailItems[1]
     const response = detailItems[3]
-    if (input?.body.type !== 'user_input' || !tool || !response)
+    const terminal = detailItems[4]
+    if (input?.body.type !== 'user_input' || !tool || !response || !terminal)
       throw new Error('Turn fixture missing')
     const other = (sequence: string) => ({
       ...input,
@@ -97,6 +98,7 @@ for (const close of ['button', 'Escape']) {
       { ...tool, address: { event_sequence: '3' } },
       other('4'),
       { ...response, address: { event_sequence: '5' } },
+      { ...terminal, address: { event_sequence: '6' } },
     ])
     await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
@@ -1019,7 +1021,7 @@ test('keeps a failed physical attempt inspectable after the same request succeed
   await expect(chips.last()).toHaveText('exec_command · Completed')
   await expect(chips.last()).toHaveAccessibleName('Open turn details for exec_command · Completed')
   const slots = transcript.locator('.session-tool-slot')
-  await expect(slots.first().getByText('Failure · Attempt lost on restart')).toBeVisible()
+  await expect(slots.first().getByText('Attempt lost on restart', { exact: true })).toBeVisible()
   await slots
     .first()
     .getByRole('button', { name: /^Read more(?: .+)?$/ })
@@ -1038,13 +1040,14 @@ test('keeps a failed physical attempt inspectable after the same request succeed
     slots
       .last()
       .getByRole('region', { name: 'More message text', exact: true })
-      .getByRole('region', { name: 'Output', exact: true }),
+      .getByRole('definition')
+      .filter({ hasText: 'passed' }),
   ).toContainText('passed')
   await expect(transcript.locator('.session-message-text, .session-tool-slot')).toHaveText([
     'Inspect the release status and retain the result.',
     /Runner disconnected/,
     'Check the next release too.',
-    /checks.*passed/,
+    /Checks.*passed/,
     'The release checks passed. Publishing remains unapproved.',
   ])
   await page.screenshot({ path: testInfo.outputPath('retried-tool.png') })
@@ -1155,13 +1158,21 @@ for (const level of ['Tools']) {
             element.scrollTop = 0
             element.dispatchEvent(new Event('scroll'))
           })
-          return transcript.getByText(name, { exact: true }).first().isVisible()
+          return name === 'exec_command'
+            ? transcript
+                .getByRole('article', { name: 'Tool exec_command', exact: true })
+                .first()
+                .isVisible()
+            : transcript.getByText(name, { exact: true }).first().isVisible()
         })
         .toBe(true)
     }
     await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
     const reader = transcript.getByRole('region', { name: 'More message text', exact: true })
     await reader.getByRole('button', { name: 'Continue reading', exact: true }).click()
+    await expect(reader.getByRole('button', { name: 'Raw', exact: true })).toHaveCount(2)
+    for (const button of await reader.getByRole('button', { name: 'Raw', exact: true }).all())
+      await button.click()
     await expect(reader.locator('pre')).toHaveText(['second chunk', 'third chunk'])
     await transcript.focus()
     await transcript.evaluate((element) => {
@@ -1173,10 +1184,14 @@ for (const level of ['Tools']) {
       element.scrollTop = 0
       element.dispatchEvent(new Event('scroll'))
     })
+    await expect(reader.getByRole('button', { name: 'Raw', exact: true })).toHaveCount(2)
+    for (const button of await reader.getByRole('button', { name: 'Raw', exact: true }).all())
+      await button.click()
     await expect(reader.locator('pre')).toHaveText(['second chunk', 'third chunk'])
     await reader.getByRole('button', { name: 'Close details', exact: true }).click()
     await expect(reader).toHaveCount(0)
     await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
+    await reader.getByRole('button', { name: 'Raw', exact: true }).click()
     await expect(reader.locator('pre')).toHaveText(['second chunk'])
   })
 }
@@ -1224,7 +1239,7 @@ for (const level of ['Tools']) {
     await page.getByRole('radio', { name: level, exact: true }).check()
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     const summary = transcript.getByRole('region', { name: 'exec_command details', exact: true })
-    await expect(summary.getByRole('region', { name: 'Output', exact: true })).toContainText(
+    await expect(summary.getByRole('definition').filter({ hasText: 'passed' })).toContainText(
       'passed',
     )
     expect(addresses).toEqual(['4'])
@@ -1765,7 +1780,9 @@ for (const [afterOutput, members] of [
 async function continuedMessageApi(page: import('./fontTest').Page, interleaved = false) {
   const input = detailItems[0]
   const response = detailItems[3]
-  if (input?.body.type !== 'user_input' || !response) throw new Error('Message fixture missing')
+  const terminal = detailItems[4]
+  if (input?.body.type !== 'user_input' || !response || !terminal)
+    throw new Error('Message fixture missing')
   const state = { failContinuation: false }
   const chunk = (offset: string) => {
     const continuation =
@@ -1811,6 +1828,7 @@ async function continuedMessageApi(page: import('./fontTest').Page, interleaved 
           },
         },
         { ...response, address: { event_sequence: '3' } },
+        { ...terminal, address: { event_sequence: '4' } },
       ]
     : [first]
   await turnApi(page, undefined, entries)
@@ -2150,6 +2168,7 @@ test('keeps an open request disclosure and its continued text when physical atte
   })
   await transcript.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await continued.getByRole('button', { name: 'Raw', exact: true, expanded: false }).click()
   await expect(continued).toContainText(text.slice(split))
   const retained = await continued.elementHandle()
   if (!retained) throw new Error('Continued text missing')
@@ -2326,13 +2345,20 @@ test('stops nested tool output reading before the next goal', async ({ page }, t
   const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
   await page.getByRole('radio', { name: 'Tools', exact: true }).check()
   const chips = transcript.getByRole('region', { name: 'Tools used' })
+  await chips
+    .getByRole('region', { name: 'exec_command details', exact: true })
+    .getByRole('button', { name: 'Raw', exact: true })
+    .click()
   await expect(
     chips.getByRole('region', { name: 'exec_command details', exact: true }),
   ).toContainText('tool')
   await chips.getByRole('button', { name: /^Read more(?: .+)?$/ }).click()
   const reader = chips.getByRole('region', { name: 'More message text', exact: true })
+  await reader.getByRole('button', { name: 'Raw', exact: true }).click()
   await expect(reader.getByText('tool', { exact: true })).toBeVisible()
   await chips.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(reader.getByRole('button', { name: 'Raw', exact: true })).toHaveCount(2)
+  await reader.getByRole('button', { name: 'Raw', exact: true, expanded: false }).click()
   await expect(chips.getByText('output', { exact: true })).toBeVisible()
   await expect(chips.getByRole('button', { name: 'Continue reading', exact: true })).toHaveCount(0)
   await expect(chips.getByRole('button', { name: 'Show more tools', exact: true })).toHaveCount(0)
@@ -2432,13 +2458,18 @@ test('identifies payload-free physical attempt states after a successful retry',
   await expect(chips.last()).toHaveText('exec_command · Completed')
   await expect(chips.last()).toHaveAccessibleName('Open turn details for exec_command · Completed')
   const slots = transcript.locator('.session-tool-slot')
-  await expect(slots.first().locator('.session-turn-outcome')).toHaveText(
-    'Failure · Attempt lost on restart',
+  await expect(slots.first().getByRole('article', { name: 'Tool exec_command' })).toContainText(
+    'FailedAttempt lost on restart',
   )
   await expect(slots.first().getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
-  await expect(slots.last().locator('.session-turn-outcome')).toHaveText('Completed')
+  await expect(
+    slots
+      .last()
+      .getByRole('article', { name: 'Tool exec_command' })
+      .getByText('Completed', { exact: true }),
+  ).toBeVisible()
   await expect(slots.last().getByRole('button', { name: /^Read more(?: .+)?$/ })).toHaveCount(0)
-  await slots.first().locator('.session-turn-outcome').scrollIntoViewIfNeeded()
+  await slots.first().getByText('Attempt lost on restart', { exact: true }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('textless-tool-failure.png') })
   expect(problems).toEqual([])
 })
@@ -2531,7 +2562,7 @@ for (const [state, label] of [
     const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
     await page.getByRole('radio', { name: 'Tools', exact: true }).check()
     const details = transcript.getByRole('region', { name: 'exec_command details', exact: true })
-    await expect(details.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
+    await expect(details.getByRole('definition').filter({ hasText: 'check status' })).toContainText(
       'check status',
     )
     await expect(details.getByText(label, { exact: true })).toBeVisible()
@@ -3049,14 +3080,20 @@ test('distinguishes proposal arguments from the continuation that reaches tool o
   await expect(transcript.getByRole('button', { name: /^Read more/ })).toHaveCount(2)
   await argumentsReader.click()
   const continued = transcript.getByRole('region', { name: 'More message text', exact: true })
+  await continued.getByRole('button', { name: 'Raw', exact: true, expanded: false }).click()
   await expect(continued).toContainText(text.slice(split))
   await expect(
     continued.getByRole('button', { name: 'Continue reading', exact: true }),
   ).toHaveCount(0)
   await continued.getByRole('button', { name: 'Close details', exact: true }).click()
   await outputReader.click()
+  await continued.getByRole('button', { name: 'Raw', exact: true, expanded: false }).click()
   await expect(continued).toContainText(text.slice(split))
   await continued.getByRole('button', { name: 'Continue reading', exact: true }).click()
+  await expect(
+    continued.getByRole('article', { name: 'Tool exec_command', exact: true }),
+  ).toHaveCount(2)
+  await continued.getByRole('button', { name: 'Raw', exact: true, expanded: false }).click()
   await expect(continued.getByRole('region', { name: 'Output', exact: true })).toContainText(
     'passed',
   )
