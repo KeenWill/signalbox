@@ -169,7 +169,7 @@ async function openDetails(
             kind: 'download',
             media_type: mediaType,
             byte_length: '4',
-            content_url: `/api/blobs/${digest}/download`,
+            content_url: `/api/blobs/${digest}/download?media_type=${encodeURIComponent(mediaType)}`,
             derivations: [],
           },
         ],
@@ -404,6 +404,7 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(page.locator('.session-telemetry')).toBeHidden()
   const references = conversation.getByRole('list', { name: 'Attachments' })
   await expect(references.getByRole('listitem')).toHaveCount(2)
+  await expect(references.getByRole('link', { name: 'Download', exact: true })).toHaveCount(2)
   await expect(references).toContainText('image/jpeg · 4 bytes')
   await expect(references).toContainText('image/png · 4 bytes')
   await expect(
@@ -436,6 +437,7 @@ test('reads tool arguments and output in conversation order with events hidden',
   await page.getByText('Session details', { exact: true }).press('Escape')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   await expect(references.getByRole('listitem')).toHaveCount(2)
+  await expect(references.getByRole('link', { name: 'Download', exact: true })).toHaveCount(2)
   await expect(references).toContainText('image/png · 4 bytes')
   await expect(references).toContainText('image/jpeg · 4 bytes')
 })
