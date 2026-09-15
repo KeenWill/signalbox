@@ -268,7 +268,7 @@ test('leaves the composer before returning to the catalog on Escape', async ({ p
   const draft = 'Keep the draft while leaving the field.'
   await composer.fill(draft)
   await composer.press('Escape')
-  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeFocused()
+  await expect(page.getByRole('region', { name: 'Session transcript', exact: true })).toBeFocused()
   await expect(composer).toHaveValue(draft)
   await page.keyboard.press('Escape')
   await expect(session).toBeFocused()

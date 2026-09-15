@@ -60,9 +60,41 @@ const watchBrowser = (page: Page) => {
   return problems
 }
 
-const useDeterministicSession = (page: Page) =>
-  page.route('**/api/sessions/**', (route) => {
+const useDeterministicSession = async (page: Page) => {
+  const live = {
+    session_id: sessionEvidenceFixture.id,
+    observed_through: '1000037',
+    active: {
+      turn_id: sessionEvidenceFixture.id,
+      state: { kind: 'running', model_call_id: null },
+    },
+    queued_turn_count: '4',
+    queued_turn_ids: ['992', '993', '994', '995'].map(
+      (suffix) => `00000000-0000-0000-0000-000000000${suffix}`,
+    ),
+    reconciliation: null,
+    runner: null,
+  }
+  await page.addInitScript((snapshot) => {
+    const original = window.fetch
+    window.fetch = async (input, init) => {
+      if (String(input).endsWith(`/sessions/${snapshot.session_id}/follow`))
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(`${JSON.stringify({ kind: 'snapshot', snapshot })}\n`),
+              )
+            },
+          }),
+          { headers: { 'content-type': 'application/x-ndjson' } },
+        )
+      return original(input, init)
+    }
+  }, live)
+  await page.route('**/api/sessions/**', (route) => {
     const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/live')) return route.fulfill({ json: live })
     if (url.pathname.endsWith('/timeline-detail'))
       return route.fulfill({
         json: {
@@ -133,6 +165,7 @@ const useDeterministicSession = (page: Page) =>
       },
     })
   })
+}
 
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
@@ -172,12 +205,20 @@ const captureSessionEvidence = async (page: Page) => {
   await page.goto(`${sessionsEvidence.path}?workspace=true&session=${sessionEvidenceFixture.id}`)
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
+  await expect(
+    page.getByText('Wait for the current turn to finish · Running', { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByText('Session unavailable', { exact: true })).toHaveCount(0)
   await expect.soft(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await expect.soft(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })
+  await expect(
+    page.getByText('Wait for the current turn to finish · Running', { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByText('Session unavailable', { exact: true })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 }
 

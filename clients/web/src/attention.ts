@@ -22,9 +22,7 @@ export type SessionAction =
 
 export async function submitSessionAction(sessionId: string, action: SessionAction): Promise<void> {
   if (
-    Object.values(action.input).some(
-      (value) => typeof value === 'string' && value.includes('\0'),
-    )
+    Object.values(action.input).some((value) => typeof value === 'string' && value.includes('\0'))
   ) {
     throw new ProductInputError('Action content cannot contain NUL characters.')
   }
