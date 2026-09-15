@@ -362,7 +362,7 @@ export const detailContent = (body: DetailBody, includeText = true): ReactNode =
                 ? ([['Program run', body.cause.program_run_id]] as const)
                 : body.cause.type === 'interactive'
                   ? []
-                  : ([['Dispatch', body.cause.dispatch_id]] as const)),
+                  : ([['Started by', body.cause.dispatch_id]] as const)),
             ...(body.imported_evidence
               ? ([
                   ['Origin', 'Imported'],
