@@ -63,6 +63,26 @@ const watchBrowser = (page: Page) => {
 const useDeterministicSession = (page: Page) =>
   page.route('**/api/sessions/**', (route) => {
     const url = new URL(route.request().url())
+    const live = {
+      session_id: sessionEvidenceFixture.id,
+      observed_through: '1000037',
+      active: {
+        turn_id: sessionEvidenceFixture.id,
+        state: { kind: 'running', model_call_id: null },
+      },
+      queued_turn_count: '4',
+      queued_turn_ids: ['992', '993', '994', '995'].map(
+        (suffix) => `00000000-0000-0000-0000-000000000${suffix}`,
+      ),
+      reconciliation: null,
+      runner: null,
+    }
+    if (url.pathname.endsWith('/live')) return route.fulfill({ json: live })
+    if (url.pathname.endsWith('/follow'))
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: live })}\n`,
+      })
     if (url.pathname.endsWith('/timeline-detail'))
       return route.fulfill({
         json: {
@@ -172,6 +192,10 @@ const captureSessionEvidence = async (page: Page) => {
   await page.goto(`${sessionsEvidence.path}?workspace=true&session=${sessionEvidenceFixture.id}`)
   await expect(page.getByRole('heading', { name: 'Session', exact: true })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
+  await expect(
+    page.getByText('Wait for the current turn to finish · Running', { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByText('Session unavailable', { exact: true })).toHaveCount(0)
   await expect.soft(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await expect.soft(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })
