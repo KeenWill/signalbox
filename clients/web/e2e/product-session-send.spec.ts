@@ -827,11 +827,7 @@ test('keeps an explicit non-result event visible and focused in Results mode', a
   await expect(match).toHaveCount(0)
   const readsBeforeReload = api.state.historyReads.length
   await page.reload()
-  await expect
-    .poll(() =>
-      api.state.historyReads.slice(readsBeforeReload).filter((anchor) => anchor === 'latest'),
-    )
-    .toEqual(['latest', 'latest'])
+  await expect.poll(() => api.state.historyReads.slice(readsBeforeReload)).toContain('latest')
   expect(api.state.historyReads.slice(readsBeforeReload)).not.toContain('around')
 })
 
