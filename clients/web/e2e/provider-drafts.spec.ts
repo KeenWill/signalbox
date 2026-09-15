@@ -104,6 +104,28 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
       },
     }),
   )
+  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+    const text = 'Continue the recorded work.'
+    const item = {
+      address: { event_sequence: '41' },
+      kind: 'input_accepted',
+      projected_body_bytes: 128 + text.length,
+      body: {
+        type: 'user_input',
+        turn_id: sessionId,
+        text: { text, offset_bytes: '0', total_bytes: String(text.length), continuation: null },
+        attachments: [],
+      },
+    }
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items: [item],
+        projected_body_bytes: item.projected_body_bytes,
+        continuation: null,
+      },
+    })
+  })
   await page.route(`**/api/sessions/${sessionId}`, (route) =>
     route.fulfill({
       json: {
@@ -130,6 +152,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(`/sessions?workspace=true&session=${sessionId}`)
   await expect(page.getByText('Live', { exact: true })).toBeVisible()
+  await expect(page.getByText('Continue the recorded work.', { exact: true })).toBeVisible()
   await page.waitForFunction(() => Reflect.get(window, 'fixtureFollowReady') === true)
   await page.evaluate(
     ({ sessionId }) =>
