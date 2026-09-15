@@ -305,6 +305,7 @@ export function VirtualTranscript({
     scrolledSelection.current = { id: selectedId, virtualizer }
   }, [selected, selectedId, virtualizer])
   const reportEnd = useEffectEvent((value: boolean) => onEndChange?.(value))
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The measured height retriggers alignment after the stage grows.
   useLayoutEffect(() => {
     if (loadingLater) {
       restoringLaterAnchor.current = true
