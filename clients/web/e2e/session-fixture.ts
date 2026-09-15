@@ -177,10 +177,22 @@ export async function sessionApi(
             ? BigInt(item.address.event_sequence) > address
             : true,
       )
+      if (anchor === 'around') {
+        const distance = (sequence: string) => {
+          const delta = BigInt(sequence) - address
+          return delta < 0n ? -delta : delta
+        }
+        eligible.sort((left, right) =>
+          Number(distance(left.address.event_sequence) - distance(right.address.event_sequence)),
+        )
+      }
       const items =
         anchor === 'latest' || anchor === 'before'
           ? eligible.slice(-maxItems)
           : eligible.slice(0, maxItems)
+      items.sort((left, right) =>
+        Number(BigInt(left.address.event_sequence) - BigInt(right.address.event_sequence)),
+      )
       const first = items[0]
       const last = items.at(-1)
       return route.fulfill({

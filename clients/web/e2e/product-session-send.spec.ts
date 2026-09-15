@@ -798,6 +798,14 @@ for (const action of ['switch', 'close', 'reopen'] as const) {
 
 test('keeps an explicit non-result event visible and focused in Results mode', async ({ page }) => {
   const api = await sessionApi(page, true)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_timeline_window_items: 1 },
+      },
+    }),
+  )
   api.grow()
   await page.addInitScript(
     ({ key, preferences }) => {
@@ -817,8 +825,14 @@ test('keeps an explicit non-result event visible and focused in Results mode', a
   await page.getByRole('button', { name: /^Latest/ }).click()
   await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   await expect(match).toHaveCount(0)
+  const readsBeforeReload = api.state.historyReads.length
   await page.reload()
-  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+  await expect
+    .poll(() =>
+      api.state.historyReads.slice(readsBeforeReload).filter((anchor) => anchor === 'latest'),
+    )
+    .toEqual(['latest', 'latest'])
+  expect(api.state.historyReads.slice(readsBeforeReload)).not.toContain('around')
 })
 
 test('consumes a pending search match when reopening the current session', async ({ page }) => {
