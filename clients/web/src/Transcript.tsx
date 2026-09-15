@@ -336,6 +336,8 @@ export function VirtualTranscript({
   const reportReveal = useEffectEvent(() => onReveal?.())
   useLayoutEffect(() => {
     if (!revealId || revealed < 0) return
+    atEnd.current = false
+    reportEnd(false)
     virtualizer.scrollToIndex(revealed, { align: 'auto' })
     const frame = requestAnimationFrame(() => reportReveal())
     return () => cancelAnimationFrame(frame)
