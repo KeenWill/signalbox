@@ -175,6 +175,15 @@ for (const viewport of [
 }
 
 test('keeps header-only history when transcript detail is not advertised', async ({ page }) => {
+  await page.addInitScript(
+    ({ key, preferences }) => {
+      localStorage.setItem(key, JSON.stringify(preferences))
+    },
+    {
+      key: BROWSER_PREFERENCES_KEY,
+      preferences: { ...createDefaultBrowserPreferences(), detail: 'full' },
+    },
+  )
   const api = await sessionApi(page)
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({
@@ -296,7 +305,9 @@ test('uses smaller advertised transcript limits in the workspace', async ({ page
   page.on('request', (request) => {
     if (request.url().includes('/timeline-detail')) requests.push(new URL(request.url()))
   })
-  await openSession(page)
+  await page.goto(`/sessions?workspace=true&session=${sessionId}`)
+  await page.getByRole('button', { name: 'First', exact: true }).click()
+  await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
   expect(requests.length).toBeGreaterThan(0)
   expect(
     requests.every(
@@ -729,15 +740,17 @@ for (const active of [false, true]) {
     await result.press('Enter')
     await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeFocused()
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
-    expect(api.state.historyReads).toEqual(['around'])
-    expect(api.state.historyAddresses).toEqual(['41'])
+    expect(api.state.historyReads).toEqual(['around', 'around'])
+    expect(api.state.historyAddresses).toEqual(['41', '41'])
     await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
     await expect(page.getByRole('row', { name: /41 Message accepted/ })).toHaveAttribute(
       'aria-selected',
       'true',
     )
     await page.getByRole('button', { name: /^Latest/ }).click()
-    await expect.poll(() => api.state.historyReads).toEqual(['around', 'latest'])
+    await expect
+      .poll(() => api.state.historyReads)
+      .toEqual(['around', 'around', 'latest', 'around', 'latest'])
     await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   })
 }
@@ -769,7 +782,7 @@ for (const action of ['switch', 'close', 'reopen'] as const) {
     const session = page.getByRole('grid', { name: 'Session timeline' })
     if (action === 'switch') {
       await openSessionFromCatalog(page, otherId)
-      await expect.poll(() => other.state.historyReads).toEqual(['latest'])
+      await expect.poll(() => other.state.historyReads).toEqual(['latest', 'latest'])
     } else if (action === 'close') {
       await session.press('Escape')
       await expect(page.getByRole('heading', { name: '0 sessions', exact: true })).toBeVisible()
@@ -785,6 +798,14 @@ for (const action of ['switch', 'close', 'reopen'] as const) {
 
 test('keeps an explicit non-result event visible and focused in Results mode', async ({ page }) => {
   const api = await sessionApi(page, true)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_timeline_window_items: 1 },
+      },
+    }),
+  )
   api.grow()
   await page.addInitScript(
     ({ key, preferences }) => {
@@ -804,8 +825,10 @@ test('keeps an explicit non-result event visible and focused in Results mode', a
   await page.getByRole('button', { name: /^Latest/ }).click()
   await expect.poll(() => new URL(page.url()).searchParams.get('around')).toBeNull()
   await expect(match).toHaveCount(0)
+  const readsBeforeReload = api.state.historyReads.length
   await page.reload()
-  await expect.poll(() => api.state.historyReads.at(-1)).toBe('latest')
+  await expect.poll(() => api.state.historyReads.slice(readsBeforeReload)).toContain('latest')
+  expect(api.state.historyReads.slice(readsBeforeReload)).not.toContain('around')
 })
 
 test('consumes a pending search match when reopening the current session', async ({ page }) => {
