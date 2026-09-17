@@ -17,9 +17,14 @@ def main():
     output = Path(sys.argv[1]).resolve()
     output.mkdir(parents=True, exist_ok=True)
     endpoint = os.environ["CACHE_ENDPOINT"]
-    mode = os.environ["BENCHMARK_MODE"]
-    runs = int(os.environ["BENCHMARK_RUNS"])
-    targets = shlex.split(os.environ["BENCHMARK_TARGETS"])
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        config = json.loads(Path(".github/cache-benchmark.json").read_text())
+    else:
+        config = {name: os.environ[f"BENCHMARK_{name.upper()}"]
+                  for name in ("mode", "runs", "targets", "label")}
+    mode = config["mode"]
+    runs = int(config["runs"])
+    targets = shlex.split(config["targets"])
     if not endpoint or mode not in ("warm", "cold") or runs < 1 or not targets:
         raise ValueError("endpoint, warm/cold mode, positive runs and targets required")
     overall_status = 0
@@ -42,7 +47,7 @@ def main():
             flags.append("--noremote_accept_cached")
         command = [*bazel, "test", *flags, "--", *targets]
         metadata = {
-            "label": os.environ["BENCHMARK_LABEL"], "mode": mode,
+            "label": config["label"], "mode": mode,
             "repetition": repetition, "cache_endpoint": endpoint,
             "runner_pod": os.environ.get("HOSTNAME", "NA"),
             "run_id": os.environ.get("GITHUB_RUN_ID"),

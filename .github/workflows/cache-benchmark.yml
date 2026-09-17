@@ -1,7 +1,8 @@
 name: Cache benchmark
-run-name: Cache benchmark ${{ inputs.label }} (${{ inputs.mode }})
+run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mode || 'PR config' }})
 
-# Dispatch only. Each repetition uses fresh local Bazel state; warm means remote
+# PR runs read .github/cache-benchmark.json; dispatches use the inputs below.
+# Each repetition uses fresh local Bazel state; warm means remote
 # reuse, and cold disables remote result acceptance without deleting shared data.
 # Defaults match rust.yml's reusable bazel.yml ordinary build/test invocation.
 # That suite includes Docker-dependent tests: signalbox-builds cannot run those
@@ -15,6 +16,10 @@ run-name: Cache benchmark ${{ inputs.label }} (${{ inputs.mode }})
 # CPU/GiB uses server-window CPU / this invocation's downloaded payload GiB;
 # it is a contextual ratio, not CPU attributed to this client under shared load.
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/cache-benchmark.yml'
+      - '.github/cache-benchmark.json'
   workflow_dispatch:
     inputs:
       cache_endpoint:
@@ -44,6 +49,7 @@ permissions:
 
 jobs:
   benchmark:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: signalbox-builds
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
