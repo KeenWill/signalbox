@@ -3,6 +3,7 @@
 import base64
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,62 +12,81 @@ from scripts.cache_benchmark_summary import (
     counter_deltas, main, summarize, summarize_bep, summarize_grpc,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cache_benchmark_run import remove_scratch
+
 # Three complete RPCs from the public run's ordinary-job evidence, retaining
 # original timestamps and payload sizes. BEP below keeps its runner counts.
-# https://github.com/KeenWill/signalbox/actions/runs/34394350559
+# https://github.com/KeenWill/signalbox/actions/runs/35287076591
 GRPC = base64.b64decode(
-    'qwIKiQEKDgoFYmF6ZWwSBTkuMi4wEhFyZW1vdGVfZG93bmxvYWRlchokZmU4ZGM0YjUtNmUyMS00YjdhLTkzZDUtZjllMWUyNTMy'
-    'MzAzIiRhNmI3OWNjOC0zNjU5LTQ4MjUtYjMzOC1kZGU2N2M0YzRkOWEyGHJlcG9zaXRvcnkgQEBydWxlc19ydXN0KxIAGiFnb29n'
+    'rAIKiQEKDgoFYmF6ZWwSBTkuMi4wEhFyZW1vdGVfZG93bmxvYWRlchokMWIxODkzODQtMDM0Yy00NDhlLThhMDgtZjJmZWE5ZTkw'
+    'MzUyIiQzZDg0YWQ2ZS0zZmZjLTQ2YTEtODRhZS1lODY2ZjEwZmJmYzYyGHJlcG9zaXRvcnkgQEBydWxlc19ydXN0KxIAGiFnb29n'
     'bGUuYnl0ZXN0cmVhbS5CeXRlU3RyZWFtL1JlYWQiXSpbClEKT2Jsb2JzL2Q4YmNjMWUxMTFlOTgyNzBkYzAzMTcyZTIyZWY3YWY5'
-    'YzJmOTRmMzI2OTgwMTYxOGEyYjgzZDIwODkwZjhkZjUvNjYyOTQ4ODEQ9AcY4ajOHyoLCNrihtUGEICfnWIyDAja4obVBhCA7NP5'
-    'Aq8GCpUCCg4KBWJhemVsEgU5LjIuMBJANWE0YmEwN2MzMmY1MDdlNDBkNDNlOWVkODBhMmZmM2VhMDAyNTZkMTQ4NjY5ZGEzYWIx'
-    'NzdhZjVlZGNhMmJlYhokZmU4ZGM0YjUtNmUyMS00YjdhLTkzZDUtZjllMWUyNTMyMzAzIiRhNmI3OWNjOC0zNjU5LTQ4MjUtYjMz'
-    'OC1kZGU2N2M0YzRkOWEqCENvcHlGaWxlMikvL2NyYXRlcy93ZWItY29udHJhY3Q6Z2VuZXJhdGVkX3JvdW5kdHJpcDpAOGU2YmE1'
-    'ZTM0YjE4MWUxNzUzYWNhMWZhNmNlMzgyM2Y5ZWJiZTUwNDI1YWU4ZDBjYmFkNTA5ZTcxM2I2ZDkzNhIAGjtidWlsZC5iYXplbC5y'
-    'ZW1vdGUuZXhlY3V0aW9uLnYyLkFjdGlvbkNhY2hlL0dldEFjdGlvblJlc3VsdCK7A0K4AwpJEkUKQDVhNGJhMDdjMzJmNTA3ZTQw'
-    'ZDQzZTllZDgwYTJmZjNlYTAwMjU2ZDE0ODY2OWRhM2FiMTc3YWY1ZWRjYTJiZWIQkgEwARLqAhKYAQpMYmF6ZWwtb3V0L2s4LWZh'
-    'c3RidWlsZC9iaW4vY3JhdGVzL3dlYi1jb250cmFjdC90ZXN0cy9nZW5lcmF0ZWRfcm91bmR0cmlwLm1qcxJGCkAzZjlmNDkxOWIz'
-    'YzFkOWQyZjAxNzk5YTRlMzYzODhjODRhOTc3OTlmNzcyMjZjY2Q2NDRkMWY5OTI4MGY3NDRmEMzUBiABMkIKQGUzYjBjNDQyOThm'
-    'YzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTVCQgpAZTNiMGM0NDI5OGZjMWMxNDlh'
-    'ZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NUpFCgsxMC40Mi4wLjE1MBoMCPfMhdUGEJiqppgC'
-    'IgwI98yF1QYQmNeInQI6DAj3zIXVBhCYqqaYAkIMCPfMhdUGEJjXiJ0CKgsInOOG1QYQwNKPWjILCJzjhtUGEIDM/2a8AgpoCg4K'
-    'BWJhemVsEgU5LjIuMBIKYmVzLXVwbG9hZBokZmU4ZGM0YjUtNmUyMS00YjdhLTkzZDUtZjllMWUyNTMyMzAzIiRhNmI3OWNjOC0z'
-    'NjU5LTQ4MjUtYjMzOC1kZGU2N2M0YzRkOWESABoiZ29vZ2xlLmJ5dGVzdHJlYW0uQnl0ZVN0cmVhbS9Xcml0ZSKNATKKAQp3dXBs'
-    'b2Fkcy8wNjUwZTc0OC00NTZiLTQ2ZmEtOTgxZi1hZjI5ODg1YzVjNjAvYmxvYnMvODJiYTc5OGZlMDlkZjViZTZiMDJjNTZlZjg5'
-    'YzAwNmM5ZTk4OTk1NmQ1NzMwNzA4NGYxZDZjNmRmNDkyOTU5MC80NDAQARi4AyIDCLgDKgEAMgK4AyoMCM/jhtUGEMDDnIEBMgwI'
-    'z+OG1QYQgOPHhAE='
- )
+    'YzJmOTRmMzI2OTgwMTYxOGEyYjgzZDIwODkwZjhkZjUvNjYyOTQ4ODEQ9AcY4ajOHyoMCPjvsdUGEID3oO0CMgwI+O+x1QYQwPjl'
+    'vgOdBgqNAgoOCgViYXplbBIFOS4yLjASQGE4NTZlZDdiNzM0Mzc0MTA1MWY3MDIyMDFhNTljYjFiMTQ5YzcxMzhmNzg0YjM4NzNh'
+    'ZTVkMmE2MDg3NzMzMzYaJDFiMTg5Mzg0LTAzNGMtNDQ4ZS04YTA4LWYyZmVhOWU5MDM1MiIkM2Q4NGFkNmUtM2ZmYy00NmExLTg0'
+    'YWUtZTg2NmYxMGZiZmM2KghDb3B5RmlsZTIhLy9jbGllbnRzL3dlYjpjb250cmFjdF9qYXZhc2NyaXB0OkAyMGZlOTA0YzllNTBl'
+    'YzFiMmYzMjAyMDU3MzY3MTc0MThjZWZkZDQxYTExNTdlOThmZTY2N2ZhNDYzMjVhZGZhEgAaO2J1aWxkLmJhemVsLnJlbW90ZS5l'
+    'eGVjdXRpb24udjIuQWN0aW9uQ2FjaGUvR2V0QWN0aW9uUmVzdWx0Iq8DQqwDCkkSRQpAYTg1NmVkN2I3MzQzNzQxMDUxZjcwMjIw'
+    'MWE1OWNiMWIxNDljNzEzOGY3ODRiMzg3M2FlNWQyYTYwODc3MzMzNhCSATABEt4CEpEBCkViYXplbC1vdXQvazgtZmFzdGJ1aWxk'
+    'L2Jpbi9jbGllbnRzL3dlYi9zcmMvZ2VuZXJhdGVkL3dlYi1jb250cmFjdC5tanMSRgpAOWVjZGU4NTBlZjZkZDJhOGZmZTU3YWNm'
+    'MzQ2ZjNlMjlhNWY1YWMxM2NmOTZlZjk0ZGJiOGQzMTM5ZGI4MzY3NxC1tBQgATJCCkBlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5'
+    'OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1QkIKQGUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0'
+    'MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTVKQAoKMTAuNDIuMi4yNhoLCKfdm9UGELGayD0iCwin3ZvVBhCxrLw/OgsI'
+    'p92b1QYQsZrIPUILCKfdm9UGELGsvD8qDAiX8LHVBhDAmc2ZAzIMCJfwsdUGEICnhJsDvQIKaAoOCgViYXplbBIFOS4yLjASCmJl'
+    'cy11cGxvYWQaJDFiMTg5Mzg0LTAzNGMtNDQ4ZS04YTA4LWYyZmVhOWU5MDM1MiIkM2Q4NGFkNmUtM2ZmYy00NmExLTg0YWUtZTg2'
+    'NmYxMGZiZmM2EgAaImdvb2dsZS5ieXRlc3RyZWFtLkJ5dGVTdHJlYW0vV3JpdGUijgEyiwEKeHVwbG9hZHMvYmE4ODc0YjgtOTRi'
+    'MC00MzU5LWE3Y2ItNjg0M2ZlZWE3ZTYzL2Jsb2JzL2I3ZmViYWNlNDYzNjJmYWI4Y2Q5MWUyNDU1OWY4YTQxZjg5NzFmY2U4YmU5'
+    'ZmI4YTY5YmJjMDYyM2UwYjY0ZmEvMjAwMxABGNMPIgMI0w8qAQAyAtMPKgwIqfCx1QYQgI3EzgMyDAip8LHVBhDAmvvPAw=='
+)
 BEP = [
-    {"finished": {"exitCode": {"name": "BUILD_FAILURE", "code": 1}}},
+    {"finished": {"exitCode": {"name": "TESTS_FAILED", "code": 3}}},
     {"buildMetrics": {"actionSummary": {"runnerCount": [
-        {"name": "total", "count": 3927},
-        {"name": "remote cache hit", "count": 2420},
-        {"name": "internal", "count": 1617},
+        {"name": "total", "count": 4345},
+        {"name": "remote cache hit", "count": 2901},
+        {"name": "internal", "count": 1674},
+        {"name": "local", "count": 27},
+        {"name": "processwrapper-sandbox", "count": 5},
     ]}}},
 ]
 
 
 class SummaryTests(unittest.TestCase):
+    def test_scratch_cleanup_removes_read_only_directories_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            outside = parent / "retained"
+            outside.write_text("evidence")
+            scratch = parent / "scratch"
+            readonly = scratch / "repository"
+            readonly.mkdir(parents=True)
+            (readonly / ".lock").write_text("")
+            (scratch / "link").symlink_to(parent, target_is_directory=True)
+            readonly.chmod(0o555)
+            remove_scratch(scratch)
+            self.assertFalse(scratch.exists())
+            self.assertEqual(outside.read_text(), "evidence")
+
     def test_captured_rpc_payloads_and_nearest_rank_latencies(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "grpc.bin"
             path.write_bytes(GRPC)
             result = summarize_grpc(path)
         self.assertEqual(result["bytes_down"], 66294881)
-        self.assertEqual(result["bytes_up"], 440)
-        self.assertAlmostEqual(result["latency"]["p50_ms"], 27, places=3)
-        self.assertAlmostEqual(result["latency"]["p95_ms"], 586, places=3)
-        self.assertAlmostEqual(result["latency"]["p99_ms"], 586, places=3)
-        self.assertEqual(result["blob_histogram_log2"], {"Read": {"25": 1}, "Write": {"8": 1}})
+        self.assertEqual(result["bytes_up"], 2003)
+        self.assertAlmostEqual(result["latency"]["p50_ms"], 3, places=3)
+        self.assertAlmostEqual(result["latency"]["p95_ms"], 171, places=3)
+        self.assertAlmostEqual(result["latency"]["p99_ms"], 171, places=3)
+        self.assertEqual(result["blob_histogram_log2"], {"Read": {"25": 1}, "Write": {"10": 1}})
 
     def test_internal_bookkeeping_is_not_inferred_as_local_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "bep.jsonl"
             path.write_text("\n".join(json.dumps(event) for event in BEP))
             result = summarize_bep(path)
-        self.assertEqual(result["actions_total"], 3927)
-        self.assertEqual(result["actions_cached"], 2420)
-        self.assertEqual(result["actions_executed"], 0)
+        self.assertEqual(result["actions_total"], 4345)
+        self.assertEqual(result["actions_cached"], 2901)
+        self.assertEqual(result["actions_executed"], 32)
 
     def test_truncated_rpc_log_reports_unavailable_instead_of_partial_totals(self):
         with tempfile.TemporaryDirectory() as temp:

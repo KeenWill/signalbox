@@ -13,6 +13,14 @@ import time
 from cache_benchmark_summary import summarize, write_summary
 
 
+def remove_scratch(scratch):
+    # Bazel repository caches contain read-only directories. Only walk this
+    # repetition's owned tree; os.walk does not follow runfile symlinks.
+    for directory, _, _ in os.walk(scratch):
+        os.chmod(directory, 0o700)
+    shutil.rmtree(scratch)
+
+
 def main():
     output = Path(sys.argv[1]).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -78,7 +86,7 @@ def main():
         subprocess.run([*bazel, "shutdown"], check=True)
         write_summary(evidence, summarize(evidence))
         print((evidence / "summary.tsv").read_text(), flush=True)
-        shutil.rmtree(scratch)
+        remove_scratch(scratch)
         overall_status = overall_status or result.returncode or info.returncode
     return overall_status
 
