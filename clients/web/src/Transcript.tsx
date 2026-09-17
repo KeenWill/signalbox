@@ -274,6 +274,7 @@ export function VirtualTranscript({
       return indexes.sort((a, b) => a - b)
     },
   })
+  const totalSize = virtualizer.getTotalSize()
   const rows = virtualizer.getVirtualItems()
   const start = virtualizer.range?.startIndex ?? 0
   const end = virtualizer.range?.endIndex ?? 0
@@ -304,6 +305,7 @@ export function VirtualTranscript({
     scrolledSelection.current = { id: selectedId, virtualizer }
   }, [selected, selectedId, virtualizer])
   const reportEnd = useEffectEvent((value: boolean) => onEndChange?.(value))
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The measured height retriggers alignment after the stage grows.
   useLayoutEffect(() => {
     if (loadingLater) {
       restoringLaterAnchor.current = true
@@ -330,10 +332,12 @@ export function VirtualTranscript({
     }
     restoringLaterAnchor.current = false
     restoredOffset.current ??= parent.current?.scrollTop ?? null
-  }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent])
+  }, [ids, initialEnd, followEnd, loadingLater, selected, virtualizer, parent, totalSize])
   const reportReveal = useEffectEvent(() => onReveal?.())
   useLayoutEffect(() => {
     if (!revealId || revealed < 0) return
+    atEnd.current = false
+    reportEnd(false)
     virtualizer.scrollToIndex(revealed, { align: 'auto' })
     const frame = requestAnimationFrame(() => reportReveal())
     return () => cancelAnimationFrame(frame)
@@ -399,7 +403,7 @@ export function VirtualTranscript({
       data-mounted-rows={rows.length}
       data-total-loaded={ids.length}
     >
-      <div className="virtual-stage" style={{ height: virtualizer.getTotalSize() }}>
+      <div className="virtual-stage" style={{ height: totalSize }}>
         {rows.map((row) =>
           renderRow(row.index, virtualizer.measureElement, {
             position: 'absolute',

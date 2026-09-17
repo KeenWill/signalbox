@@ -4,11 +4,14 @@ import type {
   WebTimelineTextExcerpt,
 } from '../src/generated/web-contract.mjs'
 import { transcriptFixture, transcriptSessionId } from '../src/session-timeline/transcript.fixture'
+import { turnApi } from '../src/session-timeline/turns.fixture'
 import { expect, test } from './fontTest'
 import {
+  detailExcerpt,
   detailItems,
   detailLive,
   detailPage,
+  detailSessionId,
   resultCursor,
   toolResultItem,
 } from './session-detail-fixture'
@@ -1358,6 +1361,36 @@ test('preserves the reading offset when older rows move the selected row index',
   await page.getByRole('button', { name: /^First/ }).click()
   await expect(transcript.getByText('Message 1', { exact: true })).toBeVisible()
   expect(problems).toEqual([])
+})
+
+test('keeps the focused turn heading visible when expanded details become taller', async ({
+  page,
+}) => {
+  const approval = detailItems[2]
+  if (approval?.body.type !== 'tool_approval_decision') throw new Error('Approval fixture missing')
+  const text = 'Approval detail line\n'.repeat(40)
+  await turnApi(
+    page,
+    undefined,
+    detailItems.map((item) =>
+      item === approval
+        ? {
+            ...approval,
+            projected_body_bytes: 128 + text.length,
+            body: { ...approval.body, rationale: detailExcerpt(text) },
+          }
+        : item,
+    ),
+  )
+  await page.goto(`/sessions?workspace=true&session=${detailSessionId}`)
+  const transcript = page.getByRole('region', { name: 'Session transcript', exact: true })
+  await transcript.getByRole('button', { name: 'Open turn details', exact: true }).click()
+  const heading = transcript.getByRole('button', { name: 'Collapse turn', exact: true })
+  await expect(
+    transcript.getByRole('region', { name: 'Approval rationale', exact: true }),
+  ).toContainText(text.trim())
+  await expect(heading).toBeFocused()
+  await expect(heading).toBeInViewport()
 })
 
 test('follows a taller live window that replaces every retained row', async ({
