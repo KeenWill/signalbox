@@ -9,6 +9,7 @@ https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/protobuf/remote_executio
 import argparse
 from collections import Counter, defaultdict
 import csv
+from datetime import datetime
 import io
 import json
 import math
@@ -219,6 +220,7 @@ def summarize(directory):
     row = {}
     details = {"missing": {}, "scope": {
         "wall_s": "Bazel command wall time, excluding setup, help and info",
+        "job_wall_s": "complete GitHub job duration from job.json; shared by repetitions in one job",
         "actions": "BEP runner counts; total and cached counts may overlap; executed excludes internal bookkeeping",
         "bytes": "ByteStream payload, includes repository downloads and diagnostic uploads; excludes framing, AC metadata and origin downloads",
         "latency": "nearest-rank completed RPC duration, includes misses and failures",
@@ -242,6 +244,12 @@ def summarize(directory):
                 missing([name], "run metadata field missing (interrupted run)")
     except (OSError, ValueError) as error:
         missing(["label", "mode", "wall_s", "exit_code"], error)
+    try:
+        job = json.loads((directory / "job.json").read_text())
+        row["job_wall_s"] = (datetime.fromisoformat(job["completed_at"])
+                             - datetime.fromisoformat(job["started_at"])).total_seconds()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        missing(["job_wall_s"], error)
     try:
         bep = summarize_bep(directory / "bep.jsonl")
         details["bep"] = bep

@@ -101,6 +101,7 @@ class SummaryTests(unittest.TestCase):
             result = summarize(Path(temp))
         self.assertEqual(result["row"]["actions_cached"], "NA")
         self.assertEqual(result["row"]["runner_cpu_s"], "NA")
+        self.assertEqual(result["row"]["job_wall_s"], "NA")
         self.assertIn("runner_cpu_s", result["missing"])
 
     def test_counter_delta_does_not_extrapolate_scrape_boundaries(self):

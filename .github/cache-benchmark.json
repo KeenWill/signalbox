@@ -1,6 +1,6 @@
 {
-  "mode": "warm",
+  "mode": "cold",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
   "runs": 1,
-  "label": "row1-warm-2"
+  "label": "row1-cold-1"
 }
