@@ -261,6 +261,8 @@ def summarize(directory):
         prom = {}
     for name in ("cache_cpu_s", "runner_cpu_s", "network_in_bytes", "network_out_bytes", "ac_cas"):
         try:
+            if "collection_error" in prom:
+                raise ValueError(prom["collection_error"])
             deltas = counter_deltas(prom.get(name))
             if name == "ac_cas":
                 counts = Counter()
@@ -300,8 +302,11 @@ def main():
     if args.prometheus:
         if not args.cache_namespace:
             parser.error("--prometheus requires --cache-namespace")
-        metadata = json.loads((args.directory / "run.json").read_text())
-        evidence = collect_prometheus(metadata, args.prometheus, args.cache_namespace)
+        try:
+            metadata = json.loads((args.directory / "run.json").read_text())
+            evidence = collect_prometheus(metadata, args.prometheus, args.cache_namespace)
+        except (OSError, ValueError, KeyError) as error:
+            evidence = {"collection_error": f"Prometheus collection unavailable: {error}"}
         (args.directory / "prometheus.json").write_text(json.dumps(evidence, indent=2) + "\n")
     write_summary(args.directory, summarize(args.directory))
     print((args.directory / "summary.tsv").read_text(), end="")

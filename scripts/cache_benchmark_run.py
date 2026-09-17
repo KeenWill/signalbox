@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,7 @@ def main():
         subprocess.run([*bazel, "shutdown"], check=True)
         write_summary(evidence, summarize(evidence))
         print((evidence / "summary.tsv").read_text(), flush=True)
+        shutil.rmtree(scratch)
         overall_status = overall_status or result.returncode or info.returncode
     return overall_status
 

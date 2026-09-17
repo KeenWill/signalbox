@@ -5,9 +5,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.cache_benchmark_summary import (
-    counter_deltas, summarize, summarize_bep, summarize_grpc,
+    counter_deltas, main, summarize, summarize_bep, summarize_grpc,
 )
 
 # Three complete RPCs from the public run's ordinary-job evidence, retaining
@@ -94,6 +95,18 @@ class SummaryTests(unittest.TestCase):
         ]}}}
         with self.assertRaisesRegex(ValueError, "counter reset"):
             counter_deltas(record)
+
+    def test_interrupted_run_enrichment_still_writes_na_summary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "run.json").write_text(json.dumps({"start": 100}))
+            with patch("sys.argv", ["summary", temp, "--prometheus", "http://unused.invalid",
+                                    "--cache-namespace", "cache"]), patch("sys.stdout"):
+                main()
+            result = json.loads((directory / "summary.json").read_text())
+            self.assertTrue((directory / "summary.tsv").is_file())
+        self.assertEqual(result["row"]["cache_cpu_s"], "NA")
+        self.assertIn("end", result["missing"]["cache_cpu_s"])
 
 
 if __name__ == "__main__":
