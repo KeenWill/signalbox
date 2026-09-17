@@ -5,7 +5,7 @@ run-name: Cache benchmark ${{ inputs.label }} (${{ inputs.mode }})
 # reuse, and cold disables remote result acceptance without deleting shared data.
 # Defaults match rust.yml's reusable bazel.yml ordinary build/test invocation.
 # That suite includes Docker-dependent tests: signalbox-builds cannot run those
-# on a cache miss. Preserve failures and evidence instead of filtering the suite.
+# without Docker. Preserve failures and evidence instead of filtering the suite.
 # Download the artifact and enrich it from a host with Prometheus access:
 # python3 scripts/cache_benchmark_summary.py ARTIFACT/run-1 \
 #   --prometheus http://PROMETHEUS --cache-namespace bazel-cache
