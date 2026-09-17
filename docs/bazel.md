@@ -66,6 +66,14 @@ is configured. Self-hosted CI uses the `BAZEL_REMOTE_CACHE` repository variable
 when configured; hosted jobs run without the private cache. On a private
 Tailscale client, use `--remote_cache=grpc://bazel-cache:9092`.
 
+The dispatch-only [cache benchmark](../.github/workflows/cache-benchmark.yml)
+runs the ordinary CI targets on `signalbox-builds` with fresh local Bazel state
+per repetition. Warm mode accepts remote results; cold mode disables remote
+result acceptance without clearing the shared cache. Artifacts retain the
+invocation, runner identity, wall time, BEP, compact execution log, gRPC log,
+profile, and TSV/JSON summaries. The workflow comments describe Prometheus
+enrichment and measurement scope; unavailable values carry `NA` reasons.
+
 The runtime launcher applies to the Rust unit-test binaries. The convergence
 CLI, Claude/Codex adapter, and daemon unit targets use host utilities and carry
 Bazel's `external` tag so their tests always execute while compilation remains
