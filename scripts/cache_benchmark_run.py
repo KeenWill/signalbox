@@ -51,7 +51,8 @@ def main():
             "repetition": repetition, "cache_endpoint": endpoint,
             "runner_pod": os.environ.get("HOSTNAME", "NA"),
             "run_id": os.environ.get("GITHUB_RUN_ID"),
-            "sha": os.environ.get("GITHUB_SHA"), "command": command,
+            "sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+            "command": command,
             "bazelrc": Path(".bazelrc").read_text(),
         }
         # Run help before the timed workload and retain the actual binary's help.
