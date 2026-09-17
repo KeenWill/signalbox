@@ -3,6 +3,7 @@ import { webContractBootstrapFixture } from '../src/product.fixture'
 import { expect, test } from './fontTest'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
+const durableMessage = 'Continue the recorded work.'
 const live: WebSessionLiveSnapshot = {
   session_id: sessionId,
   observed_through: '41',
@@ -104,6 +105,28 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
       },
     }),
   )
+  await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
+    const text = durableMessage
+    const item = {
+      address: { event_sequence: '41' },
+      kind: 'input_accepted',
+      projected_body_bytes: 128 + text.length,
+      body: {
+        type: 'user_input',
+        turn_id: sessionId,
+        text: { text, offset_bytes: '0', total_bytes: String(text.length), continuation: null },
+        attachments: [],
+      },
+    }
+    return route.fulfill({
+      json: {
+        session_id: sessionId,
+        items: [item],
+        projected_body_bytes: item.projected_body_bytes,
+        continuation: null,
+      },
+    })
+  })
   await page.route(`**/api/sessions/${sessionId}`, (route) =>
     route.fulfill({
       json: {
@@ -119,7 +142,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
         last_activity: { kind: 'session', unix_microseconds: '1' },
         sizes: {
           item_count: '1',
-          projected_text_bytes: '0',
+          projected_text_bytes: String(new TextEncoder().encode(durableMessage).length),
           projected_structured_bytes: '78',
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
@@ -130,6 +153,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(`/sessions?workspace=true&session=${sessionId}`)
   await expect(page.getByText('Live', { exact: true })).toBeVisible()
+  await expect(page.getByText(durableMessage, { exact: true })).toBeVisible()
   await page.waitForFunction(() => Reflect.get(window, 'fixtureFollowReady') === true)
   await page.evaluate(
     ({ sessionId }) =>
