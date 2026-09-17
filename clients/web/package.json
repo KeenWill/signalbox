@@ -14,7 +14,7 @@
     "test:browser:update": "node browser_tests.mjs --update-snapshots"
   },
   "engines": {
-    "node": "v26.8.1"
+    "node": "26.8.2"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.23",
@@ -36,7 +36,7 @@
     "@biomejs/biome": "2.5.12",
     "@playwright/test": "1.63.0",
     "@tailwindcss/vite": "4.3.3",
-    "@types/node": "26.4.1",
+    "@types/node": "26.5.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react": "6.1.1",
