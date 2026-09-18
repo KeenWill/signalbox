@@ -1,7 +1,7 @@
 {
-  "cache_endpoint": "grpc://buildbarn-l1.bazel-cache.svc.cluster.local:9092",
+  "cache_endpoint": "",
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
   "runs": 1,
-  "label": "row4-warm"
+  "label": "retry-summary-validation"
 }

@@ -17,6 +17,8 @@ run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mod
 # these are RPC outcomes, not bazel-remote's per-blob contains/hit counters.
 # Include all tiers in --cache-pods; network bytes sum their distinct nodes.
 # summary.tsv contains a header and one row; summary.json includes NA reasons.
+# Bazel retries overwrite per-invocation logs: retain final-attempt detail and
+# mark whole-run action, payload, latency and histogram measurements unavailable.
 # job.json supplies the full job wall time, including setup and artifact upload.
 # Server counters include other clients. Counter deltas use actual in-window
 # scrapes, without extrapolation; sample times are retained in prometheus.json.

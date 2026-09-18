@@ -273,6 +273,19 @@ def summarize(directory):
         missing(["bytes_down", "bytes_up", "p50_ms", "p95_ms", "p99_ms"], error)
         details["blob_histogram_log2"] = {"value": NA, "reason": str(error)}
     try:
+        invocations = re.findall(r"^INFO: Invocation ID: (\S+)",
+                                 (directory / "console.log").read_text(), re.MULTILINE)
+    except OSError:
+        invocations = []
+    if len(invocations) > 1:
+        reason = "Bazel retried the build and overwrote per-invocation logs; whole-run totals unavailable"
+        details["invocations"] = invocations
+        details["final_attempt"] = {name: details.pop(name) for name in ("bep", "grpc") if name in details}
+        details["final_attempt"]["scope"] = "retained final invocation only; excludes earlier attempts"
+        missing(["actions_total", "actions_cached", "actions_executed", "bytes_down", "bytes_up",
+                 "p50_ms", "p95_ms", "p99_ms"], reason)
+        details["blob_histogram_log2"] = {"value": NA, "reason": reason}
+    try:
         prom = json.loads((directory / "prometheus.json").read_text())
     except (OSError, ValueError):
         prom = {}

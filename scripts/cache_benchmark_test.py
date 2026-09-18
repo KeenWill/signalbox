@@ -54,6 +54,21 @@ BEP = [
 
 
 class SummaryTests(unittest.TestCase):
+    def test_build_retries_do_not_present_final_attempt_logs_as_whole_run_totals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "console.log").write_text("INFO: Invocation ID: first\nINFO: Invocation ID: second\n")
+            (directory / "bep.jsonl").write_text("\n".join(json.dumps(e) for e in BEP))
+            (directory / "grpc.bin").write_bytes(GRPC)
+            result = summarize(directory)
+        self.assertEqual(result["row"]["bytes_down"], "NA")
+        self.assertEqual(result["row"]["actions_cached"], "NA")
+        self.assertEqual(result["row"]["p95_ms"], "NA")
+        self.assertIn("overwrote", result["missing"]["bytes_down"])
+        self.assertEqual(result["final_attempt"]["grpc"]["bytes_down"], 66294881)
+        self.assertEqual(result["final_attempt"]["bep"]["actions_cached"], 2901)
+        self.assertEqual(result["invocations"], ["first", "second"])
+
     def test_failed_help_flag_check_or_shutdown_still_finalizes_and_continues(self):
         for failure, expected in (("help", 17), ("flag", 1), ("shutdown", 19)):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
