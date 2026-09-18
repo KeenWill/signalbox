@@ -182,6 +182,32 @@ async fn the_native_system_prompt_file_is_private_and_removed_after_execution() 
 }
 
 #[tokio::test]
+async fn agents_md_only_workspace_disables_the_native_instruction_loader() {
+    // Arbitrary instruction text supplies an ambient document to suppress.
+    const AMBIENT_INSTRUCTION: &str = "Always describe the answer as a purple bicycle.";
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    std::fs::write(temporary.path().join("AGENTS.md"), AMBIENT_INSTRUCTION)
+        .expect("the workspace contains an AGENTS.md without a CLAUDE.md");
+    let runtime = runtime(temporary.path(), &fake_cli());
+    let prepared = prepare(
+        &runtime,
+        operation("normal_completion", OperationShape::Text),
+    )
+    .await;
+    let report = runtime
+        .execute(prepared, &mut Vec::new(), CancellationSignal::never())
+        .await;
+
+    assert_eq!(completion_text(&report.evidence), fixtures::ANSWER);
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(temporary.path().join("fake-claude-settings"))
+            .expect("the child records the settings supplied by the adapter"),
+    )
+    .expect("the generated settings are JSON");
+    assert_eq!(settings["enabledPlugins"]["agents-md@builtin"], false);
+}
+
+#[tokio::test]
 async fn normal_completion_requires_typed_terminal_result() {
     let result = execute_scenario("normal_completion", OperationShape::Text).await;
     let completion = completed(&result.evidence);
