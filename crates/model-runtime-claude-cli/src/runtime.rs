@@ -695,6 +695,7 @@ fn create_support_files(
         shell_quote(ready_text)
     );
     let mut isolated_settings = serde_json::json!({
+        "enabledPlugins": {"agents-md@builtin": false},
         "fastMode": fast_mode == FastMode::Enabled,
         "hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": hook_command, "timeout": 10
