@@ -65,35 +65,51 @@ def main():
             "repetition": repetition, "cache_endpoint": endpoint,
             "runner_pod": os.environ.get("HOSTNAME", "NA"),
             "run_id": os.environ.get("GITHUB_RUN_ID"),
-            "sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
             "command": command,
-            "bazelrc": Path(".bazelrc").read_text(),
         }
-        # Run help before the timed workload and retain the actual binary's help.
-        with (evidence / "flag-help.txt").open("w") as log:
-            subprocess.run([*bazel, "help", "test", "--long"], stdout=log,
-                           stderr=subprocess.STDOUT, check=True)
-        help_text = (evidence / "flag-help.txt").read_text()
-        for flag in ("build_event_json_file", "execution_log_compact_file",
-                     "remote_grpc_log", "profile", "remote_accept_cached"):
-            if flag not in help_text:
-                raise RuntimeError(f"bazel help test --long does not list {flag}")
-        metadata["start"] = time.time()
-        tick = time.monotonic()
-        (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        with (evidence / "console.log").open("w") as log:
-            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-        metadata.update(end=time.time(), wall_s=time.monotonic() - tick, exit_code=result.returncode)
-        (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        with (evidence / "bazel-info.txt").open("w") as log:
-            info = subprocess.run([*bazel, "info"], stdout=log, stderr=subprocess.STDOUT)
-        metadata["bazel_info_exit_code"] = info.returncode
-        (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        subprocess.run([*bazel, "shutdown"], check=True)
-        write_summary(evidence, summarize(evidence))
-        print((evidence / "summary.tsv").read_text(), flush=True)
-        remove_scratch(scratch)
-        overall_status = overall_status or result.returncode or info.returncode
+        status = 0
+        try:
+            metadata["sha"] = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+            metadata["bazelrc"] = Path(".bazelrc").read_text()
+            # Run help before the timed workload and retain the actual binary's help.
+            with (evidence / "flag-help.txt").open("w") as log:
+                subprocess.run([*bazel, "help", "test", "--long"], stdout=log,
+                               stderr=subprocess.STDOUT, check=True)
+            help_text = (evidence / "flag-help.txt").read_text()
+            for flag in ("build_event_json_file", "execution_log_compact_file",
+                         "remote_grpc_log", "profile", "remote_accept_cached"):
+                if flag not in help_text:
+                    raise RuntimeError(f"bazel help test --long does not list {flag}")
+            metadata["start"] = time.time()
+            tick = time.monotonic()
+            (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+            with (evidence / "console.log").open("w") as log:
+                result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+            status = result.returncode
+            metadata.update(end=time.time(), wall_s=time.monotonic() - tick, exit_code=result.returncode)
+            (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+            with (evidence / "bazel-info.txt").open("w") as log:
+                info = subprocess.run([*bazel, "info"], stdout=log, stderr=subprocess.STDOUT)
+            metadata["bazel_info_exit_code"] = info.returncode
+            (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+            status = status or info.returncode
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            metadata["harness_error"] = str(error)
+            status = status or getattr(error, "returncode", 1) or 1
+        finally:
+            try:
+                subprocess.run([*bazel, "shutdown"], check=True)
+            except (OSError, subprocess.SubprocessError) as error:
+                metadata["shutdown_error"] = str(error)
+                status = status or getattr(error, "returncode", 1) or 1
+            try:
+                metadata["harness_exit_code"] = status
+                (evidence / "run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+                write_summary(evidence, summarize(evidence))
+                print((evidence / "summary.tsv").read_text(), flush=True)
+            finally:
+                remove_scratch(scratch)
+        overall_status = overall_status or status
     return overall_status
 
 

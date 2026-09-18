@@ -2,7 +2,9 @@
 
 import base64
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +15,7 @@ from scripts.cache_benchmark_summary import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cache_benchmark_run import load_config, remove_scratch
+from cache_benchmark_run import load_config, main as run_benchmark, remove_scratch
 
 # Three complete RPCs from the public run's ordinary-job evidence, retaining
 # original timestamps and payload sizes. BEP below keeps its runner counts.
@@ -52,6 +54,43 @@ BEP = [
 
 
 class SummaryTests(unittest.TestCase):
+    def test_failed_help_flag_check_or_shutdown_still_finalizes_and_continues(self):
+        for failure, expected in (("help", 17), ("flag", 1), ("shutdown", 19)):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                roots = []
+
+                def run(command, **kwargs):
+                    root = command[1]
+                    if root not in roots:
+                        roots.append(root)
+                    first_run = root == roots[0]
+                    if "help" in command:
+                        if first_run and failure == "help":
+                            raise subprocess.CalledProcessError(17, command)
+                        kwargs["stdout"].write("missing" if first_run and failure == "flag" else
+                                               "build_event_json_file execution_log_compact_file remote_grpc_log profile remote_accept_cached")
+                    if "shutdown" in command and first_run and failure == "shutdown":
+                        raise subprocess.CalledProcessError(19, command)
+                    return subprocess.CompletedProcess(command, 0)
+
+                output = Path(temp) / "evidence"
+                config = dict(cache_endpoint="grpc://cache.invalid", mode="warm", runs=2,
+                              targets="//:rust_build", label="finalization")
+                with patch("cache_benchmark_run.load_config", return_value=config), \
+                        patch("cache_benchmark_run.subprocess.run", side_effect=run), \
+                        patch("cache_benchmark_run.subprocess.check_output", return_value="test-sha"), \
+                        patch.dict(os.environ, RUNNER_TEMP=temp), \
+                        patch("sys.argv", ["runner", str(output)]), patch("sys.stdout"):
+                    self.assertEqual(run_benchmark(), expected)
+                for repetition in (1, 2):
+                    evidence = output / f"run-{repetition}"
+                    self.assertTrue((evidence / "summary.tsv").is_file())
+                    self.assertTrue((evidence / "summary.json").is_file())
+                    metadata = json.loads((evidence / "run.json").read_text())
+                    self.assertEqual(metadata["harness_exit_code"], expected if repetition == 1 else 0)
+                self.assertEqual(list(Path(temp).glob("cache-benchmark-*")), [])
+                self.assertEqual(len(roots), 2)
+
     def test_buildbarn_metrics_select_frontend_requests_and_all_tier_nodes(self):
         def query_result(url, expression, when):
             if expression.startswith("kube_pod_info{namespace=\"cache\""):
