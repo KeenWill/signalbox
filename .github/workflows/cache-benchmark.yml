@@ -2,6 +2,7 @@ name: Cache benchmark
 run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mode || 'PR config' }})
 
 # PR runs read .github/cache-benchmark.json; dispatches use the inputs below.
+# In either path, a blank cache_endpoint uses the repository BAZEL_REMOTE_CACHE.
 # Each repetition uses fresh local Bazel state; warm means remote
 # reuse, and cold disables remote result acceptance without deleting shared data.
 # Defaults match rust.yml's reusable bazel.yml ordinary build/test invocation.
@@ -11,6 +12,10 @@ run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mod
 # gh api repos/OWNER/REPO/actions/jobs/JOB_ID > ARTIFACT/run-1/job.json
 # python3 scripts/cache_benchmark_summary.py ARTIFACT/run-1 \
 #   --prometheus http://PROMETHEUS --cache-namespace bazel-cache
+# Select cache CPU/placement with --cache-pods when the namespace is shared.
+# For Buildbarn, --cache-grpc-service selects the frontend's gRPC status counters;
+# these are RPC outcomes, not bazel-remote's per-blob contains/hit counters.
+# Include all tiers in --cache-pods; network bytes sum their distinct nodes.
 # summary.tsv contains a header and one row; summary.json includes NA reasons.
 # job.json supplies the full job wall time, including setup and artifact upload.
 # Server counters include other clients. Counter deltas use actual in-window

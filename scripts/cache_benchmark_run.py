@@ -21,15 +21,21 @@ def remove_scratch(scratch):
     shutil.rmtree(scratch)
 
 
-def main():
-    output = Path(sys.argv[1]).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    endpoint = os.environ["CACHE_ENDPOINT"]
+def load_config():
     if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
         config = json.loads(Path(".github/cache-benchmark.json").read_text())
     else:
         config = {name: os.environ[f"BENCHMARK_{name.upper()}"]
                   for name in ("mode", "runs", "targets", "label")}
+    config["cache_endpoint"] = config.get("cache_endpoint") or os.environ["CACHE_ENDPOINT"]
+    return config
+
+
+def main():
+    output = Path(sys.argv[1]).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    config = load_config()
+    endpoint = config["cache_endpoint"]
     mode = config["mode"]
     runs = int(config["runs"])
     targets = shlex.split(config["targets"])

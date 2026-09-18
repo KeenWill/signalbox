@@ -14,6 +14,7 @@ import io
 import json
 import math
 from pathlib import Path
+import re
 import urllib.parse
 import urllib.request
 
@@ -160,7 +161,7 @@ def query(url, expression, when):
     return result
 
 
-def collect_prometheus(metadata, url, namespace):
+def collect_prometheus(metadata, url, namespace, cache_pods=None, cache_grpc_service=None):
     start, end = metadata["start"], metadata["end"]
     window = f"{math.floor((end - start) * 1000)}ms"
     evidence = {}
@@ -177,22 +178,30 @@ def collect_prometheus(metadata, url, namespace):
 
     ns = json.dumps(namespace)
     pod = json.dumps(metadata["runner_pod"])
-    capture("ac_cas", f'bazel_remote_incoming_requests_total{{namespace={ns}}}[{window}]')
+    cache_selector = f'namespace={ns}'
+    if cache_pods:
+        cache_selector += f',pod=~{json.dumps(cache_pods)}'
+    if cache_grpc_service:
+        capture("ac_cas", f'grpc_server_handled_total{{namespace={ns},service={json.dumps(cache_grpc_service)},'
+                'grpc_service=~"build.bazel.remote.execution.v2.(ActionCache|ContentAddressableStorage)|google.bytestream.ByteStream"'
+                f'}}[{window}]')
+    else:
+        capture("ac_cas", f'bazel_remote_incoming_requests_total{{{cache_selector}}}[{window}]')
     cpu = 'container_cpu_usage_seconds_total{job="kubelet",metrics_path="/metrics/cadvisor",container!="",container!="POD"'
-    capture("cache_cpu_s", f'{cpu},namespace={ns}}}[{window}]')
+    capture("cache_cpu_s", f'{cpu},{cache_selector}}}[{window}]')
     capture("runner_cpu_s", f'{cpu},namespace="github-arc-signalbox",pod={pod}}}[{window}]')
     capture("runner_placement", f'kube_pod_info{{namespace="github-arc-signalbox",pod={pod}}}')
-    placements = capture("cache_placement", f'kube_pod_info{{namespace={ns}}}')
+    placements = capture("cache_placement", f'kube_pod_info{{{cache_selector}}}')
     nodes = {p["metric"]["node"] for p in placements}
-    if len(nodes) == 1:
-        node = json.dumps(next(iter(nodes)))
-        hosts = capture("cache_node", f'node_uname_info{{nodename={node}}}')
+    if nodes:
+        node = json.dumps("|".join(re.escape(value) for value in sorted(nodes)))
+        hosts = capture("cache_node", f'node_uname_info{{nodename=~{node}}}')
         instances = {host["metric"]["instance"] for host in hosts}
-        if len(instances) == 1:
-            instance = json.dumps(next(iter(instances)))
+        if len(instances) == len(nodes):
+            instance = json.dumps("|".join(re.escape(value) for value in sorted(instances)))
             for direction, metric in (("in", "receive"), ("out", "transmit")):
                 capture(f"network_{direction}_bytes",
-                        f'node_network_{metric}_bytes_total{{instance={instance},device="enp7s0np0"}}[{window}]')
+                        f'node_network_{metric}_bytes_total{{instance=~{instance},device="enp7s0np0"}}[{window}]')
     return evidence
 
 
@@ -275,7 +284,12 @@ def summarize(directory):
             if name == "ac_cas":
                 counts = Counter()
                 for labels, delta in deltas:
-                    counts["/".join(labels[k] for k in ("kind", "method", "status"))] += delta
+                    if "grpc_service" in labels:
+                        kind = "ac" if labels["grpc_service"].endswith(".ActionCache") else "cas"
+                        key = (kind, labels["grpc_method"], labels["grpc_code"])
+                    else:
+                        key = tuple(labels[k] for k in ("kind", "method", "status"))
+                    counts["/".join(key)] += delta
                 row[name] = dict(counts)
             else:
                 row[name] = sum(delta for _, delta in deltas)
@@ -306,13 +320,16 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--prometheus")
     parser.add_argument("--cache-namespace", help="Namespace of the measured endpoint; required with --prometheus")
+    parser.add_argument("--cache-pods", help="Pod name regex for cache CPU and placement; includes all measured tiers")
+    parser.add_argument("--cache-grpc-service", help="Frontend service exposing grpc_server_handled_total instead of bazel-remote counters")
     args = parser.parse_args()
     if args.prometheus:
         if not args.cache_namespace:
             parser.error("--prometheus requires --cache-namespace")
         try:
             metadata = json.loads((args.directory / "run.json").read_text())
-            evidence = collect_prometheus(metadata, args.prometheus, args.cache_namespace)
+            evidence = collect_prometheus(metadata, args.prometheus, args.cache_namespace,
+                                          args.cache_pods, args.cache_grpc_service)
         except (OSError, ValueError, KeyError) as error:
             evidence = {"collection_error": f"Prometheus collection unavailable: {error}"}
         (args.directory / "prometheus.json").write_text(json.dumps(evidence, indent=2) + "\n")

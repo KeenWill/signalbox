@@ -69,7 +69,8 @@ Tailscale client, use `--remote_cache=grpc://bazel-cache:9092`.
 The [cache benchmark](../.github/workflows/cache-benchmark.yml) accepts manual
 dispatch inputs and uses
 [.github/cache-benchmark.json](../.github/cache-benchmark.json) for
-same-repository pull requests touching its workflow or config. It runs the
+same-repository pull requests touching its workflow or config. Both paths accept
+`cache_endpoint`; blank uses the repository's `BAZEL_REMOTE_CACHE`. It runs the
 ordinary CI targets on `signalbox-builds` with fresh local Bazel state per
 repetition. Warm mode accepts remote results; cold mode disables remote result
 acceptance without clearing the shared cache. Artifacts retain the invocation,

@@ -9,11 +9,11 @@ import unittest
 from unittest.mock import patch
 
 from scripts.cache_benchmark_summary import (
-    counter_deltas, main, summarize, summarize_bep, summarize_grpc,
+    collect_prometheus, counter_deltas, main, summarize, summarize_bep, summarize_grpc,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cache_benchmark_run import remove_scratch
+from cache_benchmark_run import load_config, remove_scratch
 
 # Three complete RPCs from the public run's ordinary-job evidence, retaining
 # original timestamps and payload sizes. BEP below keeps its runner counts.
@@ -52,6 +52,54 @@ BEP = [
 
 
 class SummaryTests(unittest.TestCase):
+    def test_buildbarn_metrics_select_frontend_requests_and_all_tier_nodes(self):
+        def query_result(url, expression, when):
+            if expression.startswith("kube_pod_info{namespace=\"cache\""):
+                result = [{"metric": {"node": node}} for node in ("worker-1", "worker-2")]
+            elif expression.startswith("node_uname_info"):
+                result = [{"metric": {"instance": host}} for host in ("10.0.0.1:9100", "10.0.0.2:9100")]
+            else:
+                result = []
+            return {"data": {"result": result}}
+        with patch("scripts.cache_benchmark_summary.query", side_effect=query_result):
+            result = collect_prometheus({"start": 10, "end": 40, "runner_pod": "runner"},
+                                        "http://unused.invalid", "cache", "buildbarn-.*", "buildbarn-l1")
+        self.assertIn('pod=~"buildbarn-.*"', result["cache_cpu_s"]["query"])
+        self.assertIn('service="buildbarn-l1"', result["ac_cas"]["query"])
+        self.assertIn("grpc_server_handled_total", result["ac_cas"]["query"])
+        self.assertIn(json.dumps(r"worker\-1|worker\-2"), result["cache_node"]["query"])
+        self.assertIn("9100|", result["network_in_bytes"]["query"])
+
+    def test_buildbarn_request_statuses_keep_grpc_meaning(self):
+        record = {"response": {"data": {"result": [
+            {"metric": {"grpc_service": "build.bazel.remote.execution.v2.ActionCache",
+                        "grpc_method": "GetActionResult", "grpc_code": "NotFound"},
+             "values": [[10, "2"], [20, "5"]]},
+            {"metric": {"grpc_service": "google.bytestream.ByteStream",
+                        "grpc_method": "Read", "grpc_code": "OK"},
+             "values": [[10, "7"], [20, "11"]]},
+        ]}}}
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "prometheus.json").write_text(json.dumps({"ac_cas": record}))
+            result = summarize(directory)
+        self.assertEqual(result["row"]["ac_cas"], {"ac/GetActionResult/NotFound": 3, "cas/Read/OK": 4})
+
+    def test_pr_endpoint_overrides_repository_default_and_blank_falls_back(self):
+        for selected in ("grpc://selected.invalid:9092", ""):
+            with self.subTest(selected=selected), patch.dict("os.environ", {
+                "GITHUB_EVENT_NAME": "pull_request", "CACHE_ENDPOINT": "grpc://default.invalid:9092",
+            }), patch.object(Path, "read_text", return_value=json.dumps({"cache_endpoint": selected})):
+                self.assertEqual(load_config()["cache_endpoint"], selected or "grpc://default.invalid:9092")
+
+    def test_dispatch_uses_its_input_endpoint_without_reading_pr_config(self):
+        with patch.dict("os.environ", {
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "CACHE_ENDPOINT": "grpc://dispatch.invalid:9092",
+            "BENCHMARK_MODE": "warm", "BENCHMARK_RUNS": "1", "BENCHMARK_TARGETS": "//:rust_build",
+            "BENCHMARK_LABEL": "dispatch",
+        }), patch.object(Path, "read_text", side_effect=AssertionError("PR config read")):
+            self.assertEqual(load_config()["cache_endpoint"], "grpc://dispatch.invalid:9092")
+
     def test_scratch_cleanup_removes_read_only_directories_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as temp:
             parent = Path(temp)
