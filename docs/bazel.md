@@ -79,8 +79,8 @@ TSV/JSON summaries. The workflow comments describe Prometheus enrichment and
 measurement scope; unavailable values carry `NA` reasons.
 
 The runtime launcher applies to the Rust unit-test binaries. The convergence
-CLI, Claude/Codex adapter, and daemon unit targets use host utilities and carry
-Bazel's `external` tag so their tests always execute while compilation remains
+CLI, Codex adapter, and daemon unit targets use host utilities and carry Bazel's
+`external` tag so their tests always execute while compilation remains
 cacheable. The daemon socket tests also run outside the sandbox to inspect the
 host's real ownership mapping. Other tests declare their fixture files as Bazel
 inputs. `//:rust_doc_tests` runs all workspace library doctests, including
