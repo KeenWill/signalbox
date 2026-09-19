@@ -20,6 +20,9 @@ The self-hosted ARC scale sets are managed outside this repository. Only
 `signalbox-integration-tests`, `signalbox-coverage`, and `signalbox-smokes`
 provide Docker.
 
+`cache-benchmark.yml` reads its runner scale set from the PR benchmark config or
+the dispatch input. Its configuration job runs on `ubuntu-latest`.
+
 `rust.yml` calls `bazel.yml` for ordinary Rust tests and manifest PostgreSQL
 suites on `signalbox-integration-tests`. The ordinary suite includes a sparse
 blob session test requiring PostgreSQL. Its `validate-checks` aggregation uses

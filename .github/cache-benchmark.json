@@ -1,7 +1,13 @@
 {
-  "cache_endpoint": "grpc://buildbarn-l1.bazel-cache.svc.cluster.local:9092",
+  "cache_endpoint": "",
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
-  "runs": 1,
-  "label": "row4b-warm"
+  "runs": 3,
+  "label": "fresh-all-j4-t1-cpu4",
+  "runner": "signalbox-builds",
+  "reuse_repository_cache": false,
+  "extra_flags": [
+    "--remote_download_all",
+    "--local_resources=cpu=4"
+  ]
 }

@@ -54,6 +54,38 @@ BEP = [
 
 
 class SummaryTests(unittest.TestCase):
+    def test_shared_repository_cache_survives_repetitions_with_private_output_bases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = Path(temp) / "repository"
+            repository.mkdir()
+            marker = repository / "cached-download"
+            marker.write_text("retained")
+            commands = []
+
+            def run(command, **kwargs):
+                if "help" in command:
+                    kwargs["stdout"].write(
+                        "build_event_json_file execution_log_compact_file remote_grpc_log profile remote_accept_cached")
+                if command[3] == "test":
+                    commands.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            config = dict(cache_endpoint="grpc://cache.invalid", mode="warm", runs=2,
+                          targets="//:rust_build", label="shared", reuse_repository_cache=True,
+                          extra_flags=["--local_test_jobs=4", "--remote_download_minimal"])
+            with patch("cache_benchmark_run.load_config", return_value=config), \
+                    patch("cache_benchmark_run.subprocess.run", side_effect=run), \
+                    patch("cache_benchmark_run.subprocess.check_output", return_value="test-sha"), \
+                    patch.dict(os.environ, RUNNER_TEMP=temp, BAZEL_REPOSITORY_CACHE=str(repository)), \
+                    patch("sys.argv", ["runner", str(Path(temp) / "evidence")]), patch("sys.stdout"):
+                self.assertEqual(run_benchmark(), 0)
+            self.assertEqual(marker.read_text(), "retained")
+            self.assertNotEqual(commands[0][2], commands[1][2])
+            for command in commands:
+                self.assertIn(f"--repository_cache={repository}", command)
+                self.assertLess(command.index("--local_test_jobs=1"), command.index("--local_test_jobs=4"))
+                self.assertIn("--remote_download_minimal", command)
+
     def test_build_retries_do_not_present_final_attempt_logs_as_whole_run_totals(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
