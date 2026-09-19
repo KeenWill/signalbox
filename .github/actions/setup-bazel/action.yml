@@ -18,7 +18,7 @@ runs:
         output-base: '"${{ steps.scratch.outputs.root }}/output"'
         bazelrc: |
           startup --output_user_root="${{ steps.scratch.outputs.root }}/user"
-          common --repository_cache="${{ env.BAZEL_REPOSITORY_CACHE || format('{0}/repository', steps.scratch.outputs.root) }}"
+          common --repository_cache="${{ steps.scratch.outputs.repository_cache }}"
           ${{ runner.environment == 'self-hosted' && inputs.remote-cache != '' && format('build --remote_cache="{0}"', inputs.remote-cache) || '' }}
           ${{ runner.environment == 'self-hosted' && inputs.remote-cache != '' && format('build --experimental_remote_downloader="{0}"', inputs.remote-cache) || '' }}
           build --experimental_remote_downloader_local_fallback
