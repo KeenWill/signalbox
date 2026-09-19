@@ -1,4 +1,4 @@
-//! Core domain types and boundaries for Signalbox.
+//! Core domain boundary for Signalbox.
 //!
 //! Domain identities are distinct from storage, protocol, and framework types.
 //! Lifecycle behavior is introduced only in slices authorized by accepted
