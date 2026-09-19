@@ -71,6 +71,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = [
@@ -111,6 +112,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = [
