@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+# Support both module invocation and direct execution from any directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.cache_benchmark_summary import (
     collect_prometheus, counter_deltas, main, summarize, summarize_bep, summarize_grpc,
 )
@@ -293,4 +295,6 @@ class SummaryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    # Harness fixtures read the repository bazelrc relative to the working directory.
+    os.chdir(Path(__file__).resolve().parents[1])
     unittest.main()

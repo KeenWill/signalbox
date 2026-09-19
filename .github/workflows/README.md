@@ -34,9 +34,9 @@ to accommodate cold compilation; other PostgreSQL partitions retain 15 minutes.
 The Bazel resource estimates do not enforce an operating-system memory ceiling.
 
 `cache-benchmark.yml` uses `signalbox-builds` for same-repository human PRs
-and dispatches, and `ubuntu-latest` for Dependabot and Renovate PRs. Fork PRs
-are skipped. Its executor choice controls Bazel action execution separately
-from the workflow runner.
+and dispatches. Fork, Dependabot and Renovate PRs are skipped: the benchmark
+requires cluster endpoints that GitHub-hosted runners cannot reach. Its executor
+choice controls Bazel action execution separately from the workflow runner.
 
 ## The routing rule
 
