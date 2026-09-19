@@ -35,7 +35,10 @@ rust_unit_test(
     data = [":fixtures"],
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/convergence"},
     # These tests execute host shell or process utilities.
-    tags = ["external"],
+    tags = [
+        "external",
+        "no-remote-exec",
+    ],
 )
 
 rust_api_json(
