@@ -25,6 +25,7 @@ class ScratchTest(unittest.TestCase):
                 RUNNER_TEMP=temporary,
                 GITHUB_OUTPUT=str(output),
                 GITHUB_ENV=str(environment),
+                BAZEL_REPOSITORY_CACHE="",
             )
             subprocess.run(
                 ["bash", str(ACTION / "prepare-scratch.sh")], env=inputs, check=True
@@ -35,6 +36,7 @@ class ScratchTest(unittest.TestCase):
             roots = [
                 Path(line.removeprefix("root="))
                 for line in output.read_text().splitlines()
+                if line.startswith("root=")
             ]
             self.assertEqual(len(roots), 2)
             self.assertNotEqual(*roots)
@@ -46,8 +48,33 @@ class ScratchTest(unittest.TestCase):
                 [f"BAZELISK_HOME={root}/bazelisk" for root in roots],
             )
             self.assertEqual(sibling.read_text(), "preserve me")
+            self.assertEqual(
+                [line for line in output.read_text().splitlines()
+                 if line.startswith("repository_cache=")],
+                [f"repository_cache={root}/repository" for root in roots],
+            )
 
-    def test_setup_action_places_every_bazel_cache_under_its_allocated_root(self):
+    def test_mounted_repository_cache_is_selected_without_changing_its_contents(self):
+        with tempfile.TemporaryDirectory(prefix="bazel scratch ") as temporary:
+            directory = Path(temporary)
+            repository = directory / "mounted cache"
+            repository.mkdir()
+            marker = repository / "download"
+            marker.write_text("retained")
+            output = directory / "output"
+            subprocess.run(
+                ["bash", str(ACTION / "prepare-scratch.sh")],
+                env=dict(os.environ, RUNNER_TEMP=temporary, GITHUB_OUTPUT=str(output),
+                         GITHUB_ENV=str(directory / "environment"),
+                         BAZEL_REPOSITORY_CACHE=str(repository)),
+                check=True,
+            )
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertEqual(values["repository_cache"], str(repository))
+            self.assertNotEqual(values["root"], str(repository))
+            self.assertEqual(marker.read_text(), "retained")
+
+    def test_setup_action_uses_private_outputs_and_the_selected_repository_cache(self):
         action = yaml.safe_load((ACTION / "action.yml").read_text())
         allocation, setup = action["runs"]["steps"]
         self.assertEqual(allocation["id"], "scratch")
@@ -57,7 +84,8 @@ class ScratchTest(unittest.TestCase):
         self.assertEqual(options["output-base"], f'"{root}/output"')
         self.assertIn(f'startup --output_user_root="{root}/user"', options["bazelrc"])
         self.assertIn(
-            f'common --repository_cache="{root}/repository"', options["bazelrc"]
+            'common --repository_cache="${{ steps.scratch.outputs.repository_cache }}"',
+            options["bazelrc"],
         )
 
 
