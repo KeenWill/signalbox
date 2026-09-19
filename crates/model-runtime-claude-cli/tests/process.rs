@@ -205,6 +205,8 @@ async fn agents_md_only_workspace_disables_the_native_instruction_loader() {
     )
     .expect("the generated settings are JSON");
     assert_eq!(settings["enabledPlugins"]["agents-md@builtin"], false);
+    assert_eq!(settings["syncClaudeAiPlugins"], false);
+    assert_eq!(settings["syncClaudeAiSkills"], false);
 }
 
 #[tokio::test]

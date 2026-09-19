@@ -699,7 +699,9 @@ fn create_support_files(
         "fastMode": fast_mode == FastMode::Enabled,
         "hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": hook_command, "timeout": 10
-        }]}]}
+        }]}]},
+        "syncClaudeAiPlugins": false,
+        "syncClaudeAiSkills": false
     });
     if let Some(credential) = credential {
         write_private_file(&credential_file, credential.expose_bytes())?;
