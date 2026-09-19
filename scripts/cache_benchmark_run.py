@@ -1,4 +1,4 @@
-"""Run the CI target set with isolated local state and retain measurement inputs."""
+"""Run the CI target set with private output bases and retain measurement inputs."""
 
 import json
 import os

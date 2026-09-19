@@ -3,11 +3,11 @@
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
   "runs": 4,
-  "label": "shared-all-j4-t1-cpu4",
+  "label": "shared-all-j4-t1-cpu8",
   "runner": "signalbox-nvme-canary",
   "reuse_repository_cache": true,
   "extra_flags": [
     "--remote_download_all",
-    "--local_resources=cpu=4"
+    "--local_resources=cpu=8"
   ]
 }

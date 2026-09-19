@@ -45,7 +45,7 @@ on:
         type: string
         default: '//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation'
       runs:
-        description: Repetitions with fresh local Bazel state
+        description: Repetitions with fresh output bases
         type: number
         default: 1
       runner:
