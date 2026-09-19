@@ -32,7 +32,6 @@ rust_integration_test(
     crate_features = CRATE_FEATURES,
     crate_root = "tests/conformance.rs",
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = [
