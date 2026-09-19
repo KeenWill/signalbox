@@ -272,7 +272,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -311,7 +310,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -350,7 +348,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -392,7 +389,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + [
@@ -480,7 +476,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -519,7 +514,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -558,7 +552,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -597,7 +590,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -623,7 +615,7 @@ rust_integration_test(
         "CARGO_MANIFEST_DIR": "apps/signalboxd",
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
-    tags = ["external", "no-sandbox"],
+    tags = ["no-sandbox"],
     deps = CRATE_DEPS + [
         "//apps/signalbox-runner:signalbox_runner",
         "//crates/test-bin:signalbox_test_bin",
