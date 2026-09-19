@@ -311,7 +311,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
