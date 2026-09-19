@@ -2,10 +2,10 @@
   "cache_endpoint": "",
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
-  "runs": 4,
-  "label": "shared-all-j4-t1-cpu8",
+  "runs": 3,
+  "label": "fresh-all-j4-t1-cpu8",
   "runner": "signalbox-nvme-canary",
-  "reuse_repository_cache": true,
+  "reuse_repository_cache": false,
   "extra_flags": [
     "--remote_download_all",
     "--local_resources=cpu=8"
