@@ -3,5 +3,5 @@
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
   "runs": 1,
-  "label": "row4b-warm"
+  "label": "hermetic-test-inputs-warm"
 }
