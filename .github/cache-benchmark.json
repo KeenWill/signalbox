@@ -1,7 +1,15 @@
 {
-  "cache_endpoint": "grpc://buildbarn-l1.bazel-cache.svc.cluster.local:9092",
+  "cache_endpoint": "",
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
-  "runs": 1,
-  "label": "row4b-warm"
+  "runs": 3,
+  "label": "shared-toplevel-j16-t4-cpu8-confirmation",
+  "runner": "signalbox-nvme-canary",
+  "reuse_repository_cache": true,
+  "extra_flags": [
+    "--remote_download_toplevel",
+    "--local_resources=cpu=8",
+    "--jobs=16",
+    "--local_test_jobs=4"
+  ]
 }

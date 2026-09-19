@@ -3,14 +3,16 @@ run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mod
 
 # PR runs read .github/cache-benchmark.json; dispatches use the inputs below.
 # In either path, a blank cache_endpoint uses the repository BAZEL_REMOTE_CACHE.
-# Each repetition uses fresh local Bazel state; warm means remote
+# Each repetition uses a fresh output base; warm means remote
 # reuse, and cold disables remote result acceptance without deleting shared data.
 # Defaults match rust.yml's reusable bazel.yml ordinary build/test invocation.
 # That suite includes Docker-dependent tests: signalbox-builds cannot run those
 # without Docker. Preserve failures and evidence instead of filtering the suite.
 # Download the artifact and enrich it from a host with Prometheus access:
-# gh api repos/OWNER/REPO/actions/jobs/JOB_ID > ARTIFACT/run-1/job.json
-# python3 scripts/cache_benchmark_summary.py ARTIFACT/run-1 \
+# Set RUN to ARTIFACT/run-1 for a single setting, or
+# ARTIFACT/setting-1/run-1 for a settings matrix; repeat for each run directory.
+# gh api repos/OWNER/REPO/actions/jobs/JOB_ID > "$RUN/job.json"
+# python3 scripts/cache_benchmark_summary.py "$RUN" \
 #   --prometheus http://PROMETHEUS --cache-namespace bazel-cache
 # Select cache CPU/placement with --cache-pods when the namespace is shared.
 # For Buildbarn, --cache-grpc-service selects the frontend's gRPC status counters;
@@ -45,9 +47,21 @@ on:
         type: string
         default: '//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation'
       runs:
-        description: Repetitions with fresh local Bazel state
+        description: Repetitions with fresh output bases
         type: number
         default: 1
+      runner:
+        description: Runner scale set
+        type: string
+        default: signalbox-builds
+      extra_flags:
+        description: Additional Bazel test flags
+        type: string
+        default: ''
+      reuse_repository_cache:
+        description: Reuse the runner's mounted repository cache
+        type: boolean
+        default: false
       label:
         description: Evidence label
         type: string
@@ -57,9 +71,32 @@ permissions:
   contents: read
 
 jobs:
-  benchmark:
+  configuration:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: signalbox-builds
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.config.outputs.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: config
+        env:
+          BENCHMARK_RUNNER: ${{ inputs.runner || 'signalbox-builds' }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          runner = os.environ['BENCHMARK_RUNNER']
+          if os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+              runner = json.loads(Path('.github/cache-benchmark.json').read_text()).get('runner', runner)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'runner={runner}', file=output)
+          PY
+  benchmark:
+    needs: configuration
+    runs-on: ${{ needs.configuration.outputs.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,6 +112,8 @@ jobs:
           BENCHMARK_TARGETS: ${{ inputs.targets }}
           BENCHMARK_RUNS: ${{ inputs.runs }}
           BENCHMARK_LABEL: ${{ inputs.label }}
+          BENCHMARK_EXTRA_FLAGS: ${{ inputs.extra_flags }}
+          BENCHMARK_REUSE_REPOSITORY_CACHE: ${{ inputs.reuse_repository_cache }}
         run: python3 scripts/cache_benchmark_run.py "$RUNNER_TEMP/cache-benchmark"
       - name: Retain benchmark evidence
         if: always()

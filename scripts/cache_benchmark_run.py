@@ -1,4 +1,4 @@
-"""Run the CI target set with isolated local state and retain measurement inputs."""
+"""Run the CI target set with private output bases and retain measurement inputs."""
 
 import json
 import os
@@ -27,14 +27,27 @@ def load_config():
     else:
         config = {name: os.environ[f"BENCHMARK_{name.upper()}"]
                   for name in ("mode", "runs", "targets", "label")}
+        config["extra_flags"] = shlex.split(os.environ.get("BENCHMARK_EXTRA_FLAGS", ""))
+        config["reuse_repository_cache"] = os.environ.get("BENCHMARK_REUSE_REPOSITORY_CACHE") == "true"
     config["cache_endpoint"] = config.get("cache_endpoint") or os.environ["CACHE_ENDPOINT"]
     return config
 
 
 def main():
     output = Path(sys.argv[1]).resolve()
-    output.mkdir(parents=True, exist_ok=True)
     config = load_config()
+    settings = config.get("settings")
+    if not settings:
+        return run_setting(output, config)
+    overall_status = 0
+    for index, setting in enumerate(settings, 1):
+        status = run_setting(output / f"setting-{index}", {**config, **setting})
+        overall_status = overall_status or status
+    return overall_status
+
+
+def run_setting(output, config):
+    output.mkdir(parents=True, exist_ok=True)
     endpoint = config["cache_endpoint"]
     mode = config["mode"]
     runs = int(config["runs"])
@@ -46,10 +59,12 @@ def main():
         evidence = output / f"run-{repetition}"
         evidence.mkdir()
         scratch = Path(tempfile.mkdtemp(prefix="cache-benchmark-", dir=os.environ["RUNNER_TEMP"]))
+        repository_cache = (Path(os.environ["BAZEL_REPOSITORY_CACHE"])
+                            if config.get("reuse_repository_cache") else scratch / "repository")
         bazel = ["bazel", f"--output_user_root={scratch / 'user'}", f"--output_base={scratch / 'output'}"]
         flags = [
             "--jobs=4", "--local_resources=cpu=4", "--local_resources=memory=4096",
-            "--local_test_jobs=1", f"--repository_cache={scratch / 'repository'}",
+            "--local_test_jobs=1", f"--repository_cache={repository_cache}",
             f"--remote_cache={endpoint}", f"--experimental_remote_downloader={endpoint}",
             "--experimental_remote_downloader_local_fallback",
             f"--build_event_json_file={evidence / 'bep.jsonl'}",
@@ -59,6 +74,7 @@ def main():
         ]
         if mode == "cold":
             flags.append("--noremote_accept_cached")
+        flags.extend(config.get("extra_flags", []))
         command = [*bazel, "test", *flags, "--", *targets]
         metadata = {
             "label": config["label"], "mode": mode,
@@ -66,6 +82,8 @@ def main():
             "runner_pod": os.environ.get("HOSTNAME", "NA"),
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "command": command,
+            "repository_cache": str(repository_cache),
+            "reuse_repository_cache": bool(config.get("reuse_repository_cache")),
         }
         status = 0
         try:
