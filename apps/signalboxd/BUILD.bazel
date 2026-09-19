@@ -58,7 +58,7 @@ CRATE_DEPS = [
     "//crates/tools-github:signalbox_tools_github",
     "//crates/tools-plan:signalbox_tools_plan",
     "//crates/tools-sessions:signalbox_tools_sessions",
-        "//crates/tools-workflows:signalbox_tools_workflows",
+    "//crates/tools-workflows:signalbox_tools_workflows",
     "//crates/tools-web:signalbox_tools_web",
     "//crates/tools-workspace:signalbox_tools_workspace",
     "//crates/web-contract:signalbox_web_contract",
@@ -106,10 +106,10 @@ rust_library(
         "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
         "//crates/model-runtime-openai:signalbox_model_runtime_openai",
         "//crates/modules/repo-watch-v2:signalbox_module_repo_watch_v2",
-        "//crates/session-ownership:signalbox_session_ownership",
         "//crates/persistence:signalbox_persistence",
         "//crates/process-protocol:signalbox_process_protocol",
         "//crates/runner-wire:signalbox_runner_wire",
+        "//crates/session-ownership:signalbox_session_ownership",
         "//crates/tool-contract:signalbox_tool_contract",
         "//crates/tools-basic:signalbox_tools_basic",
         "//crates/tools-code-host:signalbox_tools_code_host",
@@ -120,8 +120,8 @@ rust_library(
         "//crates/tools-github:signalbox_tools_github",
         "//crates/tools-plan:signalbox_tools_plan",
         "//crates/tools-sessions:signalbox_tools_sessions",
-        "//crates/tools-workflows:signalbox_tools_workflows",
         "//crates/tools-web:signalbox_tools_web",
+        "//crates/tools-workflows:signalbox_tools_workflows",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
         "//crates/workflow-runtime:signalbox_workflow_runtime",
@@ -200,6 +200,7 @@ rust_unit_test(
     # Socket ownership and host-tool tests need the host's actual UID mapping.
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = TEST_DEPS,
@@ -273,6 +274,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -312,6 +314,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -351,6 +354,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -374,8 +378,8 @@ rust_integration_test(
         ":approval-judge-eval",
         ":signalbox-debug",
         ":signalboxd",
+        "//apps/signalbox-runner",
         "//crates/convergence:fixtures",
-        "//apps/signalbox-runner:signalbox-runner",
     ],
     env = {
         "TMPDIR": "/tmp",
@@ -393,6 +397,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + [
@@ -442,6 +447,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -481,6 +487,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -520,6 +527,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -559,6 +567,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -598,6 +607,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = CRATE_DEPS + ["//crates/test-bin:signalbox_test_bin"],
@@ -605,14 +615,20 @@ rust_integration_test(
 
 rust_integration_test(
     name = "runner_end_to_end",
-    srcs = ["tests/runner_end_to_end.rs", "tests/support/runner_process.rs"],
+    srcs = [
+        "tests/runner_end_to_end.rs",
+        "tests/support/runner_process.rs",
+    ],
     compile_data = [
         "//:config/signalboxd.example.toml",
         "//:tooling/postgres_test_image.rs",
     ],
     crate_features = ["test-support"],
     crate_root = "tests/runner_end_to_end.rs",
-    data = [":signalboxd", "//apps/signalbox-runner:signalbox-runner"],
+    data = [
+        ":signalboxd",
+        "//apps/signalbox-runner",
+    ],
     env = {
         "TMPDIR": "/tmp",
         "NEXTEST_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
@@ -623,7 +639,11 @@ rust_integration_test(
         "CARGO_MANIFEST_DIR": "apps/signalboxd",
         "CARGO_BIN_EXE_signalboxd": "$(rootpath :signalboxd)",
     },
-    tags = ["external", "no-sandbox"],
+    tags = [
+        "external",
+        "no-remote-exec",
+        "no-sandbox",
+    ],
     deps = CRATE_DEPS + [
         "//apps/signalbox-runner:signalbox_runner",
         "//crates/test-bin:signalbox_test_bin",

@@ -16,3 +16,14 @@ coverage --instrumentation_filter=^//(apps|crates)/
 coverage --instrument_test_targets
 # Keep LLVM's linked dynamic-section address intact during runtime relocation.
 coverage --@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-Wl,-rpath,$ORIGIN/coverage-runtime
+
+# Opt-in Buildbarn execution; the downloaded Rust and GCC toolchains are inputs.
+build:rbe --remote_executor=grpc://scheduler.bazel-rbe.svc.cluster.local:8980
+build:rbe --remote_cache=grpc://buildbarn.bazel-cache.svc.cluster.local:9092
+build:rbe --remote_instance_name=
+build:rbe --jobs=64
+build:rbe --remote_download_toplevel
+build:rbe --noremote_local_fallback
+build:rbe --extra_execution_platforms=//tooling/bazel:rbe_linux_x86_64
+build:rbe --remote_default_exec_properties=OSFamily=Linux
+build:rbe --remote_default_exec_properties=container-image=ghcr.io/keenwill/bazel-rbe-executor@sha256:64a1f58b6ab42d4f8ce40f97112d999c57a5f483d2ee01f9a4a6e58691d3cf42
