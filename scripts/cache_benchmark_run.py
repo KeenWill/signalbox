@@ -35,8 +35,19 @@ def load_config():
 
 def main():
     output = Path(sys.argv[1]).resolve()
-    output.mkdir(parents=True, exist_ok=True)
     config = load_config()
+    settings = config.get("settings")
+    if not settings:
+        return run_setting(output, config)
+    overall_status = 0
+    for index, setting in enumerate(settings, 1):
+        status = run_setting(output / f"setting-{index}", {**config, **setting})
+        overall_status = overall_status or status
+    return overall_status
+
+
+def run_setting(output, config):
+    output.mkdir(parents=True, exist_ok=True)
     endpoint = config["cache_endpoint"]
     mode = config["mode"]
     runs = int(config["runs"])

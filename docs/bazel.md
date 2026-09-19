@@ -75,11 +75,13 @@ ordinary CI targets on the selected `runner` (default `signalbox-builds`) with a
 fresh output base per repetition. `reuse_repository_cache` uses the runner's
 mounted `BAZEL_REPOSITORY_CACHE`; otherwise the repository cache is also fresh.
 `extra_flags` adds Bazel test flags. Warm mode accepts remote results; cold mode
-disables remote result acceptance without clearing the shared cache. Artifacts
-retain the invocation, runner identity, wall time, BEP, compact execution log,
-gRPC log, profile, and TSV/JSON summaries. The workflow comments describe
-Prometheus enrichment and measurement scope; unavailable values carry `NA`
-reasons.
+disables remote result acceptance without clearing the shared cache. PR config
+can supply a `settings` list of overrides to run sequentially, retaining
+separate evidence for each setting and continuing after workload failures.
+Artifacts retain the invocation, runner identity, wall time, BEP, compact
+execution log, gRPC log, profile, and TSV/JSON summaries. The workflow comments
+describe Prometheus enrichment and measurement scope; unavailable values carry
+`NA` reasons.
 
 The runtime launcher applies to the Rust unit-test binaries. The convergence
 CLI, Claude/Codex adapter, and daemon unit targets use host utilities and carry

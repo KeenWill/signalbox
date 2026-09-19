@@ -3,11 +3,82 @@
   "mode": "warm",
   "targets": "//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation",
   "runs": 3,
-  "label": "fresh-all-j4-t1-cpu8",
+  "label": "runner-persistence-matrix",
   "runner": "signalbox-nvme-canary",
-  "reuse_repository_cache": false,
+  "reuse_repository_cache": true,
   "extra_flags": [
-    "--remote_download_all",
     "--local_resources=cpu=8"
+  ],
+  "settings": [
+    {
+      "label": "fresh-all-j4-t1-cpu8",
+      "reuse_repository_cache": false,
+      "extra_flags": [
+        "--remote_download_all",
+        "--local_resources=cpu=8",
+        "--jobs=4",
+        "--local_test_jobs=1"
+      ]
+    },
+    {
+      "label": "shared-toplevel-j4-t1-cpu8",
+      "reuse_repository_cache": true,
+      "extra_flags": [
+        "--remote_download_toplevel",
+        "--local_resources=cpu=8",
+        "--jobs=4",
+        "--local_test_jobs=1"
+      ]
+    },
+    {
+      "label": "shared-minimal-j4-t1-cpu8",
+      "reuse_repository_cache": true,
+      "extra_flags": [
+        "--remote_download_minimal",
+        "--local_resources=cpu=8",
+        "--jobs=4",
+        "--local_test_jobs=1"
+      ]
+    },
+    {
+      "label": "shared-toplevel-j4-t2-cpu8",
+      "reuse_repository_cache": true,
+      "extra_flags": [
+        "--remote_download_toplevel",
+        "--local_resources=cpu=8",
+        "--jobs=4",
+        "--local_test_jobs=2"
+      ]
+    },
+    {
+      "label": "shared-toplevel-j4-t4-cpu8",
+      "reuse_repository_cache": true,
+      "extra_flags": [
+        "--remote_download_toplevel",
+        "--local_resources=cpu=8",
+        "--jobs=4",
+        "--local_test_jobs=4"
+      ]
+    },
+    {
+      "label": "shared-toplevel-j16-t4-cpu8",
+      "reuse_repository_cache": true,
+      "extra_flags": [
+        "--remote_download_toplevel",
+        "--local_resources=cpu=8",
+        "--jobs=16",
+        "--local_test_jobs=4"
+      ]
+    },
+    {
+      "label": "shared-minimal-j4-t4-cpu8",
+      "reuse_repository_cache": true,
+      "extra_flags": [
+        "--remote_download_minimal",
+        "--local_resources=cpu=8",
+        "--jobs=4",
+        "--local_test_jobs=4"
+      ]
+    }
   ]
 }

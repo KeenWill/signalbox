@@ -54,6 +54,23 @@ BEP = [
 
 
 class SummaryTests(unittest.TestCase):
+    def test_settings_run_sequentially_with_separate_evidence_after_workload_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = dict(cache_endpoint="grpc://cache.invalid", mode="warm", runs=3,
+                          targets="//:rust_build", label="matrix", settings=[
+                              dict(label="serial", extra_flags=["--local_test_jobs=1"]),
+                              dict(label="parallel", extra_flags=["--local_test_jobs=4"]),
+                          ])
+            with patch("cache_benchmark_run.load_config", return_value=config), \
+                    patch("cache_benchmark_run.run_setting", side_effect=[3, 0]) as run, \
+                    patch("sys.argv", ["runner", temp]):
+                self.assertEqual(run_benchmark(), 3)
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [Path(temp) / "setting-1", Path(temp) / "setting-2"])
+            self.assertEqual([call.args[1]["label"] for call in run.call_args_list],
+                             ["serial", "parallel"])
+            self.assertEqual([call.args[1]["runs"] for call in run.call_args_list], [3, 3])
+
     def test_shared_repository_cache_survives_repetitions_with_private_output_bases(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = Path(temp) / "repository"
