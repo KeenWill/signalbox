@@ -9,8 +9,10 @@ run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mod
 # That suite includes Docker-dependent tests: signalbox-builds cannot run those
 # without Docker. Preserve failures and evidence instead of filtering the suite.
 # Download the artifact and enrich it from a host with Prometheus access:
-# gh api repos/OWNER/REPO/actions/jobs/JOB_ID > ARTIFACT/run-1/job.json
-# python3 scripts/cache_benchmark_summary.py ARTIFACT/run-1 \
+# Set RUN to ARTIFACT/run-1 for a single setting, or
+# ARTIFACT/setting-1/run-1 for a settings matrix; repeat for each run directory.
+# gh api repos/OWNER/REPO/actions/jobs/JOB_ID > "$RUN/job.json"
+# python3 scripts/cache_benchmark_summary.py "$RUN" \
 #   --prometheus http://PROMETHEUS --cache-namespace bazel-cache
 # Select cache CPU/placement with --cache-pods when the namespace is shared.
 # For Buildbarn, --cache-grpc-service selects the frontend's gRPC status counters;
