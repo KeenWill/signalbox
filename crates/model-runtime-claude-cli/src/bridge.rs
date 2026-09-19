@@ -303,7 +303,10 @@ mod tests {
 
     #[test]
     fn readiness_publication_accepts_repeated_tool_lists() {
-        let temporary = tempfile::tempdir().expect("temporary bridge directory is created");
+        let root = std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let temporary = tempfile::tempdir_in(root).expect("temporary bridge directory is created");
         let marker = temporary.path().join("ready");
         let mut published = false;
 
