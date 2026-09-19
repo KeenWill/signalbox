@@ -1,6 +1,7 @@
 """Real wire samples plus missing-input and counter-reset measurement checks."""
 
 import base64
+import csv
 import json
 import os
 from pathlib import Path
@@ -92,6 +93,23 @@ class SummaryTests(unittest.TestCase):
                 self.assertLess(command.index("--jobs=4"), command.index("--config=rbe"))
                 self.assertIn("--remote_cache=grpc://cache.invalid", command[command.index("--config=rbe") + 1:])
             self.assertIn("--noremote_accept_cached", command)
+
+    def test_summary_outputs_distinguish_executors_with_the_same_label(self):
+        for executor in ("local", "rbe"):
+            with self.subTest(executor=executor), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                (directory / "run.json").write_text(json.dumps({
+                    "label": "", "mode": "warm", "executor": executor,
+                    "wall_s": 10, "exit_code": 0,
+                }))
+                with patch("sys.argv", ["summary", temp]), patch("sys.stdout"):
+                    main()
+                result = json.loads((directory / "summary.json").read_text())
+                with (directory / "summary.tsv").open() as stream:
+                    row, = csv.DictReader(stream, delimiter="\t")
+                self.assertEqual(result["row"]["executor"], executor)
+                self.assertEqual(row["executor"], executor)
+                self.assertEqual(row["label"], "")
 
     def test_build_retries_do_not_present_final_attempt_logs_as_whole_run_totals(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -241,6 +259,8 @@ class SummaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             result = summarize(Path(temp))
         self.assertEqual(result["row"]["actions_cached"], "NA")
+        self.assertEqual(result["row"]["executor"], "NA")
+        self.assertIn("executor", result["missing"])
         self.assertEqual(result["row"]["runner_cpu_s"], "NA")
         self.assertEqual(result["row"]["job_wall_s"], "NA")
         self.assertIn("runner_cpu_s", result["missing"])
@@ -261,7 +281,7 @@ class SummaryTests(unittest.TestCase):
     def test_interrupted_run_enrichment_still_writes_na_summary(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
-            (directory / "run.json").write_text(json.dumps({"start": 100}))
+            (directory / "run.json").write_text(json.dumps({"start": 100, "executor": "rbe"}))
             with patch("sys.argv", ["summary", temp, "--prometheus", "http://unused.invalid",
                                     "--cache-namespace", "cache"]), patch("sys.stdout"):
                 main()
@@ -269,6 +289,7 @@ class SummaryTests(unittest.TestCase):
             self.assertTrue((directory / "summary.tsv").is_file())
         self.assertEqual(result["row"]["cache_cpu_s"], "NA")
         self.assertIn("end", result["missing"]["cache_cpu_s"])
+        self.assertEqual(result["row"]["executor"], "rbe")
 
 
 if __name__ == "__main__":

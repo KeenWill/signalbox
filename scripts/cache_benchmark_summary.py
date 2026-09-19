@@ -246,13 +246,13 @@ def summarize(directory):
     try:
         metadata = json.loads((directory / "run.json").read_text())
         details["run"] = metadata
-        for name in ("label", "mode", "wall_s", "exit_code"):
+        for name in ("label", "mode", "executor", "wall_s", "exit_code"):
             if name in metadata:
                 row[name] = metadata[name]
             else:
                 missing([name], "run metadata field missing (interrupted run)")
     except (OSError, ValueError) as error:
-        missing(["label", "mode", "wall_s", "exit_code"], error)
+        missing(["label", "mode", "executor", "wall_s", "exit_code"], error)
     try:
         job = json.loads((directory / "job.json").read_text())
         row["job_wall_s"] = (datetime.fromisoformat(job["completed_at"])
