@@ -70,7 +70,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalbox": "$(rootpath :signalbox)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = [
@@ -110,7 +109,6 @@ rust_integration_test(
         "CARGO_BIN_EXE_signalbox": "$(rootpath :signalbox)",
     },
     tags = [
-        "external",
         "no-sandbox",
     ],
     deps = [
