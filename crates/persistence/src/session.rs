@@ -110,7 +110,7 @@ impl SessionRepository {
         &self,
         session: SessionId,
     ) -> Result<Option<RepositoryWatchCreationDispatch>, SessionRepositoryError> {
-        #[derive(sqlx::FromRow)]
+        #[derive(sqlx_macros::FromRow)]
         struct CreationDispatchRow {
             dispatch: Uuid,
             command: Uuid,

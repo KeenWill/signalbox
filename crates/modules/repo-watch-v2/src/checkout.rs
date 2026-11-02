@@ -51,7 +51,7 @@ pub struct CheckoutDirectoryIdentity {
     pub inode: u64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct CheckoutRemovalRow {
     dispatch_ref: Uuid,
     command_id: Uuid,
@@ -63,7 +63,7 @@ struct CheckoutRemovalRow {
     checkout_inode: Option<Decimal>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct CheckoutRow {
     dispatch_ref: Uuid,
     event_id: Uuid,

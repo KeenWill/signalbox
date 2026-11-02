@@ -40,7 +40,7 @@ use signalbox_domain::{
     SessionInputPosition, SubmitInput, SubmitInputReconstitutionFailure, SubmitInputResult,
     ToolRequestId, TurnAttemptId, TurnId, UnsupportedModelSetting, UserContent,
 };
-use sqlx::{FromRow, PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::{self, CommandKind, RegistryCorruption, RegistryInspectionError},
@@ -57,7 +57,7 @@ const STORAGE_VERSION: i16 = 4;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 
-#[derive(FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredSchedulingInventoryCounts {
     queue_count: i64,
     lifecycle_count: i64,

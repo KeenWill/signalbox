@@ -3386,7 +3386,7 @@ system_prompt = "Inspect repository activity."
         webhook_delivery_status(&hook, b"initial-hook-secret", &delivery).await?,
         reqwest::StatusCode::ACCEPTED
     );
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct RetainedWebhook {
         repository: String,
         event_kind: String,

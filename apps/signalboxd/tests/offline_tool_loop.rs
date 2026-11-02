@@ -246,7 +246,7 @@ type FixtureJudgeExecution<Catalog, Executor> = (
     Arc<ScriptedModel<ModelCallId>>,
 );
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 struct DelegateDecisionProjection {
     decision_kind: String,
     decision_source: String,
@@ -256,7 +256,7 @@ struct DelegateDecisionProjection {
     model_selection_id: Uuid,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 struct EscalatedParkProjection {
     active_phase: String,
     approval_request_id: Uuid,
@@ -303,7 +303,7 @@ struct ToolLoopFixture {
     tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
-#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Eq, PartialEq, sqlx_macros::FromRow)]
 struct SessionMetadataRootFacts {
     title: String,
     archived: bool,
@@ -4904,7 +4904,7 @@ async fn failed_continuation_call_admits_and_runs_later_turn() -> Result<(), Box
         2,
         "the failed continuation round follows the completed tool round"
     );
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct FailedContinuationShape {
         turn_disposition: String,
         terminal_model_call_id: Option<Uuid>,
@@ -5066,7 +5066,7 @@ async fn refused_continuation_call_admits_and_runs_later_turn() -> Result<(), Bo
         2,
         "the refused continuation round follows the completed tool round"
     );
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct RefusedContinuationShape {
         turn_disposition: String,
         terminal_model_call_id: Option<Uuid>,

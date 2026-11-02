@@ -28,26 +28,26 @@ pub(crate) fn applied_tool_decision(
     }
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct ApprovalJudgeDurableState {
     pub(crate) prepared_judge_exists: bool,
     pub(crate) decision_exists: bool,
     pub(crate) active_wait_exists: bool,
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct ApprovalJudgeDecisionDurableState {
     pub(crate) prepared_judge_exists: bool,
     pub(crate) decision_exists: bool,
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct AutomaticApprovalEventState {
     pub(crate) decision_exists: bool,
     pub(crate) decided_event_exists: bool,
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct AppliedApprovalJudgeProjection {
     pub(crate) judge_state: String,
     pub(crate) recommendation: String,
@@ -58,7 +58,7 @@ pub(crate) struct AppliedApprovalJudgeProjection {
     pub(crate) active_phase: String,
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct DeniedApprovalJudgeProjection {
     pub(crate) judge_state: String,
     pub(crate) recommendation: String,
@@ -69,7 +69,7 @@ pub(crate) struct DeniedApprovalJudgeProjection {
     pub(crate) active_phase: String,
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct EscalatedApprovalJudgeProjection {
     pub(crate) judge_state: String,
     pub(crate) recommendation: String,

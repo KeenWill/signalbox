@@ -979,7 +979,7 @@ pub(crate) async fn prepare_review_turn_call(
     pool: &PgPool,
     turn: TurnId,
 ) -> PreparedReviewTurnCall {
-    #[derive(sqlx::FromRow)]
+    #[derive(sqlx_macros::FromRow)]
     struct StoredReviewTurnModelFacts {
         session_id: Uuid,
         direct_selection_id: Uuid,

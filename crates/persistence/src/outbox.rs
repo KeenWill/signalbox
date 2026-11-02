@@ -92,7 +92,7 @@ const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct OutboxSlotRow {
     allocated: Decimal,
     event_beyond_allocated: bool,
@@ -115,13 +115,13 @@ pub(crate) struct ValidatedOutboxHeader {
 
 type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct ToolApprovalDecidedRow {
     turn_id: Uuid,
     request_id: Uuid,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct TurnCancelledOutboxRow {
     turn_id: Uuid,
     terminal_attempt_id: Option<Uuid>,

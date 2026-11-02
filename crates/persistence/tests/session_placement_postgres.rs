@@ -111,7 +111,7 @@ const PAGED_HISTORY_UPDATE_COUNT: u64 = 65;
 const PAGED_HISTORY_EXPECTED_VERSION: u64 = 66;
 const PAGED_HISTORY_PATH_PREFIX: &str = "projects.history.revision";
 
-#[derive(Debug, Eq, PartialEq, sqlx::FromRow, serde::Serialize)]
+#[derive(Debug, Eq, PartialEq, sqlx_macros::FromRow, serde::Serialize)]
 struct PlacementHistoryRow {
     version: i64,
     event_kind: String,

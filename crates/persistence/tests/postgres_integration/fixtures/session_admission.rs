@@ -94,7 +94,7 @@ pub(crate) fn process_model_identity(
     }
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 pub(crate) struct ModelCallPinFacts {
     pub(crate) direct_model_selection_id: Uuid,
     pub(crate) resolved_provider_model_identity_id: Uuid,

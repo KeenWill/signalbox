@@ -3656,7 +3656,7 @@ async fn a_denied_matching_request_after_the_denial_keeps_the_override()
 }
 
 /// One `injection_settled` receipt as stored.
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 struct InjectionReceipt {
     outcome_kind: String,
     rejection_kind: Option<String>,

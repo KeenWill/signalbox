@@ -819,7 +819,7 @@ pub(crate) fn delegation_corruption(
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 pub(crate) struct BackgroundWaitAtomicityEvidence {
     pub(crate) wait_count: i64,
     pub(crate) update_count: i64,
@@ -827,7 +827,7 @@ pub(crate) struct BackgroundWaitAtomicityEvidence {
     pub(crate) result_text: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 pub(crate) struct ForegroundWaitAtomicityEvidence {
     pub(crate) active_phase: String,
     pub(crate) current_attempt: Option<Uuid>,
@@ -837,7 +837,7 @@ pub(crate) struct ForegroundWaitAtomicityEvidence {
     pub(crate) update_count: i64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 pub(crate) struct MessageAtomicityEvidence {
     pub(crate) event_count: i64,
     pub(crate) message_count: i64,
@@ -847,7 +847,7 @@ pub(crate) struct MessageAtomicityEvidence {
     pub(crate) completed_attempt_count: i64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 pub(crate) struct DelegatedResultMaterializationEvidence {
     pub(crate) outcome_kind: String,
     pub(crate) content_text: Option<String>,

@@ -71,7 +71,7 @@ impl ObservationResult {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct ReceiptRow {
     effect: Uuid,
     input: Vec<u8>,
@@ -221,7 +221,7 @@ pub(crate) async fn checked_receipt(
     Ok(receipt)
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PositionRow {
     generation: Decimal,
     through: Decimal,

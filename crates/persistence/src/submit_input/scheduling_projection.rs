@@ -2161,7 +2161,7 @@ async fn load_scheduling_projection_inner(
         ));
     }
 
-    #[derive(sqlx::FromRow)]
+    #[derive(sqlx_macros::FromRow)]
     struct PrecedingNonAcceptedTerminalRow {
         turn_id: Uuid,
         successor_turn_id: Uuid,
