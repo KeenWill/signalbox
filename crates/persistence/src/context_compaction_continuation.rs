@@ -1,7 +1,7 @@
 //! Durable observations for bounded repository-watch compaction successors.
 
 use signalbox_domain::{DurableCommandId, SessionId, TurnId};
-use sqlx::{FromRow, PgPool, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
 
 /// Persistence boundary for terminal continuation and compaction receipts.
 #[derive(Clone, Debug)]
@@ -23,7 +23,7 @@ pub enum CompactionSuccessor {
     },
 }
 
-#[derive(FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredSuccessor {
     accepting_command_id: Option<Uuid>,
     previous_turn: Uuid,

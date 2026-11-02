@@ -2143,7 +2143,7 @@ async fn reported_usage_activation_preview_compacts_once_forward_only() -> Resul
     compaction
         .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
         .await?;
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct CompactionLedger {
         compactions: i64,
         successor_compactions: i64,
@@ -2243,7 +2243,7 @@ async fn reported_usage_activation_preview_never_compacts_without_usage()
     runtime.stop().await
 }
 
-#[derive(Debug, PartialEq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, sqlx_macros::FromRow)]
 struct CompactionAttachmentState {
     call_state: String,
     disposition: Option<String>,

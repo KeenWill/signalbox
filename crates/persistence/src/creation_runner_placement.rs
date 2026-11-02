@@ -9,7 +9,7 @@ use signalbox_domain::{
 };
 use sqlx::types::Uuid;
 
-#[derive(Clone, Debug, Default, sqlx::FromRow)]
+#[derive(Clone, Debug, Default, sqlx_macros::FromRow)]
 pub(crate) struct RunnerPlacementColumns {
     pub(crate) runner_selector_kind: Option<String>,
     pub(crate) runner_selector_id: Option<Uuid>,

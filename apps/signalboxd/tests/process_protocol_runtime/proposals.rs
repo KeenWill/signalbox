@@ -40,7 +40,7 @@ impl ToolExecutor for RecordingExecutor {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredProposal {
     resolution_kind: Option<String>,
     inadmissible_reason: Option<String>,

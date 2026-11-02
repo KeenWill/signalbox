@@ -4697,7 +4697,7 @@ pub(crate) async fn load_foreground_delegation_outcome(
     .ok_or_else(|| ToolLoopCorruption::Missing("foreground child result").into())
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct ForegroundOutcomeRow {
     outcome_kind: Option<String>,
     content_text: Option<String>,

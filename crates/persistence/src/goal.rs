@@ -228,7 +228,7 @@ pub struct GoalRepository {
 }
 
 /// Durable successful tool output used by the daemon's goal finish verifier.
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug, sqlx_macros::FromRow)]
 pub struct GoalCompletedTool {
     /// Registry name of the completed operation.
     pub tool_name: String,

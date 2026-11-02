@@ -2,7 +2,7 @@
 
 use crate::*;
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedDiscoveryUsage {
     limit_set_version: i16,
     classified_entry_count: i64,
@@ -12,7 +12,7 @@ struct PersistedDiscoveryUsage {
     scan_complete: bool,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedCandidate {
     candidate_ordinal: i64,
     instruction_bundle_id: Uuid,
@@ -34,28 +34,28 @@ struct PersistedCandidateExpectation<'a> {
     registration: &'a signalbox_domain::InstructionBundleRegistration,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedManifestHashes {
     eligibility_hash: Vec<u8>,
     admitted_set_hash: Vec<u8>,
     manifest_hash: Vec<u8>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedDiscoveryRoot {
     root_ordinal: i64,
     root_kind: String,
     root_path: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedDiscoveryFinding {
     finding_ordinal: i64,
     source_path: String,
     finding_kind: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedEvidenceCounts {
     discovery_count: i64,
     manifest_count: i64,
@@ -63,7 +63,7 @@ struct PersistedEvidenceCounts {
     bundle_count: i64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct PersistedRollbackCounts {
     discovery_count: i64,
     root_count: i64,

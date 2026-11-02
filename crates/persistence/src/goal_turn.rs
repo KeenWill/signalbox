@@ -6,7 +6,7 @@ use signalbox_domain::{
     GoalGeneration, GoalGuidance, GoalTurnSource, ModelAlias, ModelSelectionRequest,
     OriginConfiguration, SessionId, SessionInputPosition, TurnId, TurnTerminalCause,
 };
-use sqlx::{FromRow, PgConnection, types::Uuid};
+use sqlx::{PgConnection, types::Uuid};
 
 use crate::{
     goal::{GoalCorruption, GoalRepositoryError},
@@ -68,13 +68,13 @@ pub(crate) enum GoalTurnAcceptancePosition {
     Exhausted { last: SessionInputPosition },
 }
 
-#[derive(FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredGoalTurnTerminalState {
     state_kind: String,
     terminal_disposition_kind: Option<String>,
 }
 
-#[derive(FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredGoalTurnFrozenModel {
     frozen_model_kind: String,
     frozen_direct_model_selection_id: Option<Uuid>,

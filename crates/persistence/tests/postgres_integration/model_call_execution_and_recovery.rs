@@ -1831,7 +1831,7 @@ async fn transient_failure_retries_same_credential_until_bound_then_rotates()
     .await?;
     assert_eq!(durable_counts, (2, 1));
 
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct RecordedAttempt {
         model_call_id: Uuid,
         credential_reference: String,
@@ -4202,7 +4202,7 @@ async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
         .read_transcript(parked.session)
         .await?
         .expect("the parked session remains process-readable");
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct ExhaustedAttempts {
         attempts: i64,
         infrastructure_failures: i64,
@@ -5479,7 +5479,7 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
     );
     let first_batch = repository.claim_due().await?;
     let first = first_batch.claimed()[0];
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct ClaimedAttempt {
         state_kind: String,
         attempt_count: i32,
@@ -5533,7 +5533,7 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
     let second = second_batch.claimed()[0];
     let outcome = restarted.reconcile(second).await?;
     let after_application = restarted.claim_due().await?;
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct AppliedRecovery {
         state_kind: String,
         attempt_count: i32,

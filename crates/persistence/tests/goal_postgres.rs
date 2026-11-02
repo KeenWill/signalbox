@@ -3439,7 +3439,7 @@ async fn goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dyn Error
 /// single relationship result, the dispositions addressed to the commanding
 /// parent and to each terminalized child, the result updates, and the wake the
 /// bound child's result raises.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx_macros::FromRow)]
 struct CascadeDeliveryFacts {
     bound_child_results: i64,
     parent_addressed_dispositions: i64,
@@ -4360,7 +4360,7 @@ async fn lifecycle_stop_interrupt_uses_stopped_child_policy() -> Result<(), Box<
 /// One derived cascade edge: which relationship it dispositions, the immediate
 /// parent kind that selected its action, and the causal source that supplied
 /// that kind.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, sqlx_macros::FromRow, serde::Serialize)]
 struct NestedCascadeEdgeFacts {
     #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
@@ -4373,7 +4373,7 @@ struct NestedCascadeEdgeFacts {
 }
 
 /// The recorded disposition one cascade edge published against its relationship.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, sqlx_macros::FromRow, serde::Serialize)]
 struct NestedCascadeOutcomeFacts {
     #[serde(serialize_with = "serialize_uuid")]
     spawning_tool_request_id: Uuid,
@@ -4393,7 +4393,7 @@ fn serialize_optional_uuid<S: serde::Serializer>(
 }
 
 /// Every durable record a pruned edge must not have acquired.
-#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx_macros::FromRow)]
 struct PrunedEdgeRecordCounts {
     authorities: i64,
     outcomes: i64,

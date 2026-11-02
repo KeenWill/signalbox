@@ -10,7 +10,7 @@ use signalbox_persistence::goal::{GoalCompletedTool, GoalCompletionCheck, GoalCo
 
 use super::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
 
-#[derive(Clone, Debug, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Deserialize, sqlx_macros::FromRow)]
 struct Target {
     repository: String,
     number: String,

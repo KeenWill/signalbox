@@ -112,13 +112,13 @@ impl EvaluationRepository {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct IdentityRow {
     registration_id: uuid::Uuid,
     input: Vec<u8>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct RunRow {
     registration_id: uuid::Uuid,
     input: Vec<u8>,
@@ -127,7 +127,7 @@ struct RunRow {
     scorecard: Json<serde_json::Value>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct TrialRow {
     trial_ordinal: i64,
     case_position: i64,

@@ -3,7 +3,7 @@ use std::fs;
 fn main() {
     // Rebuild when a migration is added or removed (directory mtime) and when an
     // existing migration file's contents change (per-file), so the embedded
-    // `sqlx::migrate!` set never goes stale.
+    // `sqlx_macros::migrate!` set never goes stale.
     println!("cargo:rerun-if-changed=migrations");
 
     if let Ok(entries) = fs::read_dir("migrations") {

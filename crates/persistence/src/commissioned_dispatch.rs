@@ -453,7 +453,7 @@ async fn lock_live_pull_request_target(
         .map_err(Into::into)
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 struct PullRequestTargetRow {
     repository: String,
     pull_request_number: Decimal,

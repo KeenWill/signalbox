@@ -14,6 +14,7 @@ test-support = ["signalbox-session-ownership/test-support"]
 workspace = true
 
 [dependencies]
+sqlx-macros = { version = "0.9.0", default-features = false, features = ["derive"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23.42", default-features = false, features = [
     "ring",

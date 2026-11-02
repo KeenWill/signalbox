@@ -11,7 +11,7 @@ pub mod postgres;
 use signalbox_domain::{
     CommitSha, DispatchingModule, DurableCommandId, ModelCallId, SessionId, TurnId,
 };
-use sqlx::{FromRow, PgPool, types::Uuid};
+use sqlx::{PgPool, types::Uuid};
 
 #[derive(signalbox_derive::Accessors)]
 /// Durable fleet state observed by the process-runtime soak harness.
@@ -34,14 +34,14 @@ pub struct FleetSoakCensus {
     ambiguous_model_calls: i64,
 }
 
-#[derive(FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct FleetLifecycleCensusRow {
     active_turns: i64,
     terminal_turns: i64,
     awaiting_model_call_recovery_turns: i64,
 }
 
-#[derive(FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct FleetModelCallCensusRow {
     terminal_model_calls: i64,
     ambiguous_model_calls: i64,

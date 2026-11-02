@@ -701,7 +701,7 @@ async fn tool_continuation_order_guard_is_available(
     Ok(available)
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 struct StoredReclassifiedSteeringFacts {
     disposition_kind: String,
     origin_turn_id: Option<Uuid>,
@@ -3029,7 +3029,7 @@ async fn interrupted_continuation_call_reloads_and_activates_successor()
         interrupt_outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct CancelledContinuationShape {
         turn_disposition: String,
         terminal_model_call_id: Option<Uuid>,
@@ -3310,7 +3310,7 @@ async fn refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Err
         matches!(refused_outcome, ModelCallTerminalOutcome::Refused(_)),
         "the provider refusal terminalizes the continuation call's turn"
     );
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct RefusedContinuationShape {
         turn_disposition: String,
         terminal_model_call_id: Option<Uuid>,
@@ -4109,7 +4109,7 @@ async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Err
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
 
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct DurableToolReconciliationFacts {
         terminal_disposition_kind: String,
         terminal_model_call_id: Option<Uuid>,
@@ -7704,7 +7704,7 @@ async fn startup_closes_a_prepared_tool_before_unattempted_siblings() -> Result<
     assert!(
         matches!(outcome, StartupScanSessionOutcome::RecoveredToolAttempt(ended) if matches!(*ended, ToolAttemptCrashOutcome::KnownFailed(_)))
     );
-    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, Eq, sqlx_macros::FromRow)]
     struct AttemptEnd {
         state_kind: String,
         error_kind: String,
@@ -7734,7 +7734,7 @@ async fn startup_closes_a_prepared_tool_before_unattempted_siblings() -> Result<
     .fetch_one(&pool)
     .await?;
     assert_eq!(closed_request, requests[1].into_uuid());
-    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, Eq, sqlx_macros::FromRow)]
     struct TurnEnd {
         state_kind: String,
         terminal_cause_kind: String,

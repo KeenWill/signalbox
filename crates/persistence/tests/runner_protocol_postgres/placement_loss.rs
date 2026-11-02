@@ -114,7 +114,7 @@ async fn placement_loss_retires_prepared_attempt_before_startup_classification()
         Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
     );
     assert!(batch.approval(fixture.request).is_none());
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct RetiredAttempt {
         state_kind: String,
         terminal_disposition_kind: String,

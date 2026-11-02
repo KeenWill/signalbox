@@ -1655,7 +1655,7 @@ async fn terminal_client_installs_a_forward_only_model_defaults_epoch() -> Resul
     assert!(recovery.contains("defaults_version=1\n"));
     assert!(recovery.contains("dangerous_tool_auto_approval=disabled\n"));
 
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    #[derive(Debug, PartialEq, sqlx_macros::FromRow)]
     struct CurrentDefaultsFacts {
         current_version: i64,
         direct_model_selection_id: Uuid,

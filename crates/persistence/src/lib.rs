@@ -92,7 +92,7 @@ use sqlx::{
 use url::Url;
 
 /// The reviewed, forward-only migration set embedded in this crate.
-pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+pub static MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations");
 
 /// Applies all pending embedded migrations to `pool`.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {

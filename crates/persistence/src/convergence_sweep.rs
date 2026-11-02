@@ -177,14 +177,14 @@ impl ConvergenceSweepRetryPolicy {
     }
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 struct FailureTransitionRow {
     consecutive_failures: i16,
     parking_kind: String,
     parked_session_id: Option<Uuid>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 struct TargetStateRow {
     state_kind: String,
     failure_kind: Option<String>,

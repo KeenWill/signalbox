@@ -50,7 +50,7 @@ pub struct IngestBaseline {
     pub frontier: RepoWatchEventIdentityFrontierV1,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct IngestRepositoryRow {
     default_branch: String,
     default_head_sha: String,
@@ -58,7 +58,7 @@ struct IngestRepositoryRow {
     comparison_baseline: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct IngestFrontierRow {
     stream_identity: Vec<u8>,
     sequence: Decimal,

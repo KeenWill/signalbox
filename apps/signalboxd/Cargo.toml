@@ -18,6 +18,7 @@ test-support = [
 ]
 
 [dependencies]
+sqlx-macros = { version = "0.9.0", default-features = false, features = ["derive"] }
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 signalbox-file-media-adapter-pdf = { path = "../../crates/file-media-adapter-pdf" }
 signalbox-file-media-adapter-svg = { path = "../../crates/file-media-adapter-svg" }

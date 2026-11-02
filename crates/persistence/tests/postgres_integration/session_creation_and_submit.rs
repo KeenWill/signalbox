@@ -3065,7 +3065,7 @@ fn multipart_input_choices() -> PerInputConfigurationChoices {
     )
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct MultipartProjectionFacts {
     command_projection: Value,
     accepted_projection: Value,
@@ -4308,7 +4308,7 @@ async fn queued_frontier_rejection_rolls_back_provisional_effects() -> Result<()
             Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
         )
         .await?;
-    #[derive(sqlx::FromRow)]
+    #[derive(sqlx_macros::FromRow)]
     struct QueuedFrontierEffectCounts {
         accepted_inputs: i64,
         queued_origins: i64,
@@ -4638,7 +4638,7 @@ async fn steering_frontier_rejection_rolls_back_provisional_effects() -> Result<
             None,
         )
         .await?;
-    #[derive(sqlx::FromRow)]
+    #[derive(sqlx_macros::FromRow)]
     struct SteeringFrontierEffectCounts {
         accepted_inputs: i64,
         queued_successor_origins: i64,

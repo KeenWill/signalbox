@@ -23,7 +23,7 @@ pub(crate) struct RetryAdmission {
     pub(crate) source: MatchSource,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct Candidate {
     dispatch_ref: Uuid,
     event_id: Uuid,
@@ -33,7 +33,7 @@ struct Candidate {
     released_at: OffsetDateTime,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct CooldownReview {
     event_id: Uuid,
     event: Vec<u8>,

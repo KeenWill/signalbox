@@ -17,7 +17,7 @@ pub(crate) enum PlanRepositoryErrorKind {
     UntrustedProvenance,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx_macros::FromRow)]
 pub(crate) struct PlanStorageSnapshot {
     pub(crate) event_count: i64,
     pub(crate) head_ordinal: Decimal,

@@ -980,7 +980,7 @@ async fn delegation_request_execution_state(
     })
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredDelegationRequestExecutionState {
     denied: bool,
     closed: bool,

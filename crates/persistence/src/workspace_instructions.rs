@@ -42,7 +42,7 @@ pub struct WorkspaceInstructionPlacementObservation {
     runner_owned: bool,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct WorkspaceInstructionPlacementRow {
     event_ordinal: Option<Decimal>,
     state_kind: Option<String>,

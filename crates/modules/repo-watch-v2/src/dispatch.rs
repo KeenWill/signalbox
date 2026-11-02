@@ -390,7 +390,7 @@ impl RepoWatchStore {
         codec: &mut Codec,
         source: &LifecycleEventSource,
     ) -> Result<(), StoreError> {
-        #[derive(sqlx::FromRow)]
+        #[derive(sqlx_macros::FromRow)]
         struct Retirement {
             command_id: Uuid,
             created_session_id: Uuid,

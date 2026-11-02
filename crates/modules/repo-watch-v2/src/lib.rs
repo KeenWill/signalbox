@@ -780,7 +780,7 @@ pub struct RepoWatchStore {
     observation_invocation: Option<std::sync::Arc<observation_workflow::ObservationInvocation>>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct WebhookReplayRecord {
     equal: bool,
     pending: bool,
@@ -1611,7 +1611,7 @@ impl RepoWatchStore {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx_macros::FromRow)]
 struct StoredPullRequestProjection {
     pull_request_number: Decimal,
     lifecycle: String,
