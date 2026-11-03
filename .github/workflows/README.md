@@ -33,6 +33,11 @@ integration runner CPU limit. The daemon partition has a 30-minute job deadline
 to accommodate cold compilation; other PostgreSQL partitions retain 15 minutes.
 The Bazel resource estimates do not enforce an operating-system memory ceiling.
 
+`cache-benchmark.yml` uses `signalbox-builds` for same-repository human PRs
+and dispatches. Fork, Dependabot and Renovate PRs are skipped: the benchmark
+requires cluster endpoints that GitHub-hosted runners cannot reach. Its executor
+choice controls Bazel action execution separately from the workflow runner.
+
 ## The routing rule
 
 Self-hosted-eligible Linux jobs — merge-gating or report-only — use one

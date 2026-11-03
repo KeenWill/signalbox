@@ -36,8 +36,8 @@ rust_unit_test(
     crate = ":signalbox_tools_exec",
     data = [
         "@rules_rust//rust/toolchain:current_cargo_files",
-        "@rules_rust//rust/toolchain:current_rustc_files",
         "@rules_rust//rust/toolchain:current_rust_stdlib_files",
+        "@rules_rust//rust/toolchain:current_rustc_files",
     ],
     env = {
         "SIGNALBOX_TEST_CARGO": "$(rootpath @rules_rust//rust/toolchain:current_cargo_files)",
@@ -89,6 +89,7 @@ rust_integration_test(
     tags = [
         "external",
         "manual",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = [
@@ -118,6 +119,7 @@ rust_integration_test(
     },
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
     deps = [

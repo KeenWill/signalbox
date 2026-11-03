@@ -30,7 +30,11 @@ rust_binary(
 rust_unit_test(
     name = "unit_tests",
     # Forking fixture children can retain another test's root lock until exec.
-    args = ["--test-threads=1", "--skip", "ambient::tests"],
+    args = [
+        "--test-threads=1",
+        "--skip",
+        "ambient::tests",
+    ],
     crate = ":signalbox_runner",
 )
 
@@ -56,7 +60,12 @@ rust_integration_test(
     rustc_env = {
         "CARGO_BIN_EXE_signalbox-runner": "$(rootpath :signalbox-runner)",
     },
-    tags = ["external", "manual", "no-sandbox"],
+    tags = [
+        "external",
+        "manual",
+        "no-remote-exec",
+        "no-sandbox",
+    ],
     deps = [
         "//crates/runner-wire:signalbox_runner_wire",
         "//crates/test-bin:signalbox_test_bin",

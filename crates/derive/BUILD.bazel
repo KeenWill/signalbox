@@ -66,6 +66,7 @@ rust_integration_test(
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/derive"},
     tags = [
         "external",
+        "no-remote-exec",
         "no-sandbox",
     ],
 )

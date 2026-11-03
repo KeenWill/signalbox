@@ -71,7 +71,7 @@ def rust_postgres_test(name, compile_data = [], tags = [], **kwargs):
     rust_integration_test(
         name = name,
         compile_data = ["//:tooling/postgres_test_image.rs"] + compile_data,
-        tags = ["manual", "requires-network", "external"] + tags,
+        tags = ["manual", "requires-network", "external", "no-remote-exec"] + tags,
         **kwargs
     )
 
@@ -232,7 +232,7 @@ def rust_coverage_suite(name, binaries, skip = [], json_preserve_order = True):
             args = ["--ignored", "--test-threads=4"] + [arg for item in skip for arg in ["--skip", item]],
             json_preserve_order = json_preserve_order,
             env = {"RUST_MIN_STACK": "8388608", "SIGNALBOX_TEST_SHARED_POSTGRES": "1"},
-            tags = ["manual", "external", "no-sandbox", "requires-network"],
+            tags = ["manual", "external", "no-sandbox", "requires-network", "no-remote-exec"],
             size = "enormous",
         )
         selected.append(":" + target)

@@ -50,7 +50,10 @@ rust_unit_test(
     data = ["tests/support/version_probe.sh"],
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/model-runtime-codex-cli"},
     # These tests execute host shell or process utilities.
-    tags = ["external"],
+    tags = [
+        "external",
+        "no-remote-exec",
+    ],
     deps = ["//crates/test-bin:signalbox_test_bin"],
 )
 
