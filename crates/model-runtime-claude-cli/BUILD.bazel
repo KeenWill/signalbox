@@ -54,8 +54,6 @@ rust_binary(
 rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_model_runtime_claude_cli",
-    # These tests execute host shell or process utilities.
-    tags = ["external"],
     deps = ["//crates/test-bin:signalbox_test_bin"],
 )
 
