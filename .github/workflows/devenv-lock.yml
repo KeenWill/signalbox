@@ -63,7 +63,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # This job holds the write token but never installs or executes Nix/devenv.
+  # This job holds the write token but does not evaluate the proposed Nix environment.
   propose:
     name: Open a draft proposal
     needs: relock
