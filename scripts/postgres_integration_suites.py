@@ -24,19 +24,6 @@ MANIFEST = Path(".github/postgres-integration-suites.toml")
 WORKFLOW = Path(".github/workflows/bazel.yml")
 RUST_WORKFLOW = Path(".github/workflows/rust.yml")
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
-# Untrusted (fork or Dependabot) pull requests route to a hosted runner; the
-# self-hosted arm of that expression is the target this manifest pins.
-DYNAMIC_RUNS_ON = re.compile(
-    r"^\$\{\{ github\.event_name == 'pull_request' && "
-    r"\(github\.event\.pull_request\.head\.repo\.full_name != github\.repository "
-    r"\|\| contains\(fromJSON\('\[\"dependabot\[bot\]\",\"renovate\[bot\]\"\]'\), github\.event\.pull_request\.user\.login\)\) && 'ubuntu-latest' \|\| "
-    r"'(?P<pool>[^']+)' \}\}$"
-)
-
-
-def _resolved_runs_on(value: str) -> str:
-    match = DYNAMIC_RUNS_ON.match(value)
-    return match.group("pool") if match else value
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
 ATTACHED_SHORT_OPTIONS = ("-p", "-F", "-j")
 CARGO_GLOBAL_VALUE_OPTIONS = ("--color", "--config", "--explain", "-Z", "-C")
@@ -265,8 +252,8 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         failures.append(f"{WORKFLOW} bazel-postgres does not use the manifest matrix")
     if run.get("continue-on-error", False) is not False:
         failures.append(f"{WORKFLOW} bazel-postgres must be blocking")
-    if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-integration-tests":
-        failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-integration-tests")
+    if run.get("runs-on", "") != "cluster-signalbox":
+        failures.append(f"{WORKFLOW} bazel-postgres must run on cluster-signalbox")
     gate = "github.event_name == 'workflow_dispatch' || inputs.postgres"
     for name in ("postgres-matrix", "bazel-postgres"):
         if jobs.get(name, {}).get("if") != gate:

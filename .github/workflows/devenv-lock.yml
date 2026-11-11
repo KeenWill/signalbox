@@ -13,8 +13,9 @@ env:
 jobs:
   # Unpinned upstream Nix runs only here, without a repository write token.
   relock:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Re-lock and build
-    runs-on: ubuntu-latest
+    runs-on: cluster-signalbox
     timeout-minutes: 60
     permissions:
       contents: read
@@ -66,8 +67,8 @@ jobs:
   propose:
     name: Open a draft proposal
     needs: relock
-    if: needs.relock.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (needs.relock.outputs.changed == 'true') }}
+    runs-on: cluster-signalbox
     timeout-minutes: 10
     permissions:
       contents: write
