@@ -74,6 +74,9 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Install GitHub CLI on the cluster runner
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: nix profile install nixpkgs#gh
       - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
