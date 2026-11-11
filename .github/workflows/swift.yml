@@ -40,8 +40,9 @@ permissions:
 
 jobs:
   swift-change-scope:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Swift native change scope
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-orchestration' }}
+    runs-on: cluster-signalbox
     outputs:
       native: ${{ steps.paths.outputs.native }}
     steps:
@@ -110,7 +111,7 @@ jobs:
   # one ambiguous check that branch protection cannot require independently.
   swift-validate:
     needs: swift-change-scope
-    if: needs.swift-change-scope.outputs.native == 'true'
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (needs.swift-change-scope.outputs.native == 'true') }}
     # macos-latest is the macOS 26 arm64 image. The project was created with
     # Xcode 26.4.1 and targets iOS 26.4, so it needs an Xcode 26.4+ toolchain
     # with a matching simulator runtime; the image ships Xcode 26.6 with the
@@ -365,6 +366,7 @@ jobs:
   # not wait behind the daemon build. The name is unique across workflows for
   # the same branch-protection reason documented on swift-validate above.
   swift-real-daemon:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Swift real-daemon integration
     runs-on: macos-latest
     timeout-minutes: 45
