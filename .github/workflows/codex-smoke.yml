@@ -295,7 +295,8 @@ jobs:
   required:
     name: Codex smoke compatibility
     needs: [gate, smoke]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (always()) }}
+    # Fork events fail at runner admission before any steps; keep a binding result.
+    if: ${{ always() }}
     runs-on: cluster-signalbox
     timeout-minutes: 5
     env:

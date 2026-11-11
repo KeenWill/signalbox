@@ -337,6 +337,7 @@ jobs:
             exit 1
           }
   validate-checks:
+    # Forks fail at runner admission before checkout, preserving a binding gate.
     if: ${{ always() }}
     needs:
       [contract-checks, checker-and-format-tests]
@@ -354,6 +355,7 @@ jobs:
   # Preserve the required check across the scoped Rust and Bazel jobs.
   validate:
     name: validate
+    # Forks fail at runner admission before checkout, preserving a binding gate.
     if: ${{ always() }}
     needs: [rust-change-scope, validate-checks, bazel]
     runs-on: cluster-signalbox

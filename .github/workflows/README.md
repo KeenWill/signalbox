@@ -15,7 +15,9 @@ VM for cgroup delegation and deterministic fixture installation. Neither pool
 mounts host data or a Kubernetes service-account token. The pools exclude
 nodes running databases and never preempt services.
 
-Fork pull requests are skipped. Repository settings require approval for all
+Fork build jobs are skipped. Final validation and provider-required jobs retain
+`always()` and fail at runner admission for forks, so an unvalidated contribution
+cannot receive a successful skipped merge gate. Repository settings require approval for all
 outside collaborators, and a read-only runner hook rejects fork events before
 workflow steps execute, including steps with `if: always()`. Same-repository
 pull requests, pushes and the workflows' trusted scheduled/manual events use
