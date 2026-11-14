@@ -13,8 +13,9 @@ env:
 jobs:
   # Unpinned upstream Nix runs only here, without a repository write token.
   relock:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Re-lock and build
-    runs-on: ubuntu-latest
+    runs-on: cluster-signalbox
     timeout-minutes: 60
     permissions:
       contents: read
@@ -62,17 +63,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # This job holds the write token but never installs or executes Nix/devenv.
+  # This job holds the write token but does not evaluate the proposed Nix environment.
   propose:
     name: Open a draft proposal
     needs: relock
-    if: needs.relock.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (needs.relock.outputs.changed == 'true') }}
+    runs-on: cluster-signalbox
     timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
     steps:
+      - name: Install GitHub CLI on the cluster runner
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: nix profile install nixpkgs#gh
       - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -146,8 +146,9 @@ env:
 
 jobs:
   eligibility:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Tool eval eligibility
-    runs-on: signalbox-orchestration
+    runs-on: cluster-signalbox
     timeout-minutes: 5
     outputs:
       allowed: ${{ steps.eligibility.outputs.allowed }}
@@ -178,7 +179,7 @@ jobs:
   eval:
     name: ${{ matrix.family }} tool eval (report only)
     needs: eligibility
-    if: ${{ needs.eligibility.outputs.allowed == 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login))) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (needs.eligibility.outputs.allowed == 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)))) }}
     permissions:
       contents: read
     environment: openai-smoke
@@ -187,13 +188,13 @@ jobs:
       matrix:
         include:
           - family: git
-            runner: signalbox-smokes
+            runner: cluster-signalbox
           - family: workspace
-            runner: signalbox-smokes
+            runner: cluster-signalbox
           - family: web
-            runner: signalbox-smokes
+            runner: cluster-signalbox
           - family: exec
-            runner: ubuntu-latest
+            runner: cluster-signalbox-host
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -216,9 +217,6 @@ jobs:
             /usr/local/lib/signalbox-eval-bin/cargo
           /usr/local/lib/signalbox-eval-bin/cargo -vV \
             | grep --fixed-strings 'host: x86_64-unknown-linux-gnu'
-      - name: Enable unprivileged user namespaces for the exec family
-        if: ${{ matrix.family == 'exec' }}
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

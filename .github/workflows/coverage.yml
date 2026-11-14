@@ -55,9 +55,10 @@ permissions:
 
 jobs:
   rust-coverage:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust coverage (report only)
     continue-on-error: true
-    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-coverage' }}
+    runs-on: cluster-signalbox
     timeout-minutes: 90
     steps:
       - name: Check out repository
@@ -78,9 +79,6 @@ jobs:
       - name: Install Bubblewrap
         if: ${{ runner.environment == 'github-hosted' }}
         run: sudo apt-get install --yes bubblewrap
-      - name: Enable unprivileged user namespaces for Bubblewrap
-        if: ${{ runner.environment == 'github-hosted' }}
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Measure the workspace suite
         id: workspace
         continue-on-error: true

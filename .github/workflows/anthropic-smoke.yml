@@ -75,8 +75,9 @@ env:
 
 jobs:
   gate:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Anthropic smoke eligibility
-    runs-on: signalbox-orchestration
+    runs-on: cluster-signalbox
     timeout-minutes: 5
     permissions:
       contents: read
@@ -171,7 +172,7 @@ jobs:
   smoke:
     name: Anthropic live compatibility
     needs: gate
-    if: ${{ needs.gate.outputs.smoke_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (needs.gate.outputs.smoke_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
     permissions:
       contents: read
     # Repository → Settings → Environments → anthropic-smoke holds
@@ -189,7 +190,7 @@ jobs:
     # ref; main pushes never cancel. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
-    runs-on: signalbox-builds
+    runs-on: cluster-signalbox
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -244,8 +245,9 @@ jobs:
   required:
     name: Anthropic smoke compatibility
     needs: [gate, smoke]
+    # Fork events fail at runner admission before any steps; keep a binding result.
     if: ${{ always() }}
-    runs-on: signalbox-orchestration
+    runs-on: cluster-signalbox
     timeout-minutes: 5
     env:
       EVENT_NAME: ${{ github.event_name }}

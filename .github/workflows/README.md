@@ -1,103 +1,32 @@
 # CI runner contract
 
-Which runner every workflow job uses, and why. Change a job's `runs-on` and this
-file in the same pull request.
+Linux jobs use ephemeral, repository-scoped Kata runners. Change a job's
+`runs-on` and this file in the same pull request.
 
-## Pools
+| Label | Jobs |
+| --- | --- |
+| `cluster-signalbox` | Linux builds, tests, orchestration, reports and Docker suites |
+| `cluster-signalbox-host` | Host integration and the exec tool-eval family |
+| `macos-latest` | Swift validation and real-daemon integration |
 
-| Label                         | Use it for                                                                                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `signalbox-orchestration`     | Change scope, eligibility, and result-only aggregation; no compilation                                                                                                         |
-| `signalbox-builds`            | Required Rust builds/tests, dependency queries for PostgreSQL matrix generation, documentation, formatting, web checks, supply-chain checks, and provider compatibility smokes |
-| `signalbox-integration-tests` | Required PostgreSQL suites needing Docker/testcontainers                                                                                                                       |
-| `signalbox-reports`           | Non-Docker API digest, instruction-count, and web-smoke reports                                                                                                                |
-| `signalbox-coverage`          | Instrumented Rust coverage                                                                                                                                                     |
-| `signalbox-smokes`            | Docker-dependent smoke checks and report-only tool-eval families                                                                                                               |
-| `ubuntu-latest`               | GitHub-hosted fallbacks and host-dependent jobs below                                                                                                                          |
-| `macos-latest`                | macOS jobs                                                                                                                                                                     |
+Both cluster pools provide Nix, Rustup, Node, Python, Docker and browser
+libraries. The host pool additionally provides sudo inside its disposable Kata
+VM for cgroup delegation and deterministic fixture installation. Neither pool
+mounts host data or a Kubernetes service-account token. The pools exclude
+nodes running databases and never preempt services.
 
-The self-hosted ARC scale sets are managed outside this repository. Only
-`signalbox-integration-tests`, `signalbox-coverage`, and `signalbox-smokes`
-provide Docker.
+Fork build jobs are skipped. Final validation and provider-required jobs retain
+`always()` and fail at runner admission for forks, so an unvalidated contribution
+cannot receive a successful skipped merge gate. Repository settings require approval for all
+outside collaborators, and a read-only runner hook rejects fork events before
+workflow steps execute, including steps with `if: always()`. Same-repository
+pull requests, pushes and the workflows' trusted scheduled/manual events use
+the cluster pools. Existing provider-smoke and tool-eval eligibility checks
+continue to apply.
 
-`rust.yml` calls `bazel.yml` for ordinary Rust tests and manifest PostgreSQL
-suites on `signalbox-integration-tests`. The ordinary suite includes a sparse
-blob session test requiring PostgreSQL. Its `validate-checks` aggregation uses
-orchestration; final `validate` stays on builds because it also executes two
-Cargo contract checks. The web job uses builds with declared browser runtimes
-and fonts. Report-tier jobs and Docker live smokes limit Cargo compilation to
-two jobs; the API digest also limits Bazel to two jobs. Docker sidecar CPU
-allowances are separate from runner compilation budgets. PostgreSQL partitions
-limit Bazel to four concurrent actions and four local CPU units, matching the
-integration runner CPU limit. The daemon partition has a 30-minute job deadline
-to accommodate cold compilation; other PostgreSQL partitions retain 15 minutes.
-The Bazel resource estimates do not enforce an operating-system memory ceiling.
-
-## The routing rule
-
-Self-hosted-eligible Linux jobs — merge-gating or report-only — use one
-canonical expression, unless pinned in the sections below:
-
-```yaml
-runs-on: ${{ github.event_name == 'pull_request'
-  && (github.event.pull_request.head.repo.full_name != github.repository
-      || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'),
-                  github.event.pull_request.user.login))
-  && 'ubuntu-latest' || '<pool>' }}
-```
-
-- In jobs carrying this expression, same-repo pull requests from people take the
-  self-hosted arm, as does every non-`pull_request` event the workflow accepts
-  (pushes to `main`, schedules, dispatches).
-- Fork pull requests, and pull requests authored by exactly the two matched bot
-  accounts (`dependabot[bot]`, `renovate[bot]`), take the hosted arm. That is
-  the whole enforced condition: no other bot identity is excluded, nothing
-  inspects who pushed a commit, and the pinned jobs in the next section enforce
-  weaker gates or none.
-- The bot check keys on the pull request author
-  (`github.event.pull_request.user.login`), not `github.actor`: a human
-  reopening or re-running a bot pull request would otherwise mask the bot and
-  route its code to self-hosted hardware.
-
-`scripts/postgres_integration_suites.py` generates the PostgreSQL matrix and
-executes each partition with manifest-derived Bazel arguments. Its workflow
-checks read the matrix binding, Docker pool, and `validate` dependency as YAML
-fields; they do not interpret shell commands.
-
-## Jobs pinned to a self-hosted pool
-
-The smoke and eval workflows hard-code their pool instead of carrying the
-expression, each with its own gate. The provider smokes merge-gate the pull
-requests they apply to — each `required` aggregate is a binding check — while
-the tool-eval and tool-smoke jobs are report-only:
-
-| Jobs                                                 | Pool                      | Gate on proposed code                                                                                      |
-| ---------------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Provider smoke workflows — `gate`, `required`        | `signalbox-orchestration` | `gate` checks out the head for path inspection without executing it; `required` reports the binding result |
-| Provider smoke workflows — `smoke`                   | `signalbox-builds`        | Skips fork pull requests using the same-repository check only; same-repository bot pull requests still run |
-| `tool-evals.yml` — `eligibility`                     | `signalbox-orchestration` | Excludes fork pull requests and Dependabot/Renovate authors                                                |
-| `tool-evals.yml` — git/workspace/web `eval` families | `signalbox-smokes`        | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
-| `tool-smokes.yml` — `live-smokes`                    | `signalbox-smokes`        | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
-| `tool-smokes.yml` — `web-smoke`                      | `signalbox-reports`       | Disabled; retains the same-repository and Dependabot/Renovate author gate                                  |
-
-## Jobs pinned to GitHub-hosted runners
-
-The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
-`gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
-facilities stay hosted for now, although this may change over time.
-
-| Job                                               | Why                                                                     |
-| ------------------------------------------------- | ----------------------------------------------------------------------- |
-| `bazel.yml` `bazel-host-integration`              | cgroup delegation, Bubblewrap, SSH push trust, and ambient runner tests |
-| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                               |
-| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures           |
-| `devenv-lock.yml` `relock`                        | Nix                                                                     |
-| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)                   |
-| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                                   |
-
-The `bazel-postgres` job uses the canonical routing expression with
-`signalbox-integration-tests`, or `ubuntu-latest` for fork and named bot pull
-requests.
+`scripts/postgres_integration_suites.py` checks the Docker-capable pool,
+PostgreSQL matrix binding and final validation dependency. Native macOS jobs
+still require macOS capacity; the Linux cluster cannot execute them.
 
 ## Comparison checkouts
 
