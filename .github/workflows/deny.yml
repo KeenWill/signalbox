@@ -34,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-deny
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-deny@0.20.2
       - name: Check advisories, bans, licenses, and sources
