@@ -1,0 +1,85 @@
+name: Cache benchmark
+run-name: Cache benchmark ${{ inputs.label || github.head_ref }} (${{ inputs.mode || 'PR config' }})
+
+# PR runs read .github/cache-benchmark.json; dispatches use the inputs below.
+# In either path, a blank cache_endpoint uses the repository BAZEL_REMOTE_CACHE.
+# Each repetition uses fresh local Bazel state; warm means remote
+# reuse, and cold disables remote result acceptance without deleting shared data.
+# Defaults match rust.yml's reusable bazel.yml ordinary build/test invocation.
+# That suite includes Docker-dependent tests: signalbox-builds cannot run those
+# without Docker. Preserve failures and evidence instead of filtering the suite.
+# Download the artifact and enrich it from a host with Prometheus access:
+# gh api repos/OWNER/REPO/actions/jobs/JOB_ID > ARTIFACT/run-1/job.json
+# python3 scripts/cache_benchmark_summary.py ARTIFACT/run-1 \
+#   --prometheus http://PROMETHEUS --cache-namespace bazel-cache
+# Select cache CPU/placement with --cache-pods when the namespace is shared.
+# For Buildbarn, --cache-grpc-service selects the frontend's gRPC status counters;
+# these are RPC outcomes, not bazel-remote's per-blob contains/hit counters.
+# Include all tiers in --cache-pods; network bytes sum their distinct nodes.
+# summary.tsv contains a header and one row; summary.json includes NA reasons.
+# Bazel retries overwrite per-invocation logs: retain final-attempt detail and
+# mark whole-run action, payload, latency and histogram measurements unavailable.
+# job.json supplies the full job wall time, including setup and artifact upload.
+# Server counters include other clients. Counter deltas use actual in-window
+# scrapes, without extrapolation; sample times are retained in prometheus.json.
+# CPU/GiB uses server-window CPU / this invocation's downloaded payload GiB;
+# it is a contextual ratio, not CPU attributed to this client under shared load.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cache-benchmark.yml'
+      - '.github/cache-benchmark.json'
+  workflow_dispatch:
+    inputs:
+      cache_endpoint:
+        description: Cache endpoint (blank uses repository BAZEL_REMOTE_CACHE)
+        type: string
+        default: ''
+      mode:
+        description: Remote result acceptance
+        type: choice
+        options: [warm, cold]
+        default: warm
+      targets:
+        description: Bazel target patterns
+        type: string
+        default: '//:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation'
+      runs:
+        description: Repetitions with fresh local Bazel state
+        type: number
+        default: 1
+      label:
+        description: Evidence label
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: signalbox-builds
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/setup-bazel
+      - name: Fetch dependencies for the compile-fail fixture compiler
+        run: cargo fetch --locked
+      - name: Measure the CI workload
+        env:
+          CACHE_ENDPOINT: ${{ inputs.cache_endpoint || vars.BAZEL_REMOTE_CACHE }}
+          BENCHMARK_MODE: ${{ inputs.mode }}
+          BENCHMARK_TARGETS: ${{ inputs.targets }}
+          BENCHMARK_RUNS: ${{ inputs.runs }}
+          BENCHMARK_LABEL: ${{ inputs.label }}
+        run: python3 scripts/cache_benchmark_run.py "$RUNNER_TEMP/cache-benchmark"
+      - name: Retain benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cache-benchmark
+          if-no-files-found: error
